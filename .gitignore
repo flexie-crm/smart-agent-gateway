@@ -88,11 +88,6 @@ orchestrator/sag-payload
 # whoever compiled it, does not. It was committed once.
 orchestrator/probe
 
-# ══════════════════════════════════════════════════════════════════════════
-# The publish gate strips everything between the header above and THIS line.
-# It is a marker and not the last entry on purpose: the strip used to end at
-# a named rule, so a rule added below it shipped, silently, which is how the
-# publish script itself became public. Add internal rules ABOVE this line.
 
 # ══════════════════════════════════════════════════════════════════════════
 # Keys, certificates and credentials. None of these ever gets committed.
