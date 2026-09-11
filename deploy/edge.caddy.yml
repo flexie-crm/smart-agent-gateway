@@ -1,0 +1,58 @@
+# The two front doors, on a box where nothing else owns 80 and 443.
+#
+#   docker compose -f sag.yml -f edge.caddy.yml up -d --build
+#
+# Caddy, for one reason: it gets and renews the certificates for both names
+# without anybody running a command or remembering a date.
+#
+# If the box already runs a proxy, use edge.traefik.yml instead. Two things
+# cannot both hold 80 and 443, and the one already there is the one with the
+# certificates on it.
+
+services:
+  # Ordering, which is a compose feature and lives here because of it. Swarm
+  # honours none of this and does not need to: everything there retries until
+  # what it needs is answering. Under compose the waits are real and worth
+  # having, because a migration that starts before the database is a container
+  # that exits and a stack that looks up but has no schema.
+  migrate:
+    depends_on:
+      mariadb:
+        condition: service_healthy
+
+  orchestrator:
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      nats:
+        condition: service_started
+      redis:
+        condition: service_started
+
+  worker:
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SAG_CONSOLE_DOMAIN: "${SAG_CONSOLE_DOMAIN:?set SAG_CONSOLE_DOMAIN in .env}"
+      SAG_CHAT_DOMAIN: "${SAG_CHAT_DOMAIN:?set SAG_CHAT_DOMAIN in .env}"
+      SAG_TLS_EMAIL: "${SAG_TLS_EMAIL:?set SAG_TLS_EMAIL in .env}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [sag]
+    depends_on:
+      - orchestrator
+      - chat
+
+volumes:
+  caddy-data:
+  caddy-config:

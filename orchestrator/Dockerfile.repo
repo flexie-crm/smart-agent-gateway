@@ -1,0 +1,31 @@
+# The public download host.
+#
+# A separate, minimal image rather than a command on the orchestrator's: this one
+# faces the open internet anonymously, and the orchestrator image carries the
+# console, the migrations and every driver the product has. Nothing is gained by
+# putting all of that on a host whose whole job is to hand out a tarball.
+#
+# The build context is the REPOSITORY ROOT, like the orchestrator's, because the
+# module lives one directory down.
+
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+COPY orchestrator/go.mod orchestrator/go.sum ./
+RUN go mod download
+COPY orchestrator/ ./
+# Passed in by deploy/build.sh, which has the repository this does not.
+ARG SAG_VERSION=unknown
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=$SAG_VERSION" -o /out/sag-repo ./cmd/sag-repo
+
+FROM alpine:3.20
+RUN adduser -D -u 10001 sag
+COPY --from=build /out/sag-repo /usr/local/bin/sag-repo
+# The binaries are a volume the host provides, never baked in: they are hundreds
+# of megabytes, they change on their own schedule, and an image rebuild is the
+# wrong unit of work for publishing one.
+RUN mkdir -p /srv/dist && chown sag:sag /srv/dist
+USER sag
+ENV SAG_REPO_DIST_DIR=/srv/dist \
+    SAG_REPO_ADDR=:8080
+EXPOSE 8080
+ENTRYPOINT ["sag-repo"]

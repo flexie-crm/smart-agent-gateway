@@ -1,0 +1,17 @@
+# What this application's OWN screens may ask it to do.
+#
+# Separate from what a served page may ask (machine.toml), and it has to be: one
+# is a page we wrote and ship, the other arrives from a server over the network.
+# Granting them together would mean a server could ask to be forgotten and
+# replaced, which is not a server's business.
+#
+# Its absence was a real failure and not an obvious one. Tauri gives a page no
+# commands at all without a capability, so the screen that asks to leave for the
+# saved server was refused, fell back to offering the form, and the application
+# opened on "Connect to your organisation's server" for somebody who had
+# connected weeks ago.
+
+[[permission]]
+identifier = "allow-setup"
+description = "Save a server address after it has been reached, forget it and forget it."
+commands.allow = ["connect", "forget_server"]

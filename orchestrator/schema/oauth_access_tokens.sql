@@ -1,0 +1,23 @@
+CREATE TABLE `oauth_access_tokens` (
+  `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  `token_hash` char(64) NOT NULL,
+  `client_pk` bigint(20) unsigned NOT NULL,
+  `user_id` bigint(20) unsigned NOT NULL,
+  `workspace_id` bigint(20) unsigned NOT NULL,
+  `scopes` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL CHECK (json_valid(`scopes`)),
+  `audience` varchar(128) DEFAULT NULL,
+  `family_id` char(32) DEFAULT NULL,
+  `expires_at` datetime(3) NOT NULL,
+  `revoked` tinyint(1) NOT NULL DEFAULT 0,
+  `created_at` datetime(3) NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_access_token_client` (`client_pk`),
+  UNIQUE KEY `token_hash` (`token_hash`),
+  KEY `idx_family` (`family_id`),
+  KEY `idx_expires` (`expires_at`),
+  KEY `fk_access_token_user` (`user_id`),
+  KEY `fk_access_token_workspace` (`workspace_id`),
+  CONSTRAINT `fk_access_token_client` FOREIGN KEY (`client_pk`) REFERENCES `oauth_clients` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_access_token_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_access_token_workspace` FOREIGN KEY (`workspace_id`) REFERENCES `workspaces` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

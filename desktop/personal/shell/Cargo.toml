@@ -1,0 +1,24 @@
+[package]
+name = "sag-personal"
+version = "0.1.0"
+edition = "2021"
+description = "SAG Personal: one person, one machine, everything included"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sag-desktop = { path = "../../shared" }
+# The system folder picker the chat opens, same as the other edition.
+tauri-plugin-dialog = "2"
+# Updating in place. The person is told the new version is DOWNLOADED and asked
+# to reopen, rather than interrupted: replacing the bundle does not disturb the
+# process already running from it, so there is no reason to choose the moment
+# for somebody in the middle of a conversation.
+tauri-plugin-updater = "2"
+tauri-plugin-store = "2.4.4"
+

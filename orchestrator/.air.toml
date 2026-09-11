@@ -1,0 +1,42 @@
+# Rebuild and restart the server when its sources change.
+#
+# How it STOPS the old process matters. The server shuts down gracefully on
+# SIGTERM: it stops accepting, finishes what is in flight, and exits (KB/27).
+# Killing it instead cuts a request in half, and the one that hurts is a token
+# refresh, because the browser then retries with a token the old process had
+# already spent and reuse detection revokes the whole family (KB/08). So:
+# interrupt, and give it a moment.
+#
+# A MOMENT, not twelve seconds. air stops the old process BEFORE it builds, so
+# every second of kill_delay is a second of downtime added to the ~13s the build
+# already costs, on every save. It was 12s from when shutdown was abrupt and
+# needed the room; the graceful shutdown now lives in the server, where it can
+# tell an idle process from a busy one, and an idle one exits in milliseconds.
+
+root = "."
+tmp_dir = ".air"
+
+[build]
+  cmd = "go build -o ./.air/sag ./cmd/sag"
+  bin = "./.air/sag"
+  # `dev`, not `server`: the loop a person runs on their own machine is the one
+  # that offers a sign-in nobody has to remember a password for and says, on
+  # both pages, that this is not production. It is the same server otherwise.
+  args_bin = ["dev"]
+  include_ext = ["go"]
+  exclude_dir = [".air", "bin", "schema", "testdata"]
+  exclude_regex = ["_test\\.go"]
+  # Wait for the build before stopping the old one, so a broken build leaves the
+  # running server alone instead of taking it down and leaving nothing.
+  stop_on_error = true
+  # SIGTERM, not SIGKILL, and then wait: this is the whole point.
+  send_interrupt = true
+  kill_delay = "2s"
+  # Give a burst of saves a moment to settle rather than restarting per keystroke.
+  delay = 500
+
+[log]
+  main_only = true
+
+[misc]
+  clean_on_exit = true

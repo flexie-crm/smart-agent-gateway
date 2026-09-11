@@ -1,0 +1,10 @@
+name: flexie-sag-chat-ui
+
+services:
+  chat-ui:
+    build: .
+    ports:
+      - "3000:80"
+    # To reach the orchestrator stack started from ../orchestrator, attach
+    # both to a shared external network, or run everything from one compose
+    # project in deployment. The /v1 proxy resolves "orchestrator" lazily.

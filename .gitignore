@@ -1,0 +1,153 @@
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# --- Node / frontend ---
+node_modules/
+dist/
+dist-ssr/
+*.local
+npm-debug.log*
+yarn-error.log*
+
+# --- Rust / Tauri ---
+# `target*` and not `target/`: a scratch build directory beside the real one
+# (target-check, used to compile the node's control plane without the engine
+# while a release build holds the lock on target/) is not matched by the exact
+# name, and 4005 build artefacts went into a commit before this said so.
+target*/
+src-tauri/target/
+src-tauri/gen/
+
+# --- Go ---
+bin/
+*.exe
+*.test
+*.out
+vendor/
+
+# --- Env & secrets ---
+.env
+.env.*
+!.env.example
+# Not a secret: the console's development API base, needed for a fresh
+# checkout to reach the orchestrator at all.
+!admin-ui/.env.development
+*.pem
+*.key
+# The signing identity, which is the one secret here whose leak is somebody
+# else's problem too: a key that can sign software as us is a key that can sign
+# anything as us. `.p12` is the shape it is actually kept in, key and
+# certificate together, and it was the one not named.
+*.p12
+*.cer
+*.csr
+*.mobileprovision
+# The App Store Connect API key, which notarises a release without anybody
+# typing a password. Apple shows it once and never again, so a copy in a
+# repository is both a leak and the only copy somebody could find.
+*.p8
+
+# --- Build / temp artifacts ---
+tmp/
+*.log
+coverage/
+
+# Locally installed dev tools (version-stamped, see Makefile)
+.tools/
+
+# A development inference node's own disk: its identity, and any weights it has
+# downloaded. Gigabytes, and none of it belongs to anybody but that machine.
+inference/data/
+
+# Console
+admin-ui/node_modules/
+admin-ui/dist/
+/orchestrator/sag
+
+# Python bytecode from dev scripts
+__pycache__/
+
+# The icon and gate toolchains borrow the chat's node_modules through a link
+# rather than installing a second copy of Playwright. The link is made when it
+# is missing and must never be committed: it went in once, under the pre-split
+# path this used to name, and a Windows checkout turns a symlink into a TEXT
+# FILE holding the path, so `node` finds a file where a package should be and
+# the icons cannot be drawn at all.
+desktop/shared/icons/node_modules
+desktop/personal/e2e/node_modules
+
+# Built by `go build ./cmd/...` from inside orchestrator/, which drops the
+# binary beside the source rather than in bin/.
+orchestrator/sag-payload
+# A one-off tool built from orchestrator/internal/nodeca/probe/main.go. The
+# source belongs here; a 9 MB binary of it, carrying the absolute paths of
+# whoever compiled it, does not. It was committed once.
+orchestrator/probe
+
+# ══════════════════════════════════════════════════════════════════════════
+# The publish gate strips everything between the header above and THIS line.
+# It is a marker and not the last entry on purpose: the strip used to end at
+# a named rule, so a rule added below it shipped, silently, which is how the
+# publish script itself became public. Add internal rules ABOVE this line.
+
+# ══════════════════════════════════════════════════════════════════════════
+# Keys, certificates and credentials. None of these ever gets committed.
+# ══════════════════════════════════════════════════════════════════════════
+# Where they actually live on a build machine. Named as well as pattern-matched,
+# because a directory is easier to get right than an extension somebody invents.
+apple-signing/
+.secrets/
+secrets/
+
+# Apple: the Developer ID (signs the app), the App Store Connect key
+# (notarises it). Covered by extension above; named here so it is obvious.
+*.p12
+*.p8
+*.cer
+*.csr
+*.mobileprovision
+*.provisionprofile
+
+# Windows code signing: the certificate in every shape it is sold in.
+*.pfx
+*.spc
+*.pvk
+*.jks
+*.keystore
+
+# The update signing keys, one per edition. A leak of one lets somebody push a
+# release to that edition, which is the worst thing on this list.
+*.key.pub
+sag-updater-*.key*
+*.minisign
+minisign.pub
+
+# Generic key and certificate shapes.
+*.pem
+*.key
+*.crt
+*.der
+*.p7b
+*.asc
+*.gpg
+id_rsa*
+id_ed25519*
+
+# What a deployment generates for itself: the encryption key every stored
+# credential is sealed with, database passwords, the node join token.
+deploy/.env
+deploy/*.env
+**/.env
+**/.env.*
+!**/.env.example
+!admin-ui/.env.development
+
+# Cloud and CI credentials, if any ever land here.
+.aws/
+.azure/
+gcloud-*.json
+service-account*.json

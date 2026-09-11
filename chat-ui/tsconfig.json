@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "jsx": "react-jsx",
+    "moduleResolution": "bundler",
+    "allowJs": true,
+    "checkJs": false,
+    // Check, never emit. Without this a bare `tsc` writes a .js beside every
+    // source file, and Vite resolves .js BEFORE .tsx: from then on the dev
+    // server, the tests and the build all read a stale compiled copy instead of
+    // the file being edited. It cost an afternoon of tests that could not fail.
+    "noEmit": true,
+    "esModuleInterop": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "types": ["vite/client", "vitest/globals", "node"],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+      "@components/*": ["src/components/*"],
+      "@lib/*": ["src/lib/*"]
+    }
+  },
+  "include": ["src"],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "vite.config.*",
+    "postcss.config.*",
+    "eslint.config.*"
+  ]
+}

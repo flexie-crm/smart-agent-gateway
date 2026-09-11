@@ -1,0 +1,109 @@
+[package]
+name = "sag-inference"
+version = "0.1.0"
+edition = "2024"
+# The floor, not the version we build with: `rust-toolchain.toml` asks for
+# current stable and that is what a node is compiled by. This number is the
+# engine's own minimum, which is the real constraint on the whole build.
+rust-version = "1.94"
+description = "Flexie SAG inference node"
+publish = false
+
+[[bin]]
+name = "sag-inference"
+path = "src/main.rs"
+
+# Versions here are deliberately the engine's own (its workspace Cargo.toml), so
+# cargo unifies on ONE copy of axum, tokio, reqwest and serde rather than
+# building two. A router we merge into ours has to be the same axum, so this is
+# a correctness pin and not a tidiness one.
+[dependencies]
+async-trait = "0.1.89"
+axum = { version = "0.8.8", features = ["macros"] }
+# Serving TLS. axum's own `serve` takes a plain listener; this is the same
+# server with a rustls acceptor in front and, crucially, a certificate that can
+# be REPLACED while it runs, which is what lets a renewal land without dropping
+# a connection.
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+chrono = { version = "0.4.43", features = ["serde"] }
+clap = { version = "4.5.54", features = ["derive", "wrap_help"] }
+constant_time_eq = "0.4"
+futures = "0.3"
+# Proving we hold the join token without sending it.
+hmac = "0.12"
+# Our own key and the certificate request that asks for an identity over it. The
+# certificate itself is signed by the gateway: this side only ever asks.
+rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
+reqwest = { version = "0.13.1", default-features = false, features = [
+    "rustls",
+    "http2",
+    "charset",
+    "json",
+    "stream",
+] }
+rustls = "0.23"
+rustls-pemfile = "2"
+# The authorities the model library is checked against, carried by this binary.
+# The alternative is the machine's own trust store, which is what reqwest uses by
+# default, and that is wrong here twice over: a GPU box in a rack often has no CA
+# certificates installed at all, and on Windows consulting it is a blocking call
+# into the operating system made in the middle of a handshake.
+webpki-roots = "1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.10"
+sysinfo = "0.36.1"
+thiserror = "2.0.18"
+tokio = { version = "1.49.0", features = [
+    "rt-multi-thread",
+    "macros",
+    "fs",
+    "signal",
+    "sync",
+    "time",
+] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["io"] }
+tower = { version = "0.5", features = ["util"], optional = true }
+tower-http = { version = "0.6.8", features = ["trace", "limit"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+uuid = { version = "1.19.0", features = ["v4"] }
+
+# The engine. Pinned to a release tag rather than a branch: a node rebuilt six
+# months from now must get the same weights loader it was tested against.
+# crates.io is a release behind (0.8.1 there, 0.9.0 tagged), and the tag is what
+# "latest" means for this project.
+mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs", tag = "v0.9.3", optional = true }
+mistralrs-core = { git = "https://github.com/EricLBuehler/mistral.rs", tag = "v0.9.3", optional = true }
+mistralrs-server-core = { git = "https://github.com/EricLBuehler/mistral.rs", tag = "v0.9.3", default-features = false, optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+tokio = { version = "1.49.0", features = ["rt-multi-thread", "macros", "test-util"] }
+
+[features]
+# A node that cannot infer is not a node, so the engine is on by default.
+#
+# It is a feature all the same, because the control plane (the catalogue, the
+# pulls, the settings form, the disk rules) is most of this crate and none of it
+# touches the engine. `--no-default-features` compiles and tests that half in
+# seconds instead of the engine's tens of minutes, against the scripted engine
+# the integration tests drive. Same seam KB/28 uses to test the Gateway without
+# a vendor.
+default = ["engine"]
+engine = ["dep:mistralrs", "dep:mistralrs-core", "dep:mistralrs-server-core", "dep:tower"]
+
+# The accelerator this node is built for. A build picks exactly one; none means
+# CPU, which is correct for a laptop and wrong for a server.
+cuda = ["engine", "mistralrs-server-core/cuda", "mistralrs/cuda"]
+cudnn = ["cuda", "mistralrs-server-core/cudnn", "mistralrs/cudnn"]
+flash-attn = ["cuda", "mistralrs-server-core/flash-attn", "mistralrs/flash-attn"]
+metal = ["engine", "mistralrs-server-core/metal", "mistralrs/metal"]
+accelerate = ["engine", "mistralrs-server-core/accelerate", "mistralrs/accelerate"]
+mkl = ["engine", "mistralrs-server-core/mkl", "mistralrs/mkl"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,58 @@
+import { test, expect } from '@playwright/test'
+import { RESULT, signInFresh, send, noAgentTextOnUserSide } from './helpers'
+
+// INLINE delegation: the agent runs inside the turn and answers within it,
+// rather than the Gateway saying "started" and finishing.
+//
+// This had no browser coverage at all while background and fleet had plenty,
+// and that is exactly how a defect in it survived from 27 July to the day
+// somebody noticed chips spinning after a reload. Every scripted delegation in
+// the harness was `mode: background`, so the one path with a mid-step exit was
+// the one nothing drove.
+
+test('inline: a terminal handoff answers inside the turn, in one message', async ({ page }) => {
+  await signInFresh(page)
+
+  // No auto-approve and no chip: the whole point of a synchronous handoff is
+  // that the person asks once and is answered once. A background delegation
+  // would be two messages and a wait.
+  await send(page, 'inline please')
+
+  await expect(page.locator('.is-assistant', { hasText: RESULT })).toHaveCount(1)
+  await noAgentTextOnUserSide(page)
+})
+
+test('inline: a call made alongside the handoff does not spin for ever', async ({ page }) => {
+  // The defect this spec exists for. The model asks to delegate AND to do
+  // something else in one step. Every tool call of a step is written as running
+  // before any of them runs, and a terminal handoff leaves the loop in the
+  // middle of that list, so the sibling stayed running with nothing that would
+  // ever come back to it.
+  //
+  // It is invisible live, because no frame is sent for a call that never ran.
+  // It shows on RELOAD, where the transcript is rebuilt from rows and a running
+  // call is drawn as a spinner. So this reloads, which is the only way to see
+  // it, and is what nothing was doing.
+  await signInFresh(page)
+  await send(page, 'inline and then check the time')
+
+  await expect(page.locator('.is-assistant', { hasText: RESULT })).toHaveCount(1)
+
+  await page.reload()
+  await expect(page.locator('.is-assistant', { hasText: RESULT })).toHaveCount(1)
+
+  // Nothing is still claiming to be working. A spinner here is the bug: work
+  // nothing is doing, for ever, until the process restarts.
+  await expect(page.locator('[data-tool-state="running"]')).toHaveCount(0)
+})
+
+test('inline: a continuing handoff gives the Gateway the last word', async ({ page }) => {
+  // The compositional case, and the reason inline earns its keep: the agent's
+  // answer comes back as a tool RESULT and the Gateway carries on with it. A
+  // background delegation cannot do this, because by then its turn is over.
+  await signInFresh(page)
+  await send(page, 'inline continue please')
+
+  await expect(page.locator('.is-assistant').last()).toBeVisible()
+  await noAgentTextOnUserSide(page)
+})

@@ -1,0 +1,20 @@
+# The desktop workspace: two applications, one set of shared parts.
+#
+# SAG Personal carries a gateway, a database and an inference node, and is one
+# person on one machine. SAG Enterprise carries none of that: it is a window
+# onto a server somebody else runs, and the Rust half exists so the assistant
+# can reach tools on the computer it is installed on, which a web page cannot.
+#
+# They share what is genuinely common and nothing else. A workspace rather than
+# two unrelated crates because that is what Cargo has for exactly this, and
+# because one lock file is the difference between two applications built from
+# the same dependencies and two that drift.
+[workspace]
+resolver = "2"
+members = ["shared", "personal/shell", "enterprise/shell"]
+
+# Set once, for both. A release build of either is a thing somebody downloads.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

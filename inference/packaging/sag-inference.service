@@ -1,0 +1,92 @@
+# The inference node, supervised.
+#
+# systemd rather than a supervisor of our own, deliberately. The personal
+# edition carries one (KB/36) because it owns a TREE on a machine with nothing
+# to delegate to: a gateway, a database and this node, which must start in order
+# and stop in reverse. A GPU server is one process on a box that already has the
+# best supervisor available, and writing a second one would mean no journal, no
+# cgroups, no boot integration and more code doing less.
+#
+# What does carry across are the RULES that edition learned, stated here as
+# directives rather than as prose:
+#
+#   permanent restart .................. Restart=always
+#   restart intensity, then escalate ... StartLimitBurst / StartLimitIntervalSec
+#   SIGTERM, then SIGKILL on a timeout . TimeoutStopSec
+#   let it crash ....................... nothing here repairs anything
+#
+# ESCALATION IS THE POINT. Five failures in a minute is not a flaky process, it
+# is a bad token, a taken port or a broken disk, and restarting forever turns a
+# diagnosable fault into a spinner. After the burst systemd puts the unit in
+# `failed` and STOPS, where `systemctl status` says so and the journal has the
+# reason. That is the same decision the Go supervisor makes when it exits
+# non-zero rather than trying a sixth time.
+#
+# There is no readiness probe here, and that is not an oversight. Readiness for
+# this process means "the gateway can reach it", and the gateway is the only
+# thing that can answer that: it asks, on the Machines screen, within five
+# seconds. A probe here would be this box's opinion of a question somebody else
+# is already asking properly.
+
+[Unit]
+Description=SAG inference node
+Documentation=https://github.com/flexie-crm/smart-agent-gateway
+# Models live on a disk that may be mounted late, and the node registers itself
+# with the gateway at boot, so both the mount and the network must be up first.
+After=network-online.target local-fs.target
+Wants=network-online.target
+
+# Restart intensity lives in [Unit], NOT in [Service], and it matters.
+#
+# systemd moved these here and IGNORES them in [Service], with one line in the
+# journal at load time that nobody reads. So the escalation described above was
+# not happening: the interval fell back to the ten second default, and with
+# RestartSec=3 a crash loop never fits five failures into ten seconds, so it
+# never tripped the limit and restarted forever. Exactly the spinner this was
+# written to prevent. Found by `systemd-analyze verify`, which says so plainly.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=sag-inference
+Group=sag-inference
+EnvironmentFile=/etc/sag-inference/node.env
+ExecStart=/usr/local/bin/sag-inference serve
+
+Restart=always
+RestartSec=3
+# Five in a minute, then stop and say so (the directives are in [Unit], above).
+# Matches the database child's intensity in the personal edition, for the same
+# reason: long enough to ride out a transient fault, short enough that a real one
+# is visible within a minute.
+
+# It answers requests that are in flight; give it a moment to finish them before
+# it is killed.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# The weights are tens of gigabytes read into memory, and a GPU box exists to do
+# exactly that, so the usual limits are wrong here.
+LimitNOFILE=65535
+LimitMEMLOCK=infinity
+
+# It reads models and writes its own state, and nothing else. A process holding
+# somebody's model weights and a key to their gateway should not be able to
+# touch the rest of the machine.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/sag-inference
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# A GPU needs its device nodes, which ProtectSystem does not cover and
+# PrivateDevices would take away.
+DeviceAllow=/dev/nvidia* rw
+DeviceAllow=/dev/nvidiactl rw
+DeviceAllow=/dev/nvidia-uvm rw
+
+[Install]
+WantedBy=multi-user.target

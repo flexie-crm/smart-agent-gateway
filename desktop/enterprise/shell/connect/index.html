@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>SAG</title>
+<style>
+  /* The same restraint as the personal edition's waiting page, and the same
+     variables, so the two applications are recognisably one product. */
+  /* The chat's own colours, so the screen an application opens on and the one
+     it opens INTO are the same product rather than two dark greys. They are
+     written out here because a stylesheet cannot reach a page the application
+     ships; they come from chat-ui/src/index.css and have to be changed in both. */
+  :root { color-scheme: light dark; --ink:#1f2225; --dim:#5f646a; --line:#e5e7ea; --bg:#fafbfc; --bad:#b3261e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#d2d4d8; --dim:#999fa7; --line:#2b2f36; --bg:#1c1e22; --bad:#f4a3a3; }
+  }
+  /* And when the person has chosen, which beats what the computer is set to. */
+  :root[data-night] { --ink:#d2d4d8; --dim:#999fa7; --line:#2b2f36; --bg:#1c1e22; --bad:#f4a3a3; }
+
+  /* Opening on a server we already have: this window is on its way somewhere
+     and says so while it goes. The same bar as the personal edition's waiting
+     screen, because the two applications are one product. */
+  .track { margin-top:1.25rem; height:3px; background:var(--line); border-radius:999px; overflow:hidden; }
+  /* A real bar, from nothing to full, rather than one drifting back and forth,
+     which says only "something is happening" and is what a person can already
+     see. Its width is set every frame by the script below, so it carries no
+     transition of its own: two things animating one property disagree. */
+  #bar { height:100%; width:0; background:var(--ink); border-radius:999px; transition:none; }
+  /* The number sits in a box of its own, wide enough for "100%" and with the
+     digits all one width, so a centred line does not jump sideways every time
+     it changes. */
+  #percent { font-variant-numeric:tabular-nums; display:inline-block; min-width:3.4ch; text-align:left; }
+  /* The form's own lead, not every lead: the connecting screen has one too,
+     and hiding that left a bar with nothing to say what it was doing. */
+  body[data-going] #form, body[data-going] > .box > p.lead, body[data-going] #error { display:none; }
+  body:not([data-going]) #going { display:none; }
+  body {
+    margin:0; height:100vh; display:flex; align-items:center; justify-content:center;
+    background:var(--bg); color:var(--ink);
+    font:14px/1.6 -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  .box { width:min(24rem, 82vw); }
+  .name { font-size:1.05rem; letter-spacing:-.01em; text-align:center; }
+  .name b { font-weight:600; }
+  .name .thin { font-weight:300; color:var(--dim); }
+  p.lead { margin:.5rem 0 1.5rem; color:var(--dim); text-align:center; }
+  label { display:block; font-size:.8rem; color:var(--dim); margin-bottom:.35rem; }
+  input {
+    width:100%; box-sizing:border-box; padding:.5rem .625rem; font:inherit;
+    color:var(--ink); background:transparent;
+    border:1px solid var(--line); border-radius:.375rem; outline:none;
+  }
+  input:focus { border-color:var(--ink); }
+  button {
+    margin-top:.875rem; width:100%; padding:.5rem; font:inherit; font-weight:500;
+    color:var(--bg); background:var(--ink);
+    border:0; border-radius:.375rem; cursor:pointer;
+  }
+  button:disabled { opacity:.5; cursor:default; }
+  #error { margin-top:.75rem; color:var(--bad); min-height:1.6em; font-size:.875rem; }
+</style>
+<script>
+  // Painted from what the person chose, not from what the computer is set to.
+  //
+  // This screen belongs to the application and the chat belongs to a server:
+  // different origins, different storage, so it cannot read the choice made in
+  // there. The shell knows it (the page tells it once when it changes) and
+  // hands it over here. Without this, somebody who set the application to night
+  // still opened white every time, and then watched it change.
+  (function () {
+    var want = new URLSearchParams(location.search).get('appearance')
+    var dark =
+      want === 'dark' ||
+      (want !== 'light' &&
+        window.matchMedia &&
+        window.matchMedia('(prefers-color-scheme: dark)').matches)
+    document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
+    if (dark) document.documentElement.setAttribute('data-night', '')
+    // The ground, inline, so the first painted frame is this colour rather than
+    // whatever is behind an unstyled document.
+    document.documentElement.style.background = dark ? '#1c1e22' : '#fafbfc'
+  })()
+</script>
+</head>
+<body>
+  <div class="box">
+    <div class="name"><b>SAG</b> <span class="thin">Smart Agent Gateway</span></div>
+    <p class="lead">Connect to your organisation's server.</p>
+
+    <form id="form">
+      <label for="address">Server address</label>
+      <input id="address" name="address" type="text" autofocus autocomplete="off"
+             autocapitalize="off" spellcheck="false" placeholder="sag.yourcompany.com" />
+      <button id="go" type="submit">Connect</button>
+    </form>
+    <p id="error" role="alert"></p>
+
+    <div id="going">
+      <p class="lead">Loading <span id="percent">0%</span></p>
+      <div class="track"><div id="bar"></div></div>
+    </div>
+  </div>
+
+<script>
+  // Already pointed at a server: this window is about to leave for it, so it
+  // says so. It used to show the form for the instant before navigating, which
+  // read as a blank white flash rather than as an application starting.
+
+  (function () {
+    // On its way to a server that this application already knows. The window
+    // showing this page is the one somebody sees; the chat is loading in a
+    // second window behind it, and the two swap the moment the chat is ready.
+    var going = new URLSearchParams(location.search).get('going')
+    if (!going) return
+    document.body.setAttribute('data-going', '')
+
+    var bar = document.getElementById('bar')
+    var percent = document.getElementById('percent')
+    var paint = function (at) {
+      bar.style.width = at + '%'
+      percent.textContent = Math.round(at) + '%'
+    }
+
+    // Where the bar is, and it is the same rule in both editions.
+    //
+    // Two things decide it and it takes the LOWER: how far the work has actually
+    // got, and how far the part nobody can measure has (see unmeasured below).
+    // So it can never claim to be further on than the work is, which is what a
+    // clock alone does when a first run has a database to create and every
+    // migration to apply, and it never stops moving while there is still
+    // something to wait for.
+    //
+    // HELD is WAITING_STAYS in main.rs: one number in two places, changed
+    // together.
+    var HELD = 1500
+    var began = Date.now()
+    var reported = 99
+    var drawing = true
+
+    // Called by the shell, which is the only half that knows what is happening.
+    window.__sagProgress = function (percent) {
+      reported = Math.max(reported, Math.min(99, percent))
+    }
+    // And this is it saying the wait is over. The chat is waiting for the frame
+    // this draws, so the end of the bar is on the screen before it is taken
+    // away: two animation frames, the same wait as the one that reports a page
+    // has first painted, because it is the same question.
+    window.__sagDone = function () {
+      reported = 100
+      paint(100)
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () {
+          window.__TAURI__.core.invoke('waiting_finished')
+        })
+      })
+    }
+
+    // How far along the part of the wait that NOTHING measures is.
+    //
+    // The gateway says how far it has got; the chat loading after it says
+    // nothing at all, and on a warm machine that is most of the wait. Drawn as a
+    // curve that always advances and never arrives: 89 when the second and a
+    // half is up, 96 at three seconds, closer every frame after that, 99 in the
+    // limit. A bar that stops moving says the application has stopped, and one
+    // that reaches the end and waits there says it louder.
+    //
+    // The last step is not on this curve. A hundred is the shell's to say and it
+    // says it as it opens the chat.
+    var unmeasured = function () {
+      return 99 * (1 - Math.exp(-(Date.now() - began) / (HELD / 2.3)))
+    }
+
+    var draw = function () {
+      if (!drawing) return
+      // Something went wrong and the page is saying so. It is not loading any
+      // more, and painting over that message every frame would hide it.
+      if (false) return (drawing = false)
+      paint(reported >= 100 ? 100 : Math.min(reported, unmeasured()))
+      requestAnimationFrame(draw)
+    }
+    requestAnimationFrame(draw)
+  })()
+
+  // Long enough that the server is not merely slow. Rust says so; this page
+  // says it, and offers the way out, because the error page a webview draws
+  // for an address that answers nothing has no button on it.
+  if (window.__TAURI__) {
+    window.__TAURI__.event.listen('server-unreachable', function (sent) {
+      document.body.removeAttribute('data-going')
+      document.getElementById('error').textContent =
+        String(sent.payload) + ' is not answering. Check the address, or that you are on the network it is on.'
+      document.getElementById('address').value = String(sent.payload)
+    })
+  }
+
+  // The address is checked by Rust, which reaches the server before it saves
+  // anything: what comes back is either nothing (we are already navigating) or
+  // a sentence to show. Nothing is validated twice here, because two opinions
+  // about what an address is would eventually disagree.
+  const form = document.getElementById('form')
+  const field = document.getElementById('address')
+  const button = document.getElementById('go')
+  const error = document.getElementById('error')
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault()
+    button.disabled = true
+    button.textContent = 'Connecting'
+    error.textContent = ''
+    try {
+      await window.__TAURI__.core.invoke('connect', { address: field.value })
+      // Reached: the window is being pointed at the server and this page is on
+      // its way out. Leave the button as it is rather than flashing it back.
+    } catch (why) {
+      error.textContent = String(why)
+      button.disabled = false
+      button.textContent = 'Connect'
+      field.focus()
+      field.select()
+    }
+  })
+</script>
+</body>
+</html>

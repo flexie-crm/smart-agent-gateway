@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "the-server-page",
+  "description": "The chat, served by whichever gateway this installation was pointed at, may talk to the half of the application that runs on this computer.\n\nEverything a person sees here is served by their own server, so the page that needs to reach Rust is always a REMOTE one, and Tauri gives a remote page no way to do that unless it is named. Without this the bridge simply is not there: the page calls, nothing answers, and neither half reports anything, which is exactly how a link that never connected looked from the outside.\n\nThe addresses are a pattern rather than a list because the address is the person's own, typed on first run, and there is no list to write.",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://*", "https://*", "http://*:*", "https://*:*"]
+  },
+  "permissions": ["core:default", "core:event:default", "core:window:default"]
+}

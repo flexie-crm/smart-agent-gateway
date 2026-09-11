@@ -1,0 +1,37 @@
+[package]
+name = "sag-enterprise"
+version = "0.1.0"
+edition = "2021"
+description = "SAG Enterprise: the chat, against a server somebody else runs"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The installation's own identifier, minted once and kept. Random rather than
+# derived from the machine: what it has to do is tell two installations apart,
+# not identify a computer.
+getrandom = "0.3"
+# The system's own folder picker. What the assistant may reach is chosen by the
+# person in a dialog their computer drew, not by anything a page or a server
+# said.
+tauri-plugin-dialog = "2"
+# Updating in place. The person is told the new version is DOWNLOADED and asked
+# to reopen, rather than interrupted: replacing the bundle does not disturb the
+# process already running from it, so there is no reason to choose the moment
+# for somebody in the middle of a conversation.
+tauri-plugin-updater = "2"
+# One channel, to carry the folder dialog's answer back to the command that
+# asked for it: the dialog must be opened from the thread that can show it, and
+# answers on a callback.
+tokio = { version = "1", features = ["sync"] }
+sag-desktop = { path = "../../shared" }
+# Probing the address before it is saved, so an address that is accepted is one
+# that answers. Blocking, because it happens on a worker thread while a person
+# waits for exactly this answer, and async here would buy nothing.
+ureq = { version = "2", features = ["json"] }
+tauri-plugin-store = "2.4.4"

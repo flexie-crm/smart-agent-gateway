@@ -1,0 +1,48 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose      # an unclosed response body leaks a connection
+    - errorlint      # errors must be compared with errors.Is/As, not ==
+    - gosec          # security smells (weak crypto, unhandled auth paths)
+    - misspell
+    - noctx          # every outbound request carries a context
+    - revive
+    - rowserrcheck   # a missed rows.Err() silently truncates a result set
+    - sqlclosecheck  # unclosed rows exhaust the connection pool
+    - unconvert
+    - usetesting
+    - whitespace
+
+  settings:
+    revive:
+      rules:
+        - name: exported
+          disabled: true   # doc comments are required by review, not by lint
+    gosec:
+      excludes:
+        - G115  # integer conversion overflow: too noisy on int64 ids we control
+
+  exclusions:
+    rules:
+      # Test helpers legitimately hardcode credentials and skip contexts.
+      - path: _test\.go
+        linters:
+          - gosec
+          - noctx
+      - path: internal/testdb/
+        linters:
+          - gosec
+      # sqlclosecheck assumes a prepared statement is used once and closed.
+      # This package is the statement CACHE: it holds them for the life of the
+      # process (that is the point) and closes them in Close(). The linter's
+      # assumption is false here by design, and nowhere else.
+      - path: internal/store/sqldb/
+        linters:
+          - sqlclosecheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

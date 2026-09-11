@@ -1,0 +1,10 @@
+# Current stable, not a pinned number.
+#
+# A number here goes stale silently: it keeps building long after it has stopped
+# being what anybody is testing against, and the day it does break, the reason is
+# a line nobody has looked at in a year. `stable` is checked and updated by the
+# toolchain itself, and the engine's own floor (1.94, see Cargo.toml) is what
+# catches a machine that is genuinely too old.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

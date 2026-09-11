@@ -1,0 +1,5 @@
+# The gate's own output. Two files on Windows rather than one, because
+# Start-Process cannot send stdout and stderr to the same handle.
+gateway.log
+gateway.log.err
+node_modules

@@ -1,0 +1,196 @@
+# Flexie SAG, deployed.
+#
+# The whole product on one box: the orchestrator (serving the console), the
+# worker, the chat, the database and the queue. The machine that runs our own
+# models is a file of its own (machine.yml), because it is optional, expensive,
+# and frequently different hardware.
+#
+# NOTHING here is published. How the two surfaces are reached from outside is a
+# separate file, because it is the one part that depends on what is already on
+# the box:
+#
+#   edge.traefik.yml   a box that already runs Traefik: it routes, we label
+#   edge.caddy.yml     a box with nothing on 80/443: we bring our own
+#
+# Each service carries both `image:` and `build:` on purpose: compose builds and
+# tags, Swarm ignores the build and uses the tag. One definition, two ways to run
+# it, and no second copy to keep in step.
+#
+#   compose:  docker compose -f sag.yml -f edge.caddy.yml up -d --build
+#   swarm:    ./build.sh && docker stack deploy -c sag.yml -c edge.traefik.yml sag
+#
+# The secrets below are declared with `:?`, so a stack started without them STOPS
+# rather than starting. That is deliberate and it is the most important thing in
+# this file: an orchestrator with no SAG_ENCRYPTION_KEYS mints a new one every
+# boot, and every vendor key, every machine's key and the authority every machine
+# chains to become unreadable on the first restart. It warns, in one log line,
+# hours before anybody notices. Refusing to start is the honest failure.
+#
+# There is no `name:` here, because a rendered stack refuses one: Swarm takes the
+# stack name from the command. Compose takes it from COMPOSE_PROJECT_NAME, which
+# `.env` sets, so both end up calling it the same thing and the volumes keep
+# their names either way.
+
+x-database: &database
+  SAG_DB_DSN: "sag:${SAG_DB_PASSWORD:?set SAG_DB_PASSWORD in .env}@tcp(mariadb:3306)/sag?parseTime=true"
+
+x-secrets: &secrets
+  SAG_SESSION_SECRET: "${SAG_SESSION_SECRET:?set SAG_SESSION_SECRET in .env (see ./secrets.sh)}"
+  SAG_ENCRYPTION_KEYS: "${SAG_ENCRYPTION_KEYS:?set SAG_ENCRYPTION_KEYS in .env (see ./secrets.sh)}"
+  SAG_ENCRYPTION_PRIMARY_KEY_ID: "${SAG_ENCRYPTION_PRIMARY_KEY_ID:-1}"
+
+services:
+  # Schema first, and as a step of its own. The server does not migrate on boot:
+  # two containers coming up together would race, and a migration a request path
+  # can trigger is a migration that runs under load.
+  #
+  # Under compose the others wait to see it exit cleanly (edge.caddy.yml says
+  # so). Under Swarm there is no such wait and no such ordering: this retries
+  # until the database answers, and the server retries until the schema is there.
+  # Both are self-healing, which is what Swarm gives instead of ordering.
+  migrate:
+    image: flexie-sag/orchestrator:latest
+    build:
+      context: ..
+      dockerfile: orchestrator/Dockerfile
+    command: ["migrate", "up"]
+    environment:
+      <<: [*database, *secrets]
+    networks: [sag]
+    restart: "no"
+    deploy:
+      replicas: 1
+      restart_policy:
+        # Retried until it works, then never again. There is no "wait for the
+        # database" in Swarm, so the first attempt on a fresh deployment usually
+        # finds nothing listening; a one-shot that gave up there would leave a
+        # stack with no schema and no sign of why. `sag migrate up` is
+        # idempotent, so running it again costs nothing and running it on every
+        # deploy is the point.
+        condition: on-failure
+        delay: 5s
+        max_attempts: 60
+
+  orchestrator:
+    image: flexie-sag/orchestrator:latest
+    build:
+      context: ..
+      dockerfile: orchestrator/Dockerfile
+    command: ["server"]
+    restart: unless-stopped
+    environment:
+      <<: [*database, *secrets]
+      SAG_HTTP_ADDR: ":8080"
+      # What the console and every OAuth client see. It must be the address a
+      # browser actually reaches, because it is the token issuer as well.
+      SAG_BASE_URL: "https://${SAG_CONSOLE_DOMAIN:?set SAG_CONSOLE_DOMAIN in .env}"
+      SAG_NATS_URL: "nats://nats:4222"
+      SAG_LOG_FORMAT: "json"
+      SAG_SHUTDOWN_GRACE: "${SAG_SHUTDOWN_GRACE:-60s}"
+      # Where the inference node's installer and binaries are served from, at
+      # /inference/download/v1. A GPU machine on a closed network installs from
+      # the SAG server it is joining, because that is the one address it is
+      # guaranteed to reach. Read-only: this is published, never written to.
+      SAG_INFERENCE_DIST_DIR: "/srv/inference-dist"
+    volumes:
+      - uploads:/var/lib/sag/uploads
+      - "${SAG_INFERENCE_DIST:-/srv/sag-inference-dist}:/srv/inference-dist:ro"
+    networks: [sag]
+    depends_on: [mariadb, nats]
+    deploy:
+      replicas: 1
+      update_config:
+        order: start-first
+      restart_policy:
+        condition: any
+
+  worker:
+    image: flexie-sag/orchestrator:latest
+    build:
+      context: ..
+      dockerfile: orchestrator/Dockerfile
+    command: ["worker"]
+    restart: unless-stopped
+    environment:
+      <<: [*database, *secrets]
+      SAG_NATS_URL: "nats://nats:4222"
+      SAG_LOG_FORMAT: "json"
+      SAG_WORKER_CAPABILITIES: "${SAG_WORKER_CAPABILITIES:-default}"
+    volumes:
+      - uploads:/var/lib/sag/uploads
+    networks: [sag]
+    depends_on: [mariadb]
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+
+  chat:
+    image: flexie-sag/chat:latest
+    build:
+      context: ..
+      dockerfile: chat-ui/Dockerfile
+    restart: unless-stopped
+    networks: [sag]
+    depends_on:
+      - orchestrator
+    deploy:
+      replicas: 1
+      update_config:
+        order: start-first
+      restart_policy:
+        condition: any
+
+  # --- what it runs on ------------------------------------------------------
+
+  mariadb:
+    image: mariadb:11.4
+    restart: unless-stopped
+    # The server's own defaults decide the collation of anything created without
+    # an explicit one, and a table that inherits the wrong collation compares
+    # text differently from every table around it. The schema declares
+    # utf8mb4_unicode_ci, so the server must agree.
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MARIADB_DATABASE: sag
+      MARIADB_USER: sag
+      MARIADB_PASSWORD: "${SAG_DB_PASSWORD:?set SAG_DB_PASSWORD in .env}"
+      MARIADB_ROOT_PASSWORD: "${SAG_DB_ROOT_PASSWORD:?set SAG_DB_ROOT_PASSWORD in .env}"
+    volumes:
+      - mariadb-data:/var/lib/mysql
+    networks: [sag]
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+
+  nats:
+    image: nats:2.10-alpine
+    restart: unless-stopped
+    command: ["-js", "-sd", "/data"]
+    volumes:
+      - nats-data:/data
+    networks: [sag]
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+
+
+networks:
+  # Everything talks to everything here, and nothing outside can reach any of it.
+  # What faces the internet is added by an edge file, to two services only.
+  sag:
+    driver: overlay
+
+volumes:
+  mariadb-data:
+  nats-data:
+  uploads:

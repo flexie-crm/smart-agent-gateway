@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!--
+    The SAG mark: a gateway with something alive inside it.
+
+    An arch because a gateway is one, and because the silhouette survives being
+    16 pixels wide, which almost nothing else does. The core is the agent: the
+    one warm thing in the picture, sitting inside the opening rather than beside
+    it, because the whole product is that the work happens THROUGH here.
+
+    Drawn on Apple's macOS grid: a 1024 canvas with the tile inset to 824 and a
+    corner radius of 185, so the system's own shadow and spacing land where they
+    are supposed to. Every dimension is deliberate at the smallest size, not the
+    largest: the arch stroke is 116 units, which is what keeps it about two
+    pixels wide in the menu bar instead of dissolving.
+  -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2A3157"/>
+      <stop offset="1" stop-color="#0E1126"/>
+    </linearGradient>
+
+    <!-- A light from above, so the tile has a surface rather than a fill. -->
+    <radialGradient id="sheen" cx="0.5" cy="0.05" r="0.85">
+      <stop offset="0" stop-color="#7C8AC4" stop-opacity="0.35"/>
+      <stop offset="1" stop-color="#7C8AC4" stop-opacity="0"/>
+    </radialGradient>
+
+    <linearGradient id="arch" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#C3CBE8"/>
+    </linearGradient>
+
+    <radialGradient id="core" cx="0.38" cy="0.32" r="0.78">
+      <stop offset="0" stop-color="#FFD98A"/>
+      <stop offset="0.45" stop-color="#FFB020"/>
+      <stop offset="1" stop-color="#F07A12"/>
+    </radialGradient>
+
+  </defs>
+
+  <g>
+    <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)"/>
+    <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#sheen)"/>
+
+    <!--
+      Open at the bottom on purpose. A closed shape reads as a container, which
+      is the opposite of the idea: things come in one side and leave the other.
+    -->
+    <path d="M 282 760 L 282 480 A 230 230 0 0 1 742 480 L 742 760"
+          fill="none" stroke="url(#arch)" stroke-width="116"
+          stroke-linecap="round" stroke-linejoin="round"/>
+
+    <circle cx="512" cy="500" r="96" fill="url(#core)"/>
+
+    <!-- The faintest inner edge, so the tile reads as lit rather than flat. -->
+    <rect x="104" y="104" width="816" height="816" rx="181"
+          fill="none" stroke="#FFFFFF" stroke-opacity="0.10" stroke-width="8"/>
+  </g>
+</svg>

@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "the-application-itself",
+  "description": "The waiting screen this application carries, shown while the gateway starts. The chat is served by that gateway and granted its own capability at run time.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "store:default",
+    "allow-screens"
+  ]
+}

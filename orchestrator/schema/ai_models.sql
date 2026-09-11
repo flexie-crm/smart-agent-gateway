@@ -1,0 +1,20 @@
+CREATE TABLE `ai_models` (
+  `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  `workspace_id` bigint(20) unsigned NOT NULL,
+  `vendor_id` bigint(20) unsigned NOT NULL,
+  `model_key` varchar(128) NOT NULL,
+  `type` enum('chat','embedding','rerank','stt','tts') NOT NULL DEFAULT 'chat',
+  `context_window` int(11) NOT NULL DEFAULT 0,
+  `description` text DEFAULT NULL,
+  `input_price_per_1m` decimal(12,6) NOT NULL DEFAULT 0.000000,
+  `output_price_per_1m` decimal(12,6) NOT NULL DEFAULT 0.000000,
+  `status` enum('active','disabled') NOT NULL DEFAULT 'active',
+  `created_at` datetime(3) NOT NULL,
+  `settings` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`settings`)),
+  `updated_at` datetime(3) NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_ws_vendor_model` (`workspace_id`,`vendor_id`,`model_key`),
+  KEY `fk_model_vendor` (`vendor_id`),
+  CONSTRAINT `fk_model_vendor` FOREIGN KEY (`vendor_id`) REFERENCES `ai_vendors` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_model_workspace` FOREIGN KEY (`workspace_id`) REFERENCES `workspaces` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

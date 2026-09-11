@@ -1,0 +1,71 @@
+# SAG — orchestrator stack (dev / on-prem baseline).
+# One Go image, two roles: `orchestrator` runs `sag server`,
+# `worker` runs `sag worker` from the same build.
+name: flexie-sag
+
+services:
+  orchestrator:
+    build: .
+    command: ["server"]
+    ports:
+      - "8080:8080"
+    environment:
+      SAG_HTTP_ADDR: ":8080"
+      SAG_BASE_URL: "${SAG_BASE_URL:-http://localhost:8080}"
+      SAG_SESSION_SECRET: "${SAG_SESSION_SECRET:-}"
+      SAG_DB_DSN: "sag:sag@tcp(mariadb:3306)/sag?parseTime=true"
+      SAG_NATS_URL: "nats://nats:4222"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      nats:
+        condition: service_started
+
+  worker:
+    build: .
+    command: ["worker"]
+    environment:
+      SAG_DB_DSN: "sag:sag@tcp(mariadb:3306)/sag?parseTime=true"
+      SAG_NATS_URL: "nats://nats:4222"
+      # A GPU/model-host node runs the same image with e.g.
+      # SAG_WORKER_CAPABILITIES: "default,gpu,model-host"
+      SAG_WORKER_CAPABILITIES: "default"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      nats:
+        condition: service_started
+
+  mariadb:
+    image: mariadb:11.4
+    # The server's own defaults decide the collation of anything created without
+    # an explicit one, and a table that inherits the wrong collation compares
+    # text differently from every table around it. The schema declares
+    # utf8mb4_unicode_ci, so the server must agree, or the two drift the moment
+    # somebody writes a CREATE TABLE without spelling it out.
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MARIADB_DATABASE: sag
+      MARIADB_USER: sag
+      MARIADB_PASSWORD: sag
+      MARIADB_ROOT_PASSWORD: sag-root
+    volumes:
+      - mariadb-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-sd", "/data"]
+    volumes:
+      - nats-data:/data
+
+
+volumes:
+  mariadb-data:
+  nats-data:

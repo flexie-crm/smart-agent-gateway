@@ -1,0 +1,20 @@
+# What the served page may ask the half of the application that runs on this
+# computer to do.
+#
+# Named for the computer rather than for the link, because it is no longer only
+# about the link: it also covers the folder the assistant works in.
+#
+# A page loaded from a server is REMOTE, and Tauri allows a remote page none of
+# an application's own commands unless they are named here and granted by a
+# capability. Without it the page calls and gets "not allowed. Plugin not
+# found", which the page could not report and Rust never saw: the link simply
+# never started, and both halves looked innocent.
+#
+# Three commands, and no more: hand down a credential, stop, and ask whether the
+# route is up. Nothing here reads a file, runs a command, or reaches the
+# machine on its own.
+
+[[permission]]
+identifier = "allow-machine"
+description = "Start and stop the machine link, read whether it is up, and read which installation this is."
+commands.allow = ["link_start", "link_stop", "link_up", "link_device", "chosen_folder", "choose_folder", "forget_folder", "remember_appearance", "chosen_appearance", "show_context_menu", "check_for_update"]

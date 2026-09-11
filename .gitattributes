@@ -1,0 +1,24 @@
+# This repository is LF, on every machine, whatever a developer's global
+# core.autocrlf happens to say. We work on macOS, Linux and Windows/WSL2, and
+# the line endings cannot be left to whichever of those a checkout landed on.
+#
+# A CRLF checkout is not a cosmetic difference here: gofmt reports every Go file
+# as unformatted, so `make ci` fails on fmt-check before it runs a single test,
+# and the diff of a one-line change is the whole file. eol=lf overrides
+# core.autocrlf, which is what makes this a property of the repository rather
+# than of the machine that cloned it.
+#
+# text=auto lets git detect binary content and leave it alone.
+* text=auto eol=lf
+
+# Assets git must never treat as text, whatever its detection concludes.
+*.ico binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.pdf binary

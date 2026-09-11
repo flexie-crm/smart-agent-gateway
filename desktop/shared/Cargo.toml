@@ -1,0 +1,76 @@
+[package]
+name = "sag-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "What both desktop applications share"
+publish = false
+
+[dependencies]
+tauri = { version = "2", features = [] }
+# Opening an address in the person's own browser. Three different commands
+# across the three systems, and quoting on Windows that is easy to get wrong.
+open = "5"
+# The machine link (link.rs): one websocket held open to the gateway, and a TCP
+# connection per request on the network this computer can see. rustls rather
+# than the system's own TLS, so the same code and the same trust store are used
+# on every platform we ship.
+tokio = { version = "1", features = ["net", "io-util", "time", "sync", "macros", "process"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The system folder picker, which both editions show and neither may draw
+# itself (workspace::pick).
+tauri-plugin-dialog = "2"
+# The random bytes an installation names itself with (device.rs). Its failure is
+# handled rather than ignored: a zeroed buffer would make every installation
+# call itself the same thing.
+getrandom = "0.3"
+# The person's own clock and the NAME of their zone (tools/clock.rs). Both are
+# already in this tree through the shell; naming them here is what lets the
+# shared half read a clock without the shell handing it one.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+iana-time-zone = "0.1"
+# The file tools' walking and searching, which are ripgrep's own crates. A
+# project's files are found the way every developer tool finds them (its
+# ignore files honoured, its version control directory skipped) and searched by
+# the engine people already trust, rather than by a directory walk and a regex
+# written here that would be slower and would disagree with `rg` in ways nobody
+# could predict.
+ignore = "0.4"
+globset = "0.4"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+# A file's hash, so an edit can say which version of a file it was written
+# against. Already in this workspace's tree (tauri depends on it), so it costs
+# nothing to build and nothing to trust that is not already trusted.
+sha2 = "0.10"
+dark-light = "3.0.0"
+# Fetching the next version. Here rather than in each shell because the
+# behaviour is one behaviour: check quietly, install quietly, say so once.
+tauri-plugin-updater = "2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# One AppKit call: a window's alpha, which is how a window paints itself in full
+# before anybody sees it (screens.rs). Public API, deliberately: the private one
+# that would do the same job is what this whole arrangement exists to avoid.
+# Already in this tree through the webview, so it costs nothing new to build.
+objc2 = "0.6"
+# Typed AppKit, so setting a window's alpha is a checked method call rather
+# than a selector spelled out by hand. Already in the tree: Tauri builds on it.
+objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView", "NSResponder"] }
+
+[target.'cfg(unix)'.dependencies]
+# Ending a command means ending everything it started, which is a process
+# GROUP and not a process. Killing the shell alone leaves the compiler it
+# spawned running with nothing left that knows about it.
+# Signalling a process group, through a checked wrapper rather than through
+# `unsafe { libc::killpg(..) }`. One call, and the last unsafe block in this
+# crate's production code: the syscall cannot corrupt memory, so what the block
+# bought was nothing and what it cost was a reader having to decide that.
+nix = { version = "0.29", features = ["signal"] }
+
+[dev-dependencies]
+# The example that runs the real client on its own, so the Go side can drive
+# THIS code rather than a stand-in written from the same assumptions.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "the-application-itself",
+  "description": "The screens this application carries: the one that asks for a server, and the one shown while it leaves for it. Not the chat, which is served by a server and granted its own capability at run time, for that server's address only.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "allow-setup",
+    "store:default",
+    "allow-screens"
+  ]
+}

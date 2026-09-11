@@ -1,0 +1,32 @@
+# TLS and the two front doors, for a box with nothing else on 80 and 443.
+# Used by edge.caddy.yml; a box that already runs a proxy uses edge.traefik.yml
+# and none of this.
+{
+	email {$SAG_TLS_EMAIL}
+}
+
+# The console, and the API. One origin, deliberately (KB/19).
+{$SAG_CONSOLE_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy orchestrator:8080 {
+		# An answer is written a token at a time and a stream can be quiet
+		# between them, so nothing may buffer it and nothing may give up on it.
+		flush_interval -1
+		transport http {
+			read_timeout 0
+			write_timeout 0
+		}
+	}
+}
+
+# The chat. Its nginx proxies /v1, so the API is same-origin here too.
+{$SAG_CHAT_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy chat:80 {
+		flush_interval -1
+		transport http {
+			read_timeout 0
+			write_timeout 0
+		}
+	}
+}

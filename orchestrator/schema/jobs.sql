@@ -1,0 +1,21 @@
+CREATE TABLE `jobs` (
+  `id` char(26) NOT NULL,
+  `workspace_id` bigint(20) unsigned NOT NULL,
+  `kind` varchar(64) NOT NULL,
+  `subject` varchar(128) NOT NULL,
+  `payload` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL CHECK (json_valid(`payload`)),
+  `status` enum('pending','running','completed','failed','dead') NOT NULL,
+  `attempts` int(11) NOT NULL DEFAULT 0,
+  `max_attempts` int(11) NOT NULL DEFAULT 5,
+  `last_error` text DEFAULT NULL,
+  `run_after` datetime(3) NOT NULL,
+  `locked_by` varchar(128) DEFAULT NULL,
+  `locked_at` datetime(3) DEFAULT NULL,
+  `created_at` datetime(3) NOT NULL,
+  `completed_at` datetime(3) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `idx_status_run` (`status`,`run_after`),
+  KEY `idx_ws_kind` (`workspace_id`,`kind`),
+  KEY `idx_locked_by` (`locked_by`),
+  CONSTRAINT `fk_job_workspace` FOREIGN KEY (`workspace_id`) REFERENCES `workspaces` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

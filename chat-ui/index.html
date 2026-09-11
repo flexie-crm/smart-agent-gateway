@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SAG</title>
+    <script>
+      // The theme, before the first pixel.
+      //
+      // The application chooses it in JavaScript, but a module script runs after
+      // the browser has already painted the page, so somebody working at night
+      // got a white flash and a layout settling under it every time they moved
+      // between the chat and the console. This is the only place that can be
+      // fixed: inline, in the head, ahead of the stylesheet and the bundle.
+      //
+      // Deliberately tiny and defensive. A webview may refuse storage, and a
+      // theme is never a reason to fail to start.
+      (function () {
+        try {
+          // What this page last remembered wins, and what the application
+          // told us is the fallback.
+          //
+          // That order matters and the other one was wrong. The application's
+          // value is injected when the WINDOW is built and never changes after,
+          // so somebody who switched to night and then opened the console got
+          // the value from before they switched, on every navigation, for the
+          // rest of the session. Storage is written the moment the choice is
+          // made, so within a session it is the fresher of the two.
+          //
+          // The fallback still does its job: the personal edition's gateway
+          // binds a free port, so every launch is a new origin with an empty
+          // store, and reading only storage is what made the chat render light
+          // and then turn dark in front of somebody who had chosen night.
+          var told = window.__SAG_APPEARANCE__
+          var mine = localStorage.getItem('fx_theme')
+          var ok = function (v) { return v === 'light' || v === 'dark' || v === 'system' }
+          var kept = ok(mine) ? mine : ok(told) ? told : null
+          var dark =
+            kept === 'dark' ||
+            ((kept === 'system' || !kept) &&
+              window.matchMedia &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches)
+          if (dark) document.documentElement.classList.add('dark')
+          document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
+          // The ground, as an inline style, because the stylesheet has not
+          // loaded yet and this is the colour of the first painted frame. The
+          // class above only decides what the stylesheet WILL say; between
+          // parsing this document and fetching its CSS there is nothing, and
+          // nothing is white. This value is the page's own --background
+          // (index.css), and it is here because a custom property cannot be
+          // read before the file defining it arrives.
+          //
+          // ONE colour, and that is a decision rather than a simplification.
+          // The sidebar used to be a shade of its own, so the left column was
+          // painted at the page's colour and darkened when the stylesheet
+          // landed: a pale band down the side on every crossing between the
+          // chat and the console. A window paints one colour while a page has
+          // nothing to show (screens.rs) and two grounds cannot both be it, so
+          // --sidebar is now --background and the border is what separates
+          // them.
+          document.documentElement.style.background = dark ? '#1c1e22' : '#fafbfc'
+        } catch (e) {}
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,116 @@
+<svg viewBox="0 0 1160 706" role="img" aria-label="The SAG chat: a question answered with a tool call and a chart" xmlns="http://www.w3.org/2000/svg">
+  <title>A conversation in SAG</title>
+  <style>
+    .f { fill: var(--surface); }
+    .side { fill: var(--sidebar); }
+    .line { stroke: var(--line); stroke-width: 1; fill: none; }
+    .soft { fill: var(--soft); }
+    .t { fill: var(--fg); font: 13px var(--ui); }
+    .tm { fill: var(--muted); font: 12px var(--ui); }
+    .tt { fill: var(--muted); font: 10.5px var(--ui); letter-spacing: .07em; }
+    .ti { fill: var(--fg); font: 600 13px var(--ui); }
+    .inv { fill: var(--on-panel); font: 12.5px var(--ui); }
+    /* On the --ink button, which inverts, rather than on the panel, which does not. */
+    .onink { fill: var(--on-ink); font: 12.5px var(--ui); }
+    .invm { fill: var(--on-panel); font: 11.5px var(--ui); opacity: .62; }
+    .mono { font-family: var(--mono); }
+    .ink { fill: var(--ink); }
+    .g { stroke: var(--muted); stroke-width: 1.4; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+  </style>
+
+  <rect x=".5" y=".5" width="1159" height="705" rx="13" class="f line"/>
+  <clipPath id="win"><rect x="1" y="1" width="1158" height="704" rx="12"/></clipPath>
+  <g clip-path="url(#win)">
+
+    <!-- ───────────────────────── sidebar ───────────────────────── -->
+    <rect x="1" y="1" width="275" height="704" class="side"/>
+    <line x1="276" y1="1" x2="276" y2="705" class="line"/>
+
+    <rect x="17" y="24" width="242" height="36" rx="9" class="ink"/>
+    <path d="M35 42h14M42 35v14" stroke="var(--on-ink)" stroke-width="1.6" stroke-linecap="round"/>
+    <text x="60" y="47" class="onink">New conversation</text>
+
+    <rect x="17" y="72" width="242" height="32" rx="8" class="soft"/>
+    <circle cx="34" cy="88" r="4.6" class="g"/><path d="M37.4 91.4 41 95" class="g"/>
+    <text x="50" y="92" class="tm">Search</text>
+
+    <text x="19" y="134" class="tt">TODAY</text>
+    <rect x="13" y="144" width="250" height="32" rx="7" fill="var(--sel)"/>
+    <text x="24" y="164" class="ti">Customers slipping this month</text>
+    <text x="24" y="200" class="t">Rewrite the onboarding email</text>
+    <text x="24" y="236" class="t">Why is the Tuesday job late?</text>
+
+    <text x="19" y="286" class="tt">YESTERDAY</text>
+    <text x="24" y="316" class="t">Reconcile the March invoices</text>
+    <text x="24" y="352" class="t">Draft the release notes</text>
+    <text x="24" y="388" class="t">Find every unowned account</text>
+
+    <text x="19" y="438" class="tt">LAST WEEK</text>
+    <text x="24" y="468" class="t">Which invoices are unpaid?</text>
+    <text x="24" y="504" class="t">Summarise the support week</text>
+    <text x="24" y="540" class="t">Check the staging deploy</text>
+    <text x="24" y="576" class="t">Who owns the Acme account?</text>
+
+    <line x1="1" y1="641" x2="276" y2="641" class="line"/>
+    <rect x="13" y="655" width="120" height="30" rx="7" fill="var(--sel)"/>
+    <path d="M27 664h12v9H27zM31 677h4" class="g"/>
+    <text x="48" y="674" class="t">Console</text>
+    <rect x="176" y="655" width="84" height="30" rx="8" class="line" fill="none"/>
+    <rect x="178" y="657" width="26" height="26" rx="6" fill="var(--sel)"/>
+    <path d="M185 665h12v8h-12zM189 676h4" class="g"/>
+    <circle cx="218" cy="670" r="3.4" class="g"/><path d="M218 663.2v-2.4M218 676.8v2.4M224.8 670h2.4M209.2 670h2.4M222.8 665.2l1.7-1.7M211.8 676.2l1.7-1.7M222.8 674.8l1.7 1.7M211.8 663.8l1.7 1.7" class="g"/>
+    <path d="M250 664a6.5 6.5 0 1 0 6 8 7.5 7.5 0 0 1-6-8Z" class="g"/>
+
+    <!-- ───────────────────────── conversation ───────────────────────── -->
+
+    <!-- what a person asked -->
+    <rect x="676" y="40" width="446" height="62" rx="12" class="soft"/>
+    <text x="696" y="66" class="t">Which customers slipped this month, and draft a</text>
+    <text x="696" y="86" class="t">follow-up for the three worth the most.</text>
+
+    <!-- how it got there -->
+    <path d="M320 133l5 5 5-5" class="g"/>
+    <text x="340" y="139" class="tm">Thought for 6 seconds</text>
+
+    <!-- a tool call, opened -->
+    <rect x="316" y="156" width="560" height="160" rx="11" fill="var(--panel)"/>
+    <text x="334" y="182" class="inv">Asked the customer database</text>
+    <rect x="765" y="168" width="93" height="22" rx="11" fill="var(--on-panel)" opacity=".13"/>
+    <path d="M774 179l3.5 3.5 6-6.5" stroke="var(--on-panel)" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity=".8"/>
+    <text x="790" y="183" class="invm">answered</text>
+    <line x1="334" y1="196" x2="858" y2="196" stroke="var(--on-panel)" stroke-width="1" opacity=".14"/>
+    <text x="334" y="218" class="invm mono">select name, mrr, last_seen from customers</text>
+    <text x="334" y="236" class="invm mono">where last_seen &lt; now() - interval 30 day</text>
+    <line x1="334" y1="252" x2="858" y2="252" stroke="var(--on-panel)" stroke-width="1" opacity=".14"/>
+    <text x="334" y="274" class="invm">Northwind Ltd</text><text x="628" y="274" class="inv">£4,180</text><text x="760" y="274" class="invm">41 days</text>
+    <text x="334" y="296" class="invm">Halcyon Group</text><text x="628" y="296" class="inv">£3,050</text><text x="760" y="296" class="invm">37 days</text>
+
+    <!-- the answer -->
+    <text x="316" y="352" class="t">Six accounts have gone quiet past thirty days. Three carry most of it:</text>
+    <text x="316" y="374" class="t">Northwind, Halcyon and Ardent, together £9,400 a month.</text>
+
+    <!-- a chart, drawn the way the product draws one -->
+    <rect x="316" y="396" width="560" height="150" rx="11" class="line" fill="none"/>
+    <text x="336" y="422" class="tt">MONTHLY VALUE AT RISK</text>
+    <g class="g" stroke-opacity=".35" stroke-width="1">
+      <line x1="336" y1="524" x2="856" y2="524"/>
+      <line x1="336" y1="486" x2="856" y2="486"/>
+      <line x1="336" y1="448" x2="856" y2="448"/>
+    </g>
+    <path d="M348 516 C 396 512 424 496 468 491 C 512 486 540 499 582 495 C 624 491 652 470 700 464 C 748 458 792 470 844 450"
+          stroke="var(--ink)" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="844" cy="450" r="3.4" class="ink"/>
+
+    <text x="316" y="580" class="t">I have drafted three follow-ups. Say the word and I will send them.</text>
+
+    <!-- the composer -->
+    <rect x="316.5" y="616.5" width="805" height="66" rx="15" class="line" fill="var(--surface)"/>
+    <text x="340" y="645" class="tm">Ask anything</text>
+    <circle cx="1029" cy="649" r="15" class="line" fill="none"/>
+    <path d="M1033 644.5l-8.5 8.5a3.4 3.4 0 0 0 4.8 4.8l8.5-8.5a5.6 5.6 0 0 0-8-8l-8.5 8.5a7.8 7.8 0 0 0 11 11l6-6" class="g" transform="translate(-4.5 -4)"/>
+    <circle cx="1069" cy="649" r="15" class="line" fill="none"/>
+    <path d="M1069 643a3.4 3.4 0 0 1 3.4 3.4v4a3.4 3.4 0 0 1-6.8 0v-4A3.4 3.4 0 0 1 1069 643Zm-6 7.4a6 6 0 0 0 12 0M1069 656.4v3.6" class="g"/>
+    <circle cx="1099" cy="649" r="15" class="ink"/>
+    <path d="M1099 643v12M1094 648l5-5 5 5" stroke="var(--on-ink)" stroke-width="1.7" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

@@ -1,0 +1,15 @@
+# What a page may tell the application about ITSELF.
+#
+# One thing: that it has drawn its first frame. That is what shows the window it
+# is in, and it has to be a command named here, because a page reaches this half
+# of the application through exactly one door and an undeclared call is refused
+# in silence (see machine.toml, which was written after that cost a day).
+#
+# Granted to this application's own screens AND to the served page, which is
+# unusual here and correct: the rule it serves is about windows, not about
+# trust, and a chat that cannot say it has painted is a chat nobody is shown.
+
+[[permission]]
+identifier = "allow-screens"
+description = "Report that this window's page has drawn its first frame, or its last."
+commands.allow = ["painted", "waiting_finished"]

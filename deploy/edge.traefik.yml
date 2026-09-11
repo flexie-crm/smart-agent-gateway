@@ -1,0 +1,67 @@
+# The two front doors, on a box where Traefik already owns 80 and 443.
+#
+# We add no proxy and touch no proxy configuration: the two public services join
+# Traefik's network and describe themselves in labels, and it does the rest,
+# including the certificates. Whatever else is on that box keeps working, because
+# nothing here is a change to it.
+#
+#   docker stack deploy -c sag.yml -c edge.traefik.yml sag
+#
+# Labels go under `deploy:` because Traefik's Swarm provider reads them off the
+# SERVICE, not off the container. A label in the ordinary place is a label it
+# will never see, and the symptom is a router that silently does not exist.
+#
+# Two names rather than one with paths, because they are two surfaces with two
+# audiences: the console administers a workspace, the chat is where people use
+# it. Split by name, either can be taken off the internet without touching the
+# other.
+#
+# Both names must already resolve to this box. Certificates are issued over the
+# HTTP challenge, so a name pointing somewhere else does not get one, and keeps
+# not getting one.
+
+services:
+  # The console, and the API. ONE origin, deliberately (KB/19): the page and the
+  # requests it makes come from the same name, which is what lets the session
+  # cookie stay `SameSite=Lax` and path-scoped instead of needing the exemptions
+  # a cross-site arrangement asks for. The orchestrator serves the built console
+  # itself, so everything goes to it.
+  orchestrator:
+    networks: [sag, traefik-web]
+    deploy:
+      labels:
+        traefik.enable: "true"
+        traefik.swarm.network: "traefik-web"
+        traefik.http.routers.sag-console.rule: "Host(`${SAG_CONSOLE_DOMAIN}`)"
+        traefik.http.routers.sag-console.entrypoints: "websecure"
+        traefik.http.routers.sag-console.tls.certresolver: "${SAG_TRAEFIK_CERTRESOLVER:-le}"
+        traefik.http.routers.sag-console.service: "sag-console"
+        traefik.http.services.sag-console.loadbalancer.server.port: "8080"
+        # An answer is written a token at a time and a stream can be quiet
+        # between them, so nothing may buffer it and nothing may give up on it.
+        # This is the same reason the machine emits its own keep-alives.
+        traefik.http.services.sag-console.loadbalancer.responseforwarding.flushinterval: "-1"
+
+  # The chat. Its own nginx serves the files and proxies `/v1` to the
+  # orchestrator, so the API is same-origin here too and no CORS is involved on
+  # either surface.
+  chat:
+    networks: [sag, traefik-web]
+    deploy:
+      labels:
+        traefik.enable: "true"
+        traefik.swarm.network: "traefik-web"
+        traefik.http.routers.sag-chat.rule: "Host(`${SAG_CHAT_DOMAIN}`)"
+        traefik.http.routers.sag-chat.entrypoints: "websecure"
+        traefik.http.routers.sag-chat.tls.certresolver: "${SAG_TRAEFIK_CERTRESOLVER:-le}"
+        traefik.http.routers.sag-chat.service: "sag-chat"
+        traefik.http.services.sag-chat.loadbalancer.server.port: "80"
+        traefik.http.services.sag-chat.loadbalancer.responseforwarding.flushinterval: "-1"
+
+networks:
+  # Already there, made by whoever set Traefik up. Declared external so this
+  # stack joins it and never tries to own it: a stack that created this network
+  # would also remove it when it was taken down, and it is not ours to remove.
+  traefik-web:
+    external: true
+    name: "${SAG_TRAEFIK_NETWORK:-traefik-web}"

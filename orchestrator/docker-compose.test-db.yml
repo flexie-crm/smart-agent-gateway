@@ -1,0 +1,136 @@
+# The databases the test suite runs against, and nothing else.
+#
+# It is separate from the stack's own MariaDB for one reason: a database whose
+# entire contents are created and thrown away within seconds does not need to
+# survive a power cut, and paying for that is most of what the suite spends its
+# time on. Every commit on a normal server is flushed to physical disk before it
+# returns; here that is relaxed, which is reckless for real data and free for
+# data that exists for the length of one test.
+#
+# It also means your own databases keep full durability. Nothing here can reach
+# them: different container, different port, different data.
+#
+#   make test-db-up      start it
+#   make test-db-down    stop it and throw the data away
+#
+# Then point the suite at them (the ports are 3307 and 5433, not the usual ones):
+#
+# The MariaDB user is root, and that is not laziness: every test package makes
+# a scratch database of its OWN (flexie_sag_test_api, ...) so packages running
+# in parallel cannot truncate each other, and creating those needs rights over
+# more than one database. The unprivileged user this image makes can only touch
+# the one it was named for, so the suite fails on the first package with
+# "Access denied ... to database flexie_sag_test_api". Nothing here holds
+# anything real; it is a container whose entire contents are thrown away.
+#
+#   export SAG_TEST_DSN='root:sagtest-root@tcp(127.0.0.1:3307)/flexie_sag_test?parseTime=true'
+#   export SAG_TEST_PG_DSN='postgres://sagtest:sagtest@127.0.0.1:5433/postgres'
+#   export SAG_TEST_TUNNEL='ssh://jump:jumppass@127.0.0.1:2222/test-db-postgres:5432'
+#   export SAG_TEST_TUNNEL_DB='postgres://sagtest:sagtest@ignored/postgres'
+
+services:
+  test-db:
+    image: mariadb:11.4
+    ports:
+      # 3307, so it cannot be confused with a server holding anything real.
+      - "3307:3306"
+    command:
+      # The schema declares utf8mb4_unicode_ci, so the server must agree, or a
+      # table created without an explicit collation compares text differently
+      # from every table around it.
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      # Do not flush the log to disk on every commit. A crash loses the last
+      # moment of writes, which here is a database about to be deleted anyway.
+      # This is the setting that makes the difference.
+      - --innodb-flush-log-at-trx-commit=0
+      # No torn-page protection: the same trade, for the same reason.
+      - --innodb-doublewrite=0
+      # The log is written by the same thread rather than flushed separately,
+      # and there is more room before it has to be.
+      - --innodb-flush-method=nosync
+      - --innodb-log-file-size=256M
+      # A suite runs many short connections and holds a lot of small tables.
+      - --max-connections=500
+      - --innodb-buffer-pool-size=512M
+      - --performance-schema=0
+    environment:
+      MARIADB_DATABASE: flexie_sag_test
+      MARIADB_USER: sagtest
+      MARIADB_PASSWORD: sagtest
+      MARIADB_ROOT_PASSWORD: sagtest-root
+    # The data lives in memory. It is rebuilt by the next run, so there is
+    # nothing to keep, and this takes the disk out of the picture entirely.
+    tmpfs:
+      - /var/lib/mysql:rw,size=2g
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  # PostgreSQL, for the driver suite and for the query tool's policy on it.
+  # The policy is enforced by reading a statement the way the server reads it,
+  # and whether those two readings agree is a question only a real server can
+  # answer: every route out that suite found, it found by running against one.
+  test-db-postgres:
+    image: postgres:17
+    ports:
+      # 5433, so it cannot be confused with a server holding anything real.
+      - "5433:5432"
+    command:
+      # The same trade the MariaDB above makes, for the same reason: this data
+      # exists for the length of one test and does not need to survive a power
+      # cut. fsync off is the setting that makes the difference.
+      - -c
+      - fsync=off
+      - -c
+      - full_page_writes=off
+      - -c
+      - synchronous_commit=off
+      - -c
+      - max_connections=500
+    environment:
+      POSTGRES_USER: sagtest
+      POSTGRES_PASSWORD: sagtest
+    # The data lives in memory, for the same reason it does above.
+    tmpfs:
+      - /var/lib/postgresql/data:rw,size=1g
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "sagtest"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  # An SSH bastion in front of the PostgreSQL above, for the end-to-end tunnel
+  # test. The point of it is the address it forwards to: test-db-postgres:5432
+  # is a name only this network resolves, so the host cannot reach that database
+  # any other way. Without that, a tunnel that quietly did nothing would pass
+  # the test by connecting directly.
+  #
+  # It is configured here rather than pulled ready-made because the obvious
+  # image regenerates its sshd_config on start and ships AllowTcpForwarding no,
+  # which is the one setting this needs.
+  test-db-bastion:
+    image: alpine:3.20
+    ports:
+      - "2222:22"
+    command:
+      - sh
+      - -c
+      - |
+        apk add --no-cache openssh >/dev/null &&
+        ssh-keygen -A >/dev/null &&
+        adduser -D jump &&
+        echo 'jump:jumppass' | chpasswd &&
+        sed -i 's/^#*AllowTcpForwarding.*/AllowTcpForwarding yes/' /etc/ssh/sshd_config &&
+        sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config &&
+        /usr/sbin/sshd -D -e
+    depends_on:
+      test-db-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "sh", "-c", "netstat -lnt | grep -q ':22 '"]
+      interval: 3s
+      timeout: 5s
+      retries: 30

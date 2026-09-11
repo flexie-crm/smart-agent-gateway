@@ -1,0 +1,73 @@
+# The machine that runs our own models.
+#
+# A file of its own rather than a profile, because neither Swarm nor a rendered
+# stack accepts profiles, and because this is genuinely a separate decision: the
+# image takes twenty minutes to build, the models are tens of gigabytes, and the
+# hardware for it is frequently not the hardware everything else runs on.
+#
+#   ./build.sh machine
+#   docker stack deploy -c sag.yml -c edge.traefik.yml -c machine.yml sag
+#
+# The join token does not exist until the orchestrator has been up once, so this
+# is a second step and not a missing dependency:
+#
+#   docker exec $(docker ps -qf name=sag_orchestrator) sag join-token
+#
+# Never published. Nothing outside this stack has any business reaching it, and
+# the orchestrator is the only thing that calls it.
+services:
+  machine:
+    image: flexie-sag/machine:latest
+    build:
+      context: ../inference
+      args:
+        ACCEL: "${SAG_NODE_ACCEL:-}"
+    restart: unless-stopped
+    environment:
+      SAG_URL: "http://orchestrator:8080"
+      # NO HYPHEN in that message, and it is not a style choice.
+      #
+      # Compose reads `-` as the default-value operator wherever it appears
+      # inside `${...}`, including inside the message of a `:?` guard. So a
+      # message containing a hyphen makes it substitute the text AFTER the
+      # hyphen as the value: this line once said "run sag join-token on the
+      # gateway" and every machine was started with `token on the gateway` as
+      # its join token. Proved on a real box, and a colon is fine, only the
+      # hyphen is not.
+      #
+      # That is worse than a guard that does not work, because it turns a
+      # missing value into a plausible wrong one. The only reason it surfaced at
+      # all is that the machine checks the SHAPE of its token before using it
+      # and said so: "it names no authority".
+      #
+      # OPTIONAL, and it did not used to be. A token is spent by the machine
+      # that registers on it and every check-in after that is signed with the
+      # key this container minted onto `machine-data`, so redeploying a machine
+      # that has already joined needs nothing here. It is required exactly once,
+      # for a container with an empty volume, which is a machine with no
+      # identity, which is a new machine. Leaving a stale value is harmless: it
+      # is a dead string, and the container will not look at it.
+      SAG_JOIN_TOKEN: "${SAG_JOIN_TOKEN:-}"
+      SAG_NODE_NAME: "${SAG_NODE_NAME:-machine-1}"
+      # The address the ORCHESTRATOR should use. On a container network the
+      # service name is that address, and it is stable across restarts in a way
+      # a container's own IP is not.
+      SAG_NODE_ADVERTISE: "machine:19443"
+      SAG_NODE_LOG: "${SAG_NODE_LOG:-sag_inference=info,warn}"
+    volumes:
+      - machine-data:/var/lib/sag-inference
+    networks: [sag]
+    depends_on:
+      - orchestrator
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+
+
+networks:
+  sag:
+    driver: overlay
+
+volumes:
+  machine-data:

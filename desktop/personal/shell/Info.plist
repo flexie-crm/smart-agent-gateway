@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- The sentence macOS itself shows when it asks. Product copy, not
+       configuration: it is the only thing that decides whether somebody presses
+       Allow, so it says what they get rather than what we want. Without the key
+       WKWebView does not expose navigator.mediaDevices at all, so there is no
+       prompt to answer and the microphone simply never appears. -->
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Dictate messages instead of typing them.</string>
+</dict>
+</plist>

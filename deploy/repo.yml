@@ -1,0 +1,56 @@
+# The public download host: sag-repo.flexie.io
+#
+#   docker stack deploy -c repo.yml sagrepo
+#
+# It is its own stack rather than a service inside sag.yml, because it shares
+# nothing with the deployment: no database, no queue, no secret, and it stays up
+# while the gateway is being rolled. What it needs is a directory of binaries and
+# a route.
+#
+# TLS is Traefik's, through the same ACME resolver every other site on this box
+# uses. Nothing about certificates is configured here beyond naming the resolver:
+# a second copy of that configuration is a second thing to get wrong.
+#
+# The directory is a bind mount and is READ ONLY to the container. Publishing a
+# build is `release.sh` writing into it on the host; the service only ever reads,
+# so a bug in a public, unauthenticated process cannot alter what is published.
+
+services:
+  repo:
+    image: flexie-sag/repo:latest
+    build:
+      context: ..
+      dockerfile: orchestrator/Dockerfile.repo
+      args:
+        # Which build this is, on every log line. A container has no repository
+        # to ask, so it is passed in; empty here means "unknown", which is
+        # honest rather than wrong.
+        SAG_VERSION: "${SAG_VERSION:-unknown}"
+    volumes:
+      - "${SAG_REPO_DIST_DIR:-/srv/sag-repo/dist}:/srv/dist:ro"
+    environment:
+      SAG_REPO_DIST_DIR: /srv/dist
+      SAG_REPO_ADDR: ":8080"
+      # Traefik terminates TLS and appends the client to X-Forwarded-For. The
+      # reachability probe reads the LAST hop of that header, which is only
+      # trustworthy because a proxy we run wrote it, so this must be false for
+      # any deployment that exposes the port directly.
+      SAG_REPO_BEHIND_PROXY: "true"
+    networks: [traefik-web]
+    deploy:
+      replicas: 1
+      labels:
+        traefik.enable: "true"
+        traefik.swarm.network: "traefik-web"
+        traefik.http.routers.sag-repo.rule: "Host(`${SAG_REPO_DOMAIN:-sag-repo.flexie.io}`)"
+        traefik.http.routers.sag-repo.entrypoints: "websecure"
+        traefik.http.routers.sag-repo.tls.certresolver: "${SAG_TRAEFIK_CERTRESOLVER:-le}"
+        traefik.http.routers.sag-repo.service: "sag-repo"
+        traefik.http.services.sag-repo.loadbalancer.server.port: "8080"
+      restart_policy:
+        condition: any
+
+networks:
+  traefik-web:
+    external: true
+    name: "${SAG_TRAEFIK_NETWORK:-traefik-web}"
