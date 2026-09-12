@@ -122,11 +122,11 @@ func TestEachAgentIsItsOwnAgent(t *testing.T) {
 		t.Fatalf("create agent: %v", err)
 	}
 
-	first, err := e.app.ResolveAgent(ctx, e.ws.ID, user.ID, "", "", "sysadmin")
+	first, err := e.app.ResolveAgent(ctx, e.ws.ID, user.ID, app.Computer{}, "sysadmin")
 	if err != nil {
 		t.Fatalf("resolve first agent: %v", err)
 	}
-	second, err := e.app.ResolveAgent(ctx, e.ws.ID, user.ID, "", "", "sysadmin")
+	second, err := e.app.ResolveAgent(ctx, e.ws.ID, user.ID, app.Computer{}, "sysadmin")
 	if err != nil {
 		t.Fatalf("resolve second agent: %v", err)
 	}

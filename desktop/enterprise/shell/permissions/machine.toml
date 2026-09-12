@@ -16,5 +16,5 @@
 
 [[permission]]
 identifier = "allow-machine"
-description = "Start and stop the machine link, read whether it is up, and read which installation this is."
-commands.allow = ["link_start", "link_stop", "link_up", "link_device", "chosen_folder", "choose_folder", "forget_folder", "remember_appearance", "chosen_appearance", "show_context_menu", "check_for_update"]
+description = "Start and stop the machine link, read whether it is up, read which installation this is, and read what kind of computer it is."
+commands.allow = ["link_start", "link_stop", "link_up", "link_device", "chosen_folder", "choose_folder", "forget_folder", "remember_appearance", "chosen_appearance", "show_context_menu", "check_for_update", "machine_environment"]

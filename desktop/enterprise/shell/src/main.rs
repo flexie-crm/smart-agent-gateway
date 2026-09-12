@@ -132,6 +132,7 @@ fn main() {
             sag_desktop::appearance::chosen_appearance,
             sag_desktop::menu::show_context_menu,
             sag_desktop::update::check_for_update,
+            sag_desktop::environment::machine_environment,
             chosen_folder,
             choose_folder,
             forget_folder
@@ -141,6 +142,11 @@ fn main() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // What kind of computer this is, worked out now rather than when
+            // the first message is sent: it runs the person's shell once, and
+            // that is a thing to do while a window is opening, not while
+            // somebody is waiting for an answer.
+            sag_desktop::environment::warm();
             // Before any window is built: what shows one is its page saying it
             // has drawn a frame, and this is how long the first of them stays.
             screens::holds_the_waiting_screen_for(WAITING_STAYS);
@@ -445,4 +451,65 @@ async fn choose_folder(window: WebviewWindow) -> Result<Option<String>, String> 
 #[tauri::command]
 fn forget_folder() -> Result<(), String> {
     sag_desktop::workspace::forget()
+}
+
+/// The permission files, read as text so a test can compare them with the
+/// commands this binary registers.
+#[cfg(test)]
+const PERMISSION_FILES: &[&str] = &[
+    include_str!("../permissions/machine.toml"),
+    include_str!("../permissions/screens.toml"),
+    include_str!("../permissions/setup.toml"),
+];
+
+#[cfg(test)]
+mod permission_contract {
+    /// Every command the page can call has to be NAMED in a permission, or the
+    /// call is refused and nobody hears about it.
+    ///
+    /// A page served by the gateway is REMOTE to this application, and Tauri
+    /// allows a remote page none of its commands unless a permission names them
+    /// and a capability grants it. Registering one in `generate_handler!` is
+    /// only half; the other half is a TOML file, and forgetting it fails the way
+    /// this whole area fails, which is silently: the page asks, gets "not
+    /// allowed", and the code that asked treats a refusal like an absence.
+    ///
+    /// It has now happened three times, twice before this test existed (the
+    /// right-click menu, then the machine environment) and the permission file's
+    /// own comment is about the first of them. A comment did not stop the
+    /// second, so this is a test.
+    ///
+    /// Read from the source text rather than from the macro, because the macro
+    /// expands to code and there is nothing left to compare by then. It is the
+    /// two lists that have to agree, and both are text.
+    #[test]
+    fn commands_are_all_permitted() {
+        let source = include_str!("main.rs");
+        let start = source
+            .find("generate_handler![")
+            .expect("the handler list moved; this test reads it by name");
+        let body = &source[start..];
+        let end = body.find("])").expect("the handler list is not closed");
+        let registered: Vec<String> = body[..end]
+            .lines()
+            .skip(1)
+            .filter_map(|line| {
+                let name = line.trim().trim_end_matches(',').trim();
+                let name = name.rsplit("::").next().unwrap_or(name);
+                (!name.is_empty() && !name.starts_with("//")).then(|| name.to_string())
+            })
+            .collect();
+        assert!(!registered.is_empty(), "no commands were read from the handler list");
+
+        let permissions = super::PERMISSION_FILES.concat();
+        let unpermitted: Vec<&String> = registered
+            .iter()
+            .filter(|name| !permissions.contains(name.as_str()))
+            .collect();
+        assert!(
+            unpermitted.is_empty(),
+            "these commands are registered but no permission names them, so the \
+             page calls them and is refused with nothing written down anywhere: {unpermitted:?}"
+        );
+    }
 }

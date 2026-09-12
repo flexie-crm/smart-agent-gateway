@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 )
 
@@ -194,6 +195,10 @@ type Stream struct {
 	// The zero value shows everything, so anything that builds a stream without
 	// an opinion (an agent's inner loop, a test) is unaffected.
 	show Show
+	// wrote records whether this block has emitted any real text yet, so a
+	// blank delta before the first word can be told from the paragraph break
+	// between two.
+	wrote bool
 }
 
 // Show is what a person may see of HOW an answer was reached: the model's
@@ -220,6 +225,30 @@ func Everything() Show { return Show{Reasoning: true, Tools: true} }
 
 func NewStream(sink Sink) *Stream { return &Stream{sink: sink, show: Everything()} }
 
+// leadingBlank reports a text frame that cannot draw anything: whitespace with
+// no words yet written to put it between.
+//
+// The flag is per BLOCK, not per turn. A tool call ends the text around it, so
+// what follows starts again with nothing written, and the newlines a model
+// emits on its way into a second tool call are as empty as the first were.
+func (s *Stream) leadingBlank(frame Frame) bool {
+	text, ok := frame.Message.(string)
+	switch frame.Type {
+	case FrameDelta, FrameReasoningDelta:
+		if !ok {
+			return false
+		}
+		if strings.TrimSpace(text) != "" {
+			s.wrote = true
+			return false
+		}
+		return !s.wrote
+	case FrameToolPreparing, FrameTool, FrameAgentStart, FrameAgentEnd:
+		s.wrote = false
+	}
+	return false
+}
+
 // NewStreamShowing builds a stream that carries only what this person may see.
 func NewStreamShowing(sink Sink, show Show) *Stream {
 	return &Stream{sink: sink, show: show}
@@ -229,6 +258,25 @@ func (s *Stream) Write(frame Frame) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
+		return nil
+	}
+	if s.leadingBlank(frame) {
+		// Nothing to draw, so nothing is sent.
+		//
+		// A model about to call a tool commonly emits "\n\n" as the whole of
+		// its text. Written out, a client accumulates it into a message holding
+		// two newlines, draws a row for it, and the row costs the spacing above
+		// and below whatever its height: a band of blank between two tool rows
+		// with nothing visible making it. It has been fixed twice on the way to
+		// the screen, once in the store (HasText trims, migration 60 removed 49
+		// such rows) and once in the chat, and this is the door both of those
+		// were patching around.
+		//
+		// LEADING only, and that is the whole subtlety. Whitespace BETWEEN
+		// words is the paragraph break a model meant; dropping every blank
+		// delta would run an answer together. Whitespace before anything has
+		// been written can only ever produce an empty row, so that is the one
+		// this refuses.
 		return nil
 	}
 	if s.withheld(frame) {

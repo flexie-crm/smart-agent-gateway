@@ -177,10 +177,10 @@
       "description": "Permission identifier",
       "oneOf": [
         {
-          "description": "Start and stop the machine link, read whether it is up, and read which installation this is.",
+          "description": "Start and stop the machine link, read whether it is up, read which installation this is, and read what kind of computer it is.",
           "type": "string",
           "const": "allow-machine",
-          "markdownDescription": "Start and stop the machine link, read whether it is up, and read which installation this is."
+          "markdownDescription": "Start and stop the machine link, read whether it is up, read which installation this is, and read what kind of computer it is."
         },
         {
           "description": "Report that this window's page has drawn its first frame, or its last.",

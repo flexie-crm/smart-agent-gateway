@@ -55,6 +55,11 @@ const AT_NEWEST = 100;
 /** And what counts as being AT the bottom, for deciding whether to stay there.
  *  Strict on purpose: a generous number here is a reader who cannot leave. */
 const AT_THE_BOTTOM = 2;
+
+// How far the view may drift on its own before it counts as a reader moving it.
+// The webview re-anchors by a few pixels when content is added, and a person
+// scrolling moves far more than this.
+const ANCHORING = 12;
 /** Rows built beyond the fold, so arriving at one is not waiting for one. */
 const OVERSCAN = 8;
 /** How near the far end asks for the page before it. */
@@ -178,9 +183,43 @@ export const Conversation = <T,>({
   // because every render puts you back. That was the pull somebody hit while
   // nothing was even streaming.
   const wasAtBottom = useRef(true);
+  // Where the last pin put it, so growth can be told from a reader moving.
+  //
+  // A row is laid out at an ESTIMATE and measures itself afterwards, and in the
+  // application's webview that measurement lands a paint LATER than it does in
+  // a browser. An approval card is the case that shows it: measured in the real
+  // thing, scrollHeight went 2620 -> 2892 in one step while scrollTop stayed
+  // exactly where the pin had left it. Against a two-pixel tolerance that reads
+  // as "they scrolled away", so the view never followed again and the card sat
+  // below the fold until somebody went looking for it. The same bundle in
+  // Chromium never does this, which is why it took the running application to
+  // see it.
+  //
+  // Growth below the fold does not move scrollTop. A reader does. So an
+  // untouched scrollTop still counts as following, however much taller the
+  // conversation just became, and the moment they actually scroll, this stops
+  // being true and nothing re-pins them.
+  //
+  // Comparing scrollTop against the exact value the pin wrote is not enough:
+  // measured in the application, it moved about four pixels between the growth
+  // and the next render, which is the webview's own scroll anchoring and not a
+  // reader. So the question asked is the one that actually matters, which is
+  // whether the conversation GREW while the reader sat still.
+  const lastSeen = useRef({ height: 0, top: 0 });
   if (viewport.current) {
     const el = viewport.current;
-    wasAtBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight <= AT_THE_BOTTOM;
+    const atEnd = el.scrollHeight - el.scrollTop - el.clientHeight <= AT_THE_BOTTOM;
+    const grew = el.scrollHeight > lastSeen.current.height;
+    const reader = Math.abs(el.scrollTop - lastSeen.current.top) > ANCHORING;
+    if (atEnd) {
+      wasAtBottom.current = true;
+    } else if (grew && !reader) {
+      // Taller than it was, and they did not move: still following, and the
+      // effect below puts the view back on the end it just gained.
+    } else {
+      wasAtBottom.current = false;
+    }
+    lastSeen.current = { height: el.scrollHeight, top: el.scrollTop };
   }
   useLayoutEffect(() => {
     const el = viewport.current;
@@ -197,6 +236,9 @@ export const Conversation = <T,>({
     // move the end does.
     const end = el.scrollHeight - el.clientHeight;
     if (Math.abs(el.scrollTop - end) > 1) el.scrollTop = end;
+    // What the next render compares against, so the growth it is about to see
+    // is measured from where this pin left things.
+    lastSeen.current = { height: el.scrollHeight, top: el.scrollTop };
   }, [total, rows.length, conversation]);
 
   const opened = useRef(conversation);
@@ -244,6 +286,15 @@ export const Conversation = <T,>({
               {virtualItems.map((row) => {
                 const item = rows[row.index];
                 if (!item) return null;
+                // A row that draws nothing must COST nothing.
+                //
+                // An assistant turn with no visible part renders null on
+                // purpose (rendersNothing, which owns that rule and is tested),
+                // but the wrapper around it still carried pb-3, so it left
+                // twelve pixels of nothing behind. Next to an answered approval
+                // that reads as the one row in the transcript with extra space
+                // under it, which is exactly what it looked like.
+                const drawn = renderItem(item);
                 return (
                   <div
                     key={row.key}
@@ -251,9 +302,9 @@ export const Conversation = <T,>({
                     ref={virtualizer.measureElement}
                     className="w-full"
                   >
-                    <div className="mx-auto w-full max-w-[776px] px-4 pb-3">
-                      {renderItem(item)}
-                    </div>
+                    {drawn === null ? null : (
+                      <div className="mx-auto w-full max-w-[776px] px-4 pb-3">{drawn}</div>
+                    )}
                   </div>
                 );
               })}

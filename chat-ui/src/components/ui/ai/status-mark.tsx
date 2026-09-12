@@ -18,12 +18,17 @@ import { Loader2, Clock, Check, X, Minus } from 'lucide-react'
  * against the 16px line of text-xs. The glyph is a fixed fraction of the badge,
  * so the proportion holds at either size rather than being tuned twice.
  *
+ * And 14px, which is not a line height but a NEIGHBOUR: in the transcript this
+ * mark sits in a column of tool rows whose icons are 14px outlines, and a 16px
+ * filled disc among them read as a different kind of row on a different grid.
+ * Measured rather than judged: 16 against 14, in a rendered conversation.
+ *
  * A spinner stays an outline, because it is motion rather than a state, and it
  * keeps the same box so nothing shifts when the thing finishes.
  */
-export function StatusMark({ status, size = 4 }: { status: string; size?: 4 | 5 }) {
-  const box = size === 5 ? 'size-5' : 'size-4'
-  const glyph = size === 5 ? 'size-3' : 'size-2.5'
+export function StatusMark({ status, size = 4 }: { status: string; size?: 3.5 | 4 | 5 }) {
+  const box = size === 5 ? 'size-5' : size === 3.5 ? 'size-3.5' : 'size-4'
+  const glyph = size === 5 ? 'size-3' : size === 3.5 ? 'size-2' : 'size-2.5'
 
   if (status === 'running' || status === '') {
     return <Loader2 className={`${box} shrink-0 animate-spin text-muted-foreground`} />

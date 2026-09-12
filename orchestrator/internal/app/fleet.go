@@ -243,7 +243,7 @@ func (a *App) RunFleetMemberJob(ctx context.Context, job *model.Job) error {
 	}
 	// Resolved LIVE, like every other path that starts an agent from a row: one
 	// an administrator removed or revoked while this waited is not quietly run.
-	sub, err := a.ResolveAgent(ctx, del.WorkspaceID, session.UserID, noComputer, noFolder, del.AgentKey)
+	sub, err := a.ResolveAgent(ctx, del.WorkspaceID, session.UserID, noComputer(), del.AgentKey)
 	if err != nil {
 		a.Log.Warn().Err(err).Str("agent", del.AgentKey).Msg("fleet member agent unavailable")
 		a.settleFleetMember(ctx, del.ID, fleetID, model.DelegationFailed, nil,
@@ -512,7 +512,7 @@ func (a *App) RunFleetResumeJob(ctx context.Context, job *model.Job) error {
 		return nil
 	}
 
-	sub, err := a.ResolveAgent(ctx, del.WorkspaceID, p.Snapshot.UserID, noComputer, noFolder, del.AgentKey)
+	sub, err := a.ResolveAgent(ctx, del.WorkspaceID, p.Snapshot.UserID, noComputer(), del.AgentKey)
 	if err != nil {
 		a.Log.Warn().Err(err).Str("agent", del.AgentKey).Msg("resume: agent no longer available")
 		a.settleFleetMember(ctx, del.ID, p.FleetID, model.DelegationFailed, nil,
@@ -885,7 +885,7 @@ func (a *App) scheduleFleetCompletion(ctx context.Context, fleet *model.AgentFle
 		MaxIterations:    profile.MaxIterations,
 		MaxFleetAgents:   profile.MaxFleetAgents,
 		AutoApprove:      session.ApprovalMode == model.ApprovalAuto,
-		Agent:            a.AgentResolver(fleet.WorkspaceID, session.UserID, noComputer, noFolder),
+		Agent:            a.AgentResolver(fleet.WorkspaceID, session.UserID, noComputer()),
 		StartBackground:  a.StartBackground,
 		StartFleet:       a.StartFleet,
 		CompletedFleetID: fleet.ID,

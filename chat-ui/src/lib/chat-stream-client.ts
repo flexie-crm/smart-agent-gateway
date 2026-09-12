@@ -2,7 +2,7 @@ import type { SSEFrame } from './chat-types';
 import { resolveDynamic } from './utils';
 import { apiFetch } from './api';
 import { traceCompletion } from './completion-trace';
-import { chosenFolder, machineDeviceId } from './machine-link';
+import { chosenFolder, machineDeviceId, machineEnvironment } from './machine-link';
 
 export type ChatStreamHandler = (chunk: string, isAgent?: boolean) => void;
 export type ChatStreamFrameHandler = (frame: SSEFrame) => void;
@@ -144,6 +144,17 @@ export class ChatStreamClient {
       // too.
       const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
       if (zone) body.timezone = zone;
+      // And what kind of computer it is: the system, the shell a command will
+      // actually run in, how paths are written, and which programs are there.
+      // The server cannot deduce any of it, and a model left to guess writes
+      // the median of everything it has read, which on Windows is wrong twice
+      // over: wrong system, then wrong shell.
+      //
+      // Sent whatever the answer is. The gateway decides whether to put it in
+      // front of the model, because only it knows whether any tool can reach
+      // this computer at all.
+      const machine = await machineEnvironment();
+      if (machine) body.machine = machine;
       if (this.chatId != null) {
         // The id is opaque: the server assigns it and the client only ever
         // repeats it back. Nothing here knows or cares what it is made of.

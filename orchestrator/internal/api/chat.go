@@ -29,8 +29,8 @@ type chatHandlers struct{ app *app.App }
 // agentResolver binds a turn to the app's agent resolution. It delegates
 // to the app so the chat surface and the server-initiated completion turn resolve
 // agents through one path.
-func (h *chatHandlers) agentResolver(workspaceID, userID int64, deviceID, folder string) agent.AgentResolver {
-	return h.app.AgentResolver(workspaceID, userID, deviceID, folder)
+func (h *chatHandlers) agentResolver(workspaceID, userID int64, c app.Computer) agent.AgentResolver {
+	return h.app.AgentResolver(workspaceID, userID, c)
 }
 
 func mountChat(r chi.Router, a *app.App) {
@@ -109,6 +109,17 @@ type streamRequest struct {
 	// answering "I cannot see your project" while holding them.
 	WorkingFolder string `json:"working_folder"`
 
+	// Machine is what kind of computer that is: the system, the shell a command
+	// will actually run in, how paths are written there, and which of a short
+	// list of programs are installed.
+	//
+	// Sent with every message rather than asked for, because it can change
+	// while a conversation is open and there is nowhere to ask: the control
+	// socket's first message is its only unprompted one. Nil from a browser and
+	// from an application too old to say, and then nothing is said about the
+	// machine rather than something guessed.
+	Machine *app.MachineEnv `json:"machine"`
+
 	// Timezone is where the person is, by IANA name ("Europe/Tirane"), as their
 	// own browser or application reports it.
 	//
@@ -162,6 +173,7 @@ func (h *chatHandlers) stream(w http.ResponseWriter, r *http.Request) {
 		UserID:           claims.UserID,
 		DeviceID:         req.DeviceID,
 		WorkingFolder:    req.WorkingFolder,
+		Machine:          req.Machine,
 		Channel:          model.ChannelChat,
 		PreferredModelID: req.ModelID,
 	}
@@ -253,7 +265,7 @@ func (h *chatHandlers) stream(w http.ResponseWriter, r *http.Request) {
 		// sessionNeedsTitle, where a turn that stopped for approval had the same
 		// problem and got the same answer. Both paths now ask it.
 		NameConversation: session.Title == "",
-		Agent:            h.agentResolver(claims.WorkspaceID, claims.UserID, req.DeviceID, req.WorkingFolder),
+		Agent:            h.agentResolver(claims.WorkspaceID, claims.UserID, app.Computer{DeviceID: req.DeviceID, Folder: req.WorkingFolder, Env: req.Machine}),
 		StartBackground:  h.app.StartBackground,
 		StartFleet:       h.app.StartFleet,
 	}
@@ -615,6 +627,7 @@ func (h *chatHandlers) resume(w http.ResponseWriter, r *http.Request, req stream
 		UserID:           userID,
 		DeviceID:         req.DeviceID,
 		WorkingFolder:    req.WorkingFolder,
+		Machine:          req.Machine,
 		Channel:          model.ChannelChat,
 		PreferredModelID: snapshot.ModelID,
 		SessionID:        snapshot.SessionID,
@@ -665,7 +678,7 @@ func (h *chatHandlers) resume(w http.ResponseWriter, r *http.Request, req stream
 		MaxIterations:   profile.MaxIterations,
 		MaxFleetAgents:  profile.MaxFleetAgents,
 		AutoApprove:     autoApprove,
-		Agent:           h.agentResolver(workspaceID, userID, req.DeviceID, req.WorkingFolder),
+		Agent:           h.agentResolver(workspaceID, userID, app.Computer{DeviceID: req.DeviceID, Folder: req.WorkingFolder, Env: req.Machine}),
 		StartBackground: h.app.StartBackground,
 		StartFleet:      h.app.StartFleet,
 		// The turn that parked could not name the conversation: it had no answer
@@ -1257,7 +1270,7 @@ func (h *chatHandlers) parkedToolSchema(ctx context.Context, claims *auth.Claims
 		// No computer: this only reads the parked tool's schema, to decide
 		// whether the card can still be drawn. Nothing is run, so nothing needs
 		// to reach anywhere.
-		sub, err := h.app.ResolveAgent(ctx, claims.WorkspaceID, claims.UserID, "", "", park.AgentKey)
+		sub, err := h.app.ResolveAgent(ctx, claims.WorkspaceID, claims.UserID, app.Computer{}, park.AgentKey)
 		if err != nil {
 			return tool.Schema{}, false
 		}

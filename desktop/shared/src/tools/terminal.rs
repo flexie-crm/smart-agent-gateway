@@ -345,7 +345,20 @@ impl Session {
         let started = started
             .arg(shell_flag())
             .arg(&script)
-            .current_dir(directory)
+            .current_dir(directory);
+        // The person's PATH, not this process's.
+        //
+        // An application opened from the Finder is started by launchd with
+        // `/usr/bin:/bin:/usr/sbin:/sbin`, so everything they installed
+        // themselves is invisible to it: `node -v` answered "command not found"
+        // inside the application and worked in their own terminal. A tool
+        // started FROM a terminal inherits this and never notices; this one has
+        // to ask for it.
+        let started = match crate::environment::run_path() {
+            Some(path) => started.env("PATH", path),
+            None => started,
+        };
+        let started = started
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -630,7 +643,7 @@ fn wrapped(command: &str, directory: &Path, exports: &Path) -> String {
 }
 
 #[cfg(target_os = "windows")]
-fn shell() -> String {
+pub(crate) fn shell() -> String {
     "cmd.exe".to_string()
 }
 
@@ -640,7 +653,7 @@ fn shell_flag() -> &'static str {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn shell() -> String {
+pub(crate) fn shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
 }
 

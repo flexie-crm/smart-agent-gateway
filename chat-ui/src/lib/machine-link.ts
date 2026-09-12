@@ -74,6 +74,32 @@ export async function machineDeviceId(): Promise<string> {
   return device;
 }
 
+/**
+ * What computer this is: the system, the shell, how paths are written, and
+ * which of a short list of programs are installed.
+ *
+ * Sent with every message, and NOT remembered, which is the one difference
+ * from the device id above. The device cannot change while the application is
+ * open; this can, because somebody installs Node in the middle of a
+ * conversation and the next thing they ask is to run it. The cost is a look
+ * along PATH on the Rust side, which is file lookups and no processes.
+ *
+ * Empty in a browser, where there is no computer the assistant can reach and
+ * so nothing worth telling it about one.
+ */
+export async function machineEnvironment(): Promise<unknown | null> {
+  const app = shell();
+  if (!app) return null;
+  try {
+    return await app.core.invoke('machine_environment');
+  } catch {
+    // An application older than this page has never heard of the command. It
+    // still works, it just says nothing about itself, and the gateway leaves
+    // the paragraph out rather than guessing.
+    return null;
+  }
+}
+
 /** What was learned already, without waiting. Empty until the first ask. */
 export function knownDeviceId(): string {
   return device ?? '';

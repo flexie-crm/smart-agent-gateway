@@ -98,7 +98,7 @@ func (a *App) agentRoster(ctx context.Context, workspaceID, userID int64) ([]age
 // deviceID is which of the person's computers the turn came from, carried so a
 // delegated agent can reach it too: an agent works on the person's behalf, and
 // what they can reach it can reach.
-func (a *App) ResolveAgent(ctx context.Context, workspaceID, userID int64, deviceID, folder, key string) (agent.AgentProfile, error) {
+func (a *App) ResolveAgent(ctx context.Context, workspaceID, userID int64, c Computer, key string) (agent.AgentProfile, error) {
 	if key == model.DefaultAgentKey {
 		return agent.AgentProfile{}, store.ErrNotFound
 	}
@@ -118,7 +118,7 @@ func (a *App) ResolveAgent(ctx context.Context, workspaceID, userID int64, devic
 	// whole delegation. Ten background agents get ten owners whether they
 	// are ten different agents or ten copies of one, so a session one of them
 	// opens can never be reached by another (tool.Owner).
-	loadout, err := a.Loadout(ctx, workspaceID, userID, deviceID, ag.Tools, ag.ConfirmTools, ag.Brains, tool.OwnerOfAgent())
+	loadout, err := a.Loadout(ctx, workspaceID, userID, c.DeviceID, ag.Tools, ag.ConfirmTools, ag.Brains, tool.OwnerOfAgent())
 	if err != nil {
 		return agent.AgentProfile{}, err
 	}
@@ -142,7 +142,8 @@ func (a *App) ResolveAgent(ctx context.Context, workspaceID, userID int64, devic
 		role:         ag.Instructions,
 		capabilities: loadout.Schemas,
 		brains:       brains,
-		folder:       folder,
+		folder:       c.Folder,
+		machine:      c.Env,
 	})
 	modelID := int64(0)
 	if ag.ModelID != nil {
@@ -174,9 +175,9 @@ func (a *App) ResolveAgent(ctx context.Context, workspaceID, userID int64, devic
 // deviceID is the computer the turn came from, so an agent the Gateway hands
 // work to can reach it too: an agent acts on the person's behalf, and what they
 // can reach it can reach.
-func (a *App) AgentResolver(workspaceID, userID int64, deviceID, folder string) agent.AgentResolver {
+func (a *App) AgentResolver(workspaceID, userID int64, c Computer) agent.AgentResolver {
 	return func(ctx context.Context, key string) (agent.AgentProfile, error) {
-		return a.ResolveAgent(ctx, workspaceID, userID, deviceID, folder, key)
+		return a.ResolveAgent(ctx, workspaceID, userID, c, key)
 	}
 }
 

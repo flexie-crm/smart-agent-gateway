@@ -18,28 +18,17 @@ pub const NAME: &str = "machine_info";
 pub const VERSION: i64 = 1;
 
 pub async fn run(_args: Value) -> Response {
+    // Read from `environment`, which is also what the application sends with
+    // every message for the system prompt. One source, so the paragraph the
+    // assistant was given and the answer it gets from asking cannot disagree
+    // about which computer this is. The SHAPE here is the tool's contract and
+    // is unchanged: a different shape would be a new VERSION, and a gateway
+    // speaking the old one would stop offering the tool.
     Response::ok(json!({
-        "operating_system": std::env::consts::OS,
-        "architecture": std::env::consts::ARCH,
+        "operating_system": crate::environment::os(),
+        "architecture": crate::environment::arch(),
         // The name a person would recognise, not an identifier: this is what
         // the assistant says back when somebody asks which computer it can see.
-        "name": hostname(),
+        "name": crate::environment::hostname(),
     }))
-}
-
-/// hostname is what this machine calls itself, or an honest blank.
-///
-/// Read from the environment rather than a system call, because the answer is
-/// for a sentence in a conversation and not for identifying anything: nothing
-/// depends on it being unique or even present.
-fn hostname() -> String {
-    for key in ["HOSTNAME", "COMPUTERNAME", "NAME"] {
-        if let Ok(name) = std::env::var(key) {
-            let name = name.trim();
-            if !name.is_empty() {
-                return name.to_string();
-            }
-        }
-    }
-    String::new()
 }

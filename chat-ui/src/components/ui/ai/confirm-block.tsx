@@ -241,7 +241,10 @@ export function ConfirmBlock({ confirmation, onRespond, lang }: ConfirmBlockProp
           : { mark: 'expired', word: t('confirm_timeout', lang, 'Expired'), tone: 'text-muted-foreground' }
     return (
       <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
-        <StatusMark status={answer.mark} />
+        {/* 14px, to sit on the tool rows' grid rather than beside it: they use
+            14px icons on this same text-sm line, and the default 16px badge
+            measured as the one row out of step. */}
+        <StatusMark status={answer.mark} size={3.5} />
         <span className={`shrink-0 font-medium ${answer.tone}`}>{answer.word}</span>
         <span className="min-w-0 truncate">{title}</span>
       </div>

@@ -8,6 +8,7 @@
 
 pub mod appearance;
 pub mod device;
+pub mod environment;
 pub mod link;
 pub mod menu;
 pub mod update;

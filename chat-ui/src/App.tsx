@@ -329,16 +329,16 @@ const MessageItem = memo(
     const assistantStyle = roleStyle(theme?.assistant, '0.75rem 1rem');
     const reasoningStyle = roleStyle(theme?.reasoning, '0.4rem 0.75rem');
     if (isConfirmMessage(message)) {
+      // No wrapper. The row it sits in already spaces it like every other
+      // message; the two divs that used to be here added a second gap under it,
+      // so an answered approval was the one line in the transcript with double
+      // the space beneath.
       return (
-        <div className="space-y-3">
-          <div>
-            <ConfirmBlock
-              confirmation={message.confirmation}
-              onRespond={respondToConfirmation}
-              lang={lang}
-            />
-          </div>
-        </div>
+        <ConfirmBlock
+          confirmation={message.confirmation}
+          onRespond={respondToConfirmation}
+          lang={lang}
+        />
       );
     }
 
@@ -575,6 +575,16 @@ const FlexieAiAgent: React.FC<FlexieChatProps> = ({ streamEndpoint, fetchEndpoin
     // Draft: no chat resolved yet in multi-chat -> the next send creates one.
     multiChatEnabled && !currentChatId,
     handleChatCreated
+  );
+
+  // What the conversation actually draws.
+  //
+  // A message that renders nothing is not free: it still takes a row, and a row
+  // takes the space after it. Filtered here rather than inside the list, so the
+  // list only ever counts, measures and positions things that exist.
+  const visibleMessages = useMemo(
+    () => messages.filter((m) => !(isAssistantMessage(m) && rendersNothing(m))),
+    [messages],
   );
 
   // The newest thing the PERSON said, which is what the conversation follows.
@@ -1050,7 +1060,13 @@ const FlexieAiAgent: React.FC<FlexieChatProps> = ({ streamEndpoint, fetchEndpoin
       <ChatErrorBoundary>
         <Conversation
           className="flex-1 min-h-0"
-          items={messages}
+          // Only what will actually draw. A turn that renders nothing still
+          // got a row of its own, and a row costs the space after it whether or
+          // not anything is in it: answering an approval appends exactly such a
+          // placeholder for the resume to write into, and when the answer is a
+          // tool call and no prose, nothing ever arrives. That ghost sat under
+          // every answered approval and was the extra gap beneath it.
+          items={visibleMessages}
           idOf={(m) => m.id}
           conversation={currentChatId}
           hasOlder={hasOlder}

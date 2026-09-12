@@ -37,6 +37,7 @@ type gatewayPrompt struct {
 	agents          []agentInfo
 	brains          brainRoster // the knowledge bases it can consult, and its memory brain
 	folder          string      // the folder on the person's computer this turn may work in
+	machine         *MachineEnv // what kind of computer that is; nil when there is none to act on
 	instructions    string      // the administrator's own prompt, appended
 }
 
@@ -66,6 +67,9 @@ func renderGateway(p gatewayPrompt) string {
 	}
 	b.section("Date and time", dateTime(p.now, p.zone))
 	b.section("What you can do", capabilities(p.capabilities, len(p.agents) > 0))
+	if m := theComputer(p.machine, p.capabilities); m != "" {
+		b.section("The computer you are working on", m)
+	}
 	if f := workingFolder(p.folder); f != "" {
 		b.section("The folder you are working in", f)
 	}
@@ -107,7 +111,8 @@ type agentPrompt struct {
 	role         string // the agent's own instructions: its whole identity
 	capabilities []tool.Schema
 	brains       brainRoster
-	folder       string // the folder on the person's computer this turn may work in
+	folder       string      // the folder on the person's computer this turn may work in
+	machine      *MachineEnv // what kind of computer that is; nil when there is none to act on
 }
 
 // renderAgent writes an agent's system prompt.
@@ -117,6 +122,9 @@ func renderAgent(p agentPrompt) string {
 	b.section("Who you are", agentIdentity(p.role))
 	b.section("Date and time", dateTime(p.now, p.zone))
 	b.section("What you can do", capabilities(p.capabilities, false))
+	if m := theComputer(p.machine, p.capabilities); m != "" {
+		b.section("The computer you are working on", m)
+	}
 	if f := workingFolder(p.folder); f != "" {
 		b.section("The folder you are working in", f)
 	}
@@ -155,6 +163,103 @@ func workingFolder(path string) string {
 		"you should look first when they talk about \"the project\", \"this repository\" or a file " +
 		"by name alone. You have not read any of it yet: use your file tools to find out what is " +
 		"there rather than assuming, and say what you actually found."
+}
+
+// theComputer tells the assistant what kind of machine it is acting on.
+//
+// It has to be said for the same reason the folder does: it cannot be deduced
+// from here. The gateway may be on another continent from the person, and an
+// assistant left to guess writes the median of everything it has read, which
+// is a POSIX shell. On Windows that is wrong twice over, because the terminal
+// here starts cmd.exe rather than PowerShell, and the file tools are handed
+// paths written the wrong way round.
+//
+// Said only when something can act on that computer. Not "is a machine
+// linked": a laptop can be linked and declaring every tool while an
+// administrator has switched all of them off, and describing a machine nothing
+// can touch invites the assistant to plan work it has no way to do.
+//
+// What is INSTALLED, never what is permitted. Those are different questions
+// with different owners, and the paragraph says so rather than implying that
+// finding a program on the machine is leave to run it.
+func theComputer(m *MachineEnv, capabilities []tool.Schema) string {
+	if m == nil || !hasMachineTool(capabilities) {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("You are working on " + systemName(m.OS) + " computer")
+	if name := strings.TrimSpace(m.Name); name != "" {
+		b.WriteString(" called " + name)
+	}
+	if arch := strings.TrimSpace(m.Arch); arch != "" {
+		b.WriteString(" (" + arch + ")")
+	}
+	b.WriteString(".\n\n")
+
+	if shell := strings.TrimSpace(m.Shell); shell != "" {
+		b.WriteString("Terminal commands run in " + shell +
+			". Write for that shell, not for whichever one is most common.\n")
+	}
+	if sep := strings.TrimSpace(m.PathSeparator); sep != "" {
+		b.WriteString("Paths are written with " + sep + ", and they are ")
+		if !m.CaseSensitivePaths {
+			b.WriteString("not ")
+		}
+		b.WriteString("case sensitive.\n")
+	}
+	if m.LineEnding == "\r\n" {
+		b.WriteString("Text files on it end their lines the Windows way; the file tools keep " +
+			"each file's own endings, so you do not have to do anything about that.\n")
+	}
+	if home := strings.TrimSpace(m.Home); home != "" {
+		b.WriteString("The person's home directory is " + home + ".\n")
+	}
+
+	if len(m.Has) > 0 {
+		b.WriteString("\nInstalled: " + strings.Join(m.Has, ", ") + ".")
+	}
+	if len(m.Missing) > 0 {
+		// The half that saves a wasted turn: without it the assistant plans
+		// three steps around a program that is not there and finds out on the
+		// third.
+		b.WriteString("\nNot installed: " + strings.Join(m.Missing, ", ") +
+			". Do not reach for these, and do not offer to install them.")
+	}
+	if len(m.Has) > 0 || len(m.Missing) > 0 {
+		// Said outright, because it was not obvious enough implicitly: asked
+		// what it had, the assistant ran a loop of `command -v` over the very
+		// list it had just been given. A list nobody is told they may quote is
+		// a list worth checking.
+		//
+		// With the exception named, rather than left to be discovered: versions
+		// genuinely are not here, and a question about one is a real reason to
+		// go and look.
+		b.WriteString("\n\nThis was read from the machine as this message was sent, so answer " +
+			"from it directly rather than running a command to check. It does not include " +
+			"version numbers; those are worth looking up when somebody asks.")
+		// Present is not permitted. An administrator decides what may actually
+		// run, the terminal enforces it by reading every command, and a refusal
+		// there is final. Better said here than discovered as a contradiction.
+		b.WriteString("\n\nIt is what is on the machine, not what you are allowed to run: " +
+			"what commands are permitted is set separately, and a refusal is final.")
+	}
+	return b.String()
+}
+
+// systemName is what a person calls the system, not what the compiler does.
+func systemName(os string) string {
+	switch os {
+	case "windows":
+		return "a Windows"
+	case "macos":
+		return "a macOS"
+	case "linux":
+		return "a Linux"
+	case "":
+		return "this"
+	default:
+		return "a " + os
+	}
 }
 
 // gatewayIdentity opens the Gateway's prompt: one assistant with one voice, told

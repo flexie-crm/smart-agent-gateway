@@ -52,6 +52,27 @@ function mockFetchSSE(frames: any[]) {
 describe('the request the client sends', () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it('sends what kind of computer this is, and nothing when there is none', async () => {
+    // The half of the seam that lives here: the page has to ASK the application
+    // and put the answer in the body. Everything below it is proved on the Go
+    // side; if this line goes missing, that all still passes and the assistant
+    // silently goes back to guessing.
+    const cap = mockFetchCapture();
+    const described = { os: 'windows', arch: 'x86_64', shell: 'cmd.exe', has: ['git'], missing: ['bash'] };
+    (window as any).__TAURI__ = { core: { invoke: async (name: string) => (name === 'machine_environment' ? described : '') } };
+    await runStart(new ChatStreamClient('/v1/chat/stream'), 'build it');
+    expect(cap[0].body.machine).toEqual(described);
+
+    // In a browser there is no application to ask, so the field is absent
+    // rather than present and empty: the server treats "said nothing" and
+    // "described nothing" differently, and only one of them is true here.
+    delete (window as any).__TAURI__;
+    resetDeviceForTest();
+    const browser = mockFetchCapture();
+    await runStart(new ChatStreamClient('/v1/chat/stream'), 'build it');
+    expect(browser[0].body.machine).toBeUndefined();
+  });
+
   it('names its fields, so a reader does not have to decode them', async () => {
     const cap = mockFetchCapture();
     await runStart(new ChatStreamClient('/v1/chat/stream'), 'what day is it?');

@@ -54,7 +54,7 @@ type backgroundManager struct {
 	quiescing bool
 }
 
-// noComputer is what a run with nobody in front of it carries where a device
+// noComputer is what a run with nobody in front of it carries where a computer
 // would be.
 //
 // A background agent starts from a record and may run an hour after the person
@@ -63,13 +63,8 @@ type backgroundManager struct {
 // guess the device identity exists to remove; carrying the asking computer on
 // the delegation is a column and a decision, and belongs with the first tool
 // that actually needs it.
-const noComputer = ""
+func noComputer() Computer { return Computer{} }
 
-// And with no computer there is no folder on one. The working folder is a
-// property of the machine the turn came from, so an agent that reaches no
-// machine is told about no folder, rather than being told about one it cannot
-// look inside.
-const noFolder = ""
 
 func newBackgroundManager(a *App, log zerolog.Logger) *backgroundManager {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -113,7 +108,7 @@ func (b *backgroundManager) resume(snapshot *model.ParkSnapshot, approved bool) 
 		SessionID:    snapshot.SessionID,
 		ModelID:      snapshot.ModelID,
 	}
-	sub, err := b.app.ResolveAgent(sc, snapshot.WorkspaceID, snapshot.UserID, noComputer, noFolder, snapshot.AgentKey)
+	sub, err := b.app.ResolveAgent(sc, snapshot.WorkspaceID, snapshot.UserID, noComputer(), snapshot.AgentKey)
 	if err != nil {
 		// The agent was removed while the card waited. Fail the delegation and
 		// let the completion turn say so, rather than leave the chip spinning.
@@ -367,7 +362,7 @@ func (b *backgroundManager) scheduleCompletion(ctx context.Context, bg agent.Bac
 		MaxIterations:         profile.MaxIterations,
 		MaxFleetAgents:        profile.MaxFleetAgents,
 		AutoApprove:           session.ApprovalMode == model.ApprovalAuto,
-		Agent:                 b.app.AgentResolver(bg.WorkspaceID, bg.UserID, noComputer, noFolder),
+		Agent:                 b.app.AgentResolver(bg.WorkspaceID, bg.UserID, noComputer()),
 		StartBackground:       b.app.StartBackground,
 		StartFleet:            b.app.StartFleet,
 		CompletedDelegationID: bg.DelegationID,
@@ -499,7 +494,7 @@ func (b *backgroundManager) surfaceCardFor(ctx context.Context, park *model.Park
 	}
 	// A detached park is always an agent's; its tool is resolved live, so a tool
 	// revoked while it waited yields no card, matching the resume's re-check.
-	sub, err := b.app.ResolveAgent(ctx, park.WorkspaceID, session.UserID, noComputer, noFolder, park.AgentKey)
+	sub, err := b.app.ResolveAgent(ctx, park.WorkspaceID, session.UserID, noComputer(), park.AgentKey)
 	if err != nil {
 		b.log.Error().Err(err).Int64("park", park.ID).Str("agent", park.AgentKey).
 			Msg("card not shown: the agent could not be resolved")
@@ -817,7 +812,7 @@ func (b *backgroundManager) recoverInterrupted(ctx context.Context) (int, error)
 // does, so one an administrator removed or revoked while we were down is not
 // quietly brought back: that is a refusal, and the caller settles it instead.
 func (b *backgroundManager) relaunch(ctx context.Context, d *model.AgentDelegation, userID int64) bool {
-	sub, err := b.app.ResolveAgent(ctx, d.WorkspaceID, userID, noComputer, noFolder, d.AgentKey)
+	sub, err := b.app.ResolveAgent(ctx, d.WorkspaceID, userID, noComputer(), d.AgentKey)
 	if err != nil {
 		b.log.Warn().Err(err).Str("agent", d.AgentKey).Msg("recover: agent no longer available")
 		return false

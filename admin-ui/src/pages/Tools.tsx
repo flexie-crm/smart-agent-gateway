@@ -13,6 +13,7 @@ import { NativeSelect } from '@/components/ui/native-select'
 import { Textarea } from '@/components/ui/textarea'
 import { useFormErrors } from '@/lib/form'
 import { useNotify } from '@/lib/notify'
+import { POSTURE } from '@/lib/api'
 import { api, useResource } from '@/lib/resources'
 import type {
   TemplateParam,
@@ -99,17 +100,26 @@ export function Tools() {
             ),
           },
           { header: 'Risk', cell: (t) => risk(t.risk) },
-          {
-            header: 'Who may use it',
-            cell: (t) =>
-              t.grants.length === 0 ? (
-                <span className="text-xs text-muted-foreground">everyone</span>
-              ) : (
-                <span className="text-xs">
-                  {t.grants.length} {t.grants.length === 1 ? 'group' : 'groups'}
-                </span>
-              ),
-          },
+          // A grant names a GROUP of people, and a personal installation has one
+          // person in it. The column would read "everyone" on every row for
+          // ever: a heading with only one possible answer is noise dressed as
+          // information, and it sends somebody looking for the screen that
+          // changes it, which is not there either.
+          ...(POSTURE.single_user
+            ? []
+            : [
+                {
+                  header: 'Who may use it',
+                  cell: (t: Tool) =>
+                    t.grants.length === 0 ? (
+                      <span className="text-xs text-muted-foreground">everyone</span>
+                    ) : (
+                      <span className="text-xs">
+                        {t.grants.length} {t.grants.length === 1 ? 'group' : 'groups'}
+                      </span>
+                    ),
+                },
+              ]),
           {
             header: 'Status',
             cell: (t) =>
@@ -572,22 +582,27 @@ function EditCustomToolModal({
         label="Available"
         hint="Switched off, the model is never told this tool exists. That is the only refusal it cannot argue with."
       />
-      <Field label="Who may use it" hint="Grant nobody and it is open to everyone in the workspace. The first grant is what makes the list exclusive.">
-        <div className="space-y-1.5">
-          {groups.length === 0 ? (
-            <p className="text-xs text-muted-foreground">No group exists yet.</p>
-          ) : (
-            groups.map((group) => (
-              <CheckboxField
-                key={group.id}
-                checked={grants.includes(group.id)}
-                onChange={(on) => setGrants((prev) => (on ? [...prev, group.id] : prev.filter((id) => id !== group.id)))}
-                label={group.name}
-              />
-            ))
-          )}
-        </div>
-      </Field>
+      {/* Same reason as the column: there is nobody to grant to. Worse here,
+          because it renders "No group exists yet." and so reads as something
+          waiting to be set up, on an installation where it never will be. */}
+      {!POSTURE.single_user && (
+        <Field label="Who may use it" hint="Grant nobody and it is open to everyone in the workspace. The first grant is what makes the list exclusive.">
+          <div className="space-y-1.5">
+            {groups.length === 0 ? (
+              <p className="text-xs text-muted-foreground">No group exists yet.</p>
+            ) : (
+              groups.map((group) => (
+                <CheckboxField
+                  key={group.id}
+                  checked={grants.includes(group.id)}
+                  onChange={(on) => setGrants((prev) => (on ? [...prev, group.id] : prev.filter((id) => id !== group.id)))}
+                  label={group.name}
+                />
+              ))
+            )}
+          </div>
+        </Field>
+      )}
 
       {errors.form && <p className="text-sm text-destructive">{errors.form}</p>}
     </Modal>

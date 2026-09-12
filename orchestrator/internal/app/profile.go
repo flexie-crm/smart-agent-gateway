@@ -34,6 +34,10 @@ type ProfileRequest struct {
 	// "I cannot see your project" while holding the tools to read every file in
 	// it.
 	WorkingFolder string
+
+	// Machine is what kind of computer that is, as the application described
+	// itself. Nil from a browser and from any run with no computer to act on.
+	Machine *MachineEnv
 	// Channel is where the request came from: the chat UI, an HTTP endpoint,
 	// an MCP client. It is a dimension a workflow can condition on, which is
 	// how one workspace can give its people a rich assistant in the chat and a
@@ -169,6 +173,7 @@ func (a *App) buildGatewayPrompt(ctx context.Context, req ProfileRequest, profil
 		agents:          subs,
 		brains:          brains,
 		folder:          req.WorkingFolder,
+		machine:         req.Machine,
 		instructions:    profile.Instructions,
 	}), nil
 }
