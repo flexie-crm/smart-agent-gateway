@@ -249,7 +249,8 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		Builds:   s.builds(),
 		// nil when nothing is published, and the page then says "coming soon"
 		// rather than offering a link that answers 404.
-		Mac: s.installerFor("personal"),
+		Mac: s.installerFor("personal", "mac"),
+		Win: s.installerFor("personal", "windows"),
 	})
 }
 

@@ -35,15 +35,22 @@ type installer struct {
 // nothing published rather than offering a link that 404s, and it decides that
 // from the disk rather than from a constant somebody has to remember to change
 // on the day it ships.
-func (s *Server) installerFor(edition string) *installer {
-	name := "SAG-" + strings.ToUpper(edition[:1]) + edition[1:] + ".dmg"
+func (s *Server) installerFor(edition, platform string) *installer {
+	// The fixed name, per platform: a dmg is what a Mac opens and an exe is what
+	// Windows runs. Both sit at an address that never changes, with the
+	// version-stamped file beside them.
+	suffix := ".dmg"
+	if platform == "windows" {
+		suffix = ".exe"
+	}
+	name := "SAG-" + strings.ToUpper(edition[:1]) + edition[1:] + suffix
 	info, err := os.Stat(filepath.Join(s.dir, desktopDir, name))
 	if err != nil || info.IsDir() {
 		return nil
 	}
 	return &installer{
 		Edition: strings.ToUpper(edition[:1]) + edition[1:],
-		Version: s.publishedVersion(edition),
+		Version: s.publishedVersion(edition, platform),
 		Size:    fmt.Sprintf("%.0f MB", float64(info.Size())/(1024*1024)),
 		URL:     "/" + desktopDir + "/" + name,
 	}
@@ -56,8 +63,8 @@ func (s *Server) installerFor(edition string) *installer {
 //
 // Empty when it cannot be read, and the page then says nothing about a version,
 // which is better than saying a wrong one.
-func (s *Server) publishedVersion(edition string) string {
-	raw, err := os.ReadFile(filepath.Join(s.dir, updatesDir, edition+"-darwin-x86_64.json"))
+func (s *Server) publishedVersion(edition, platform string) string {
+	raw, err := os.ReadFile(filepath.Join(s.dir, updatesDir, edition+"-"+manifestOS(platform)+"-x86_64.json"))
 	if err != nil {
 		return ""
 	}
@@ -66,4 +73,15 @@ func (s *Server) publishedVersion(edition string) string {
 		return ""
 	}
 	return rel.Version
+}
+
+// manifestOS is what the update manifests call a platform. Windows has none
+// published yet, so the read simply fails and the page says nothing about a
+// version, which is the existing behaviour for anything unpublished and is
+// better than reading one out of a filename somebody typed.
+func manifestOS(platform string) string {
+	if platform == "windows" {
+		return "windows"
+	}
+	return "darwin"
 }

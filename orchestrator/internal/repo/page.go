@@ -37,6 +37,7 @@ type pageData struct {
 	Download string
 	Builds   []build
 	Mac      *installer
+	Win      *installer
 	Art      map[string]template.HTML
 }
 
@@ -464,7 +465,6 @@ var indexTmpl = template.Must(template.New("index").Parse(`<!doctype html>
     <a href="#get">Get it</a>
     <a href="#models">Your own models</a>
     <a class="src" href="https://github.com/flexie-crm/smart-agent-gateway"><svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 .2a8 8 0 0 0-2.5 15.6c.4.07.55-.17.55-.38v-1.34C3.84 14.4 3.4 13 3.4 13c-.36-.9-.87-1.15-.87-1.15-.7-.48.06-.47.06-.47.78.05 1.2.8 1.2.8.7 1.2 1.83.85 2.28.65.07-.5.27-.85.5-1.05-1.74-.2-3.56-.87-3.56-3.88 0-.86.3-1.56.8-2.11-.08-.2-.35-1 .08-2.07 0 0 .66-.21 2.15.8a7.5 7.5 0 0 1 3.92 0c1.5-1.01 2.15-.8 2.15-.8.43 1.08.16 1.88.08 2.07.5.55.8 1.25.8 2.11 0 3.02-1.83 3.68-3.57 3.87.28.24.53.72.53 1.45v2.15c0 .21.14.46.55.38A8 8 0 0 0 8 .2Z"/></svg> Source</a>
-    {{if .Mac}}<a class="mini" href="{{.Mac.URL}}">Download</a>{{end}}
   </nav>
 </div>
 
@@ -479,11 +479,18 @@ var indexTmpl = template.Must(template.New("index").Parse(`<!doctype html>
     <div class="get">
       {{if .Mac}}
       <a class="btn" href="{{.Mac.URL}}">
+        <svg class="pf" width="25" height="25" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.37 12.76c.02 2.66 2.33 3.54 2.36 3.56-.02.06-.37 1.27-1.22 2.51-.73 1.08-1.5 2.15-2.7 2.17-1.18.02-1.56-.7-2.9-.7-1.35 0-1.77.68-2.88.72-1.17.04-2.06-1.16-2.8-2.23-1.5-2.19-2.66-6.19-1.11-8.89.77-1.34 2.14-2.19 3.63-2.21 1.13-.02 2.2.77 2.9.77.69 0 1.99-.95 3.36-.81.57.02 2.18.23 3.2 1.75-.08.05-1.91 1.12-1.89 3.36M14.2 4.6c.62-.75 1.03-1.79.92-2.83-.89.04-1.97.6-2.61 1.35-.57.66-1.07 1.72-.94 2.74.99.08 2-.51 2.63-1.26"/></svg>
         Download for Mac
-        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8h10M9 4l4 4-4 4"/></svg>
       </a>
       {{end}}
+      {{if .Win}}
+      <a class="btn" href="{{.Win.URL}}">
+        <svg class="pf" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 5.6l7.2-1v7.1H3V5.6m0 12.8l7.2 1v-7H3v6M11.2 4.4L21 3v8.7h-9.8V4.4m0 15.2L21 21v-8.6h-9.8v7.2"/></svg>
+        Download for Windows
+      </a>
+      {{else}}
       <span class="btn ghost badged">Download for Windows<i>Soon</i></span>
+      {{end}}
     </div>
     {{if .Mac}}
     <p class="under">Free to use on your own computer &middot; no account needed &middot; {{.Mac.Size}}</p>
@@ -660,7 +667,7 @@ where last_seen &lt; now() - interval 30 day</p>
       </ul>
       <div class="foot">
         {{if .Mac}}
-        <a class="btn" href="{{.Mac.URL}}">Download for Mac</a>
+        <a class="btn" href="{{.Mac.URL}}"><svg class="pf" width="25" height="25" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.37 12.76c.02 2.66 2.33 3.54 2.36 3.56-.02.06-.37 1.27-1.22 2.51-.73 1.08-1.5 2.15-2.7 2.17-1.18.02-1.56-.7-2.9-.7-1.35 0-1.77.68-2.88.72-1.17.04-2.06-1.16-2.8-2.23-1.5-2.19-2.66-6.19-1.11-8.89.77-1.34 2.14-2.19 3.63-2.21 1.13-.02 2.2.77 2.9.77.69 0 1.99-.95 3.36-.81.57.02 2.18.23 3.2 1.75-.08.05-1.91 1.12-1.89 3.36M14.2 4.6c.62-.75 1.03-1.79.92-2.83-.89.04-1.97.6-2.61 1.35-.57.66-1.07 1.72-.94 2.74.99.08 2-.51 2.63-1.26"/></svg>Download for Mac</a>
         <p class="under">{{.Mac.Size}} &middot; Apple silicon and Intel</p>
         {{else}}
         <a class="btn ghost" href="https://flexie.io/">Tell me when it is ready</a>
@@ -676,8 +683,13 @@ where last_seen &lt; now() - interval 30 day</p>
         <li>Reaches your own files and folders</li>
       </ul>
       <div class="foot">
+          {{if .Win}}
+          <a class="btn" href="{{.Win.URL}}"><svg class="pf" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 5.6l7.2-1v7.1H3V5.6m0 12.8l7.2 1v-7H3v6M11.2 4.4L21 3v8.7h-9.8V4.4m0 15.2L21 21v-8.6h-9.8v7.2"/></svg>Download for Windows</a>
+          <p class="under">{{.Win.Size}} &middot; 64-bit</p>
+          {{else}}
         <a class="btn ghost" href="https://flexie.io/">Tell me when it is ready</a>
         <p class="under">In testing now</p>
+          {{end}}
       </div>
     </div>
     <div class="ed">

@@ -247,3 +247,71 @@ func TestAFirstRunAdoptsNothingAndSaysSo(t *testing.T) {
 		t.Error("adoption created a directory; that is the caller's job")
 	}
 }
+
+// What a fresh installation hands somebody, without them configuring anything.
+//
+// A deployment starts an assistant with nothing and an administrator decides
+// what it may do. Nobody administers their own laptop, so these three defaults
+// ARE the product on first run: every built-in on, the three that change the
+// person's own disk asking first, and the model thinking as hard as it will.
+//
+// Pinned because they are silent: nothing fails if they drift, the assistant
+// just quietly does less than it should, and the only way anybody finds out is
+// by opening a screen they have no reason to open.
+func TestAFreshInstallationArrivesUsable(t *testing.T) {
+	all := []string{"brain", "brain_write", "current_time", "http_request",
+		"machine_info", "read_file", "write_file", "edit_file", "find_files",
+		"search_files", "terminal"}
+
+	gw := gatewayFor(all)
+
+	if len(gw.Tools) != len(all) {
+		t.Errorf("the Gateway was given %d of %d built-in tools: %v", len(gw.Tools), len(all), gw.Tools)
+	}
+	for _, want := range []string{"terminal", "read_file", "write_file", "edit_file", "brain", "http_request"} {
+		if !contains(gw.Tools, want) {
+			t.Errorf("a fresh installation cannot %q", want)
+		}
+	}
+
+	// Exactly the three that change something on the person's disk. Reading and
+	// searching are answers; writing and running are actions.
+	wantConfirm := []string{"terminal", "write_file", "edit_file"}
+	if len(gw.ConfirmTools) != len(wantConfirm) {
+		t.Errorf("confirmations were %v, wanted %v", gw.ConfirmTools, wantConfirm)
+	}
+	for _, want := range wantConfirm {
+		if !contains(gw.ConfirmTools, want) {
+			t.Errorf("%q runs on somebody's own machine without asking", want)
+		}
+	}
+	// And the other side of it: a tool that only reads must NOT stop and ask,
+	// or the assistant is a sequence of dialogs.
+	for _, never := range []string{"read_file", "find_files", "search_files", "current_time"} {
+		if contains(gw.ConfirmTools, never) {
+			t.Errorf("%q asks permission to read, which makes every answer a dialog", never)
+		}
+	}
+
+	if !gw.Reasoning {
+		t.Error("reasoning is off, so the effort setting below is ignored")
+	}
+	if got := gw.Settings["reasoning_effort"]; got != "max" {
+		t.Errorf("reasoning effort was %v, wanted max", got)
+	}
+}
+
+func contains(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
+}
+
+// gatewayFor builds the agent seedGateway would create, without a database.
+func gatewayFor(builtins []string) *model.Agent {
+	brainID := int64(1)
+	return newGatewayAgent(7, brainID, builtins)
+}

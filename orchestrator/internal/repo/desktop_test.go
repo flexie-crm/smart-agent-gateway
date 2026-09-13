@@ -17,7 +17,7 @@ import (
 func TestAnEditionWithNoInstallerIsNotOffered(t *testing.T) {
 	dir := t.TempDir()
 	s := &Server{dir: dir}
-	if got := s.installerFor("personal"); got != nil {
+	if got := s.installerFor("personal", "mac"); got != nil {
 		t.Fatalf("offered %+v with nothing published", got)
 	}
 
@@ -42,7 +42,7 @@ func TestAnInstallerIsOfferedWithTheVersionTheManifestGives(t *testing.T) {
 	})
 
 	s := &Server{dir: dir}
-	got := s.installerFor("personal")
+	got := s.installerFor("personal", "mac")
 	if got == nil {
 		t.Fatal("nothing offered")
 	}
@@ -75,7 +75,7 @@ func TestAnInstallerIsOfferedWithTheVersionTheManifestGives(t *testing.T) {
 func TestAnInstallerWithNoManifestIsStillOffered(t *testing.T) {
 	dir := t.TempDir()
 	writeInstaller(t, dir, "SAG-Personal.dmg", 1024*1024)
-	got := (&Server{dir: dir}).installerFor("personal")
+	got := (&Server{dir: dir}).installerFor("personal", "mac")
 	if got == nil {
 		t.Fatal("nothing offered")
 	}
@@ -104,7 +104,7 @@ func TestTheInstallerThePageLinksToCanBeDownloaded(t *testing.T) {
 	asked.Host = "sag-repo.example"
 	h.ServeHTTP(page, asked)
 
-	link := (&Server{dir: dir}).installerFor("personal").URL
+	link := (&Server{dir: dir}).installerFor("personal", "mac").URL
 	if !strings.Contains(page.Body.String(), link) {
 		t.Fatalf("the page does not link %s", link)
 	}
@@ -180,3 +180,45 @@ func writeInstaller(t *testing.T, dir, name string, size int) {
 }
 
 var _ = json.Marshal
+
+// Windows is offered when its installer is on disk, and not before.
+//
+// The two platforms are separate files at separate fixed names, and the page
+// decides each from what is actually there: a Mac build published without a
+// Windows one must not turn the Windows button into a link that 404s, which is
+// the whole reason this reads the disk instead of a constant.
+func TestWindowsIsOfferedOnlyWhenItsInstallerIsThere(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "desktop"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{dir: dir}
+
+	if got := s.installerFor("personal", "windows"); got != nil {
+		t.Fatalf("offered a Windows download with nothing on disk: %+v", got)
+	}
+
+	// A Mac build alone must not make Windows appear: they are different files.
+	if err := os.WriteFile(filepath.Join(dir, "desktop", "SAG-Personal.dmg"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.installerFor("personal", "windows"); got != nil {
+		t.Fatalf("a Mac build made Windows appear: %+v", got)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "desktop", "SAG-Personal.exe"), make([]byte, 2<<20), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := s.installerFor("personal", "windows")
+	if got == nil {
+		t.Fatal("the installer is on disk and was not offered")
+	}
+	if got.URL != "/desktop/SAG-Personal.exe" {
+		t.Errorf("URL was %q", got.URL)
+	}
+	// No Windows manifest is published yet, so it says nothing about a version
+	// rather than reading one out of a filename.
+	if got.Version != "" {
+		t.Errorf("named a version with no manifest to read it from: %q", got.Version)
+	}
+}

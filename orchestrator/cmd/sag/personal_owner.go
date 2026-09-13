@@ -5,10 +5,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"flexie.io/sag/internal/tool"
+	"flexie.io/sag/internal/tools/machine"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/rs/zerolog"
@@ -204,6 +207,11 @@ func seedPersonalOwner(ctx context.Context, cfg *config.Config, st store.Store, 
 		return err
 	}
 
+	// The built-in tools this build ships, filled in when the workspace is new.
+	// Empty on an installation that already exists, and seedGateway then leaves
+	// an existing Gateway exactly as somebody configured it.
+	var builtins []string
+
 	ws, err := st.Workspaces().GetBySlug(ctx, personalWorkspaceSlug)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -220,6 +228,11 @@ func seedPersonalOwner(ctx context.Context, cfg *config.Config, st store.Store, 
 		if err := a.SyncTools(ctx, ws.ID); err != nil {
 			return fmt.Errorf("offer the abilities: %w", err)
 		}
+		// Kept, so the Gateway below can be given them. Read from the registry
+		// rather than from the rows just written, because the rows include the
+		// tools that are deliberately not in the catalogue and a person would
+		// not recognise a grant they cannot see.
+		builtins = builtinNames(a)
 	case err != nil:
 		return fmt.Errorf("load the workspace: %w", err)
 	}
@@ -255,7 +268,7 @@ func seedPersonalOwner(ctx context.Context, cfg *config.Config, st store.Store, 
 	if err != nil {
 		return err
 	}
-	if err := seedGateway(ctx, st, ws.ID, brainID); err != nil {
+	if err := seedGateway(ctx, st, ws.ID, brainID, builtins); err != nil {
 		return err
 	}
 
@@ -308,13 +321,39 @@ const workingMemorySlug = "working-memory"
 //
 // It is made with no model on purpose. Choosing one is what setup is for, and a
 // Gateway pointed at a model nobody chose would make the first screen a lie.
-func seedGateway(ctx context.Context, st store.Store, workspaceID, brainID int64) error {
+// builtinNames is every built-in this build ships that a person would see in
+// the catalogue, in a stable order.
+//
+// From the registry and not from the tools table, because the table also holds
+// the ones deliberately kept out of the catalogue (set_model_status,
+// list_models): granting a tool nobody can see is a setting nobody can undo.
+func builtinNames(a *app.App) []string {
+	var names []string
+	for _, t := range a.Tools.All() {
+		if t.Schema.Kind == tool.KindBuiltin && !t.Schema.Hidden {
+			names = append(names, t.Schema.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func seedGateway(ctx context.Context, st store.Store, workspaceID, brainID int64, builtins []string) error {
 	if _, err := st.Agents().GetByKey(ctx, workspaceID, model.DefaultAgentKey); err == nil {
 		return nil
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return fmt.Errorf("look for the Gateway: %w", err)
 	}
-	gateway := &model.Agent{
+	if err := st.Agents().Create(ctx, newGatewayAgent(workspaceID, brainID, builtins)); err != nil {
+		return fmt.Errorf("create the Gateway: %w", err)
+	}
+	return nil
+}
+
+// newGatewayAgent is what a fresh installation's Gateway IS, apart from a
+// database, so the defaults can be read and tested in one place.
+func newGatewayAgent(workspaceID, brainID int64, builtins []string) *model.Agent {
+	return &model.Agent{
 		WorkspaceID: workspaceID,
 		Key:         model.DefaultAgentKey,
 		Name:        "Gateway",
@@ -325,11 +364,31 @@ func seedGateway(ctx context.Context, st store.Store, workspaceID, brainID int64
 		// it is a different and worse product.
 		Brains:        []int64{brainID},
 		MemoryBrainID: &brainID,
+
+		// Everything this build ships, on.
+		//
+		// A deployment starts an assistant with nothing and an administrator
+		// decides what it may do. Nobody is the administrator of their own
+		// laptop: an assistant that can read no file and run no command is not a
+		// cautious product, it is one that does nothing until somebody finds the
+		// screen that turns it on.
+		Tools: builtins,
+
+		// The three that change something on the person's own disk. Reading,
+		// searching and asking the time are answers; writing a file and running
+		// a command are ACTIONS, and an action on somebody's own machine is
+		// worth a look before it happens. This only ever ADDS friction: a tool
+		// the code already declares dangerous stays that way regardless.
+		ConfirmTools: []string{machine.TerminalName, machine.WriteFileName, machine.EditFileName},
+
+		// Think as hard as the model will.
+		//
+		// The cost of thinking is the person's own and they chose the model; the
+		// cost of a shallow answer is a wrong one about their own data. A model
+		// with no such setting ignores it.
+		Reasoning: true,
+		Settings:  model.Settings{"reasoning_effort": "max"},
 	}
-	if err := st.Agents().Create(ctx, gateway); err != nil {
-		return fmt.Errorf("create the Gateway: %w", err)
-	}
-	return nil
 }
 
 // ownerPassword reads the seeded owner's password, making it on first call.
