@@ -422,6 +422,14 @@ export const ConversationScrollButton = ({
       <Button
         className={cn(
           'absolute bottom-4 left-[50%] translate-x-[-50%] rounded-full',
+            // DARK ONLY, because that is the only place it is wrong: the
+            // outline variant is opaque in light and dark:bg-input/30 in dark,
+            // and this is the one button in the app that floats over moving
+            // text, so the conversation reads straight through it. The variant
+            // is left alone; every other button using it stands on solid ground.
+              // Hover the same: dark:hover:bg-input/50 is translucent too, so
+              // the text came back through the moment the pointer landed on it.
+            'dark:bg-background dark:hover:bg-accent',
           className
         )}
         onClick={go}
