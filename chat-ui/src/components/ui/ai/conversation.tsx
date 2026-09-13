@@ -276,7 +276,7 @@ export const Conversation = <T,>({
         <div
           ref={viewport}
           className="fx-scroll flex flex-1 flex-col overflow-y-auto"
-          style={{ overscrollBehavior: 'contain' }}
+          style={{ overscrollBehavior: 'contain', scrollBehavior: 'smooth' }}
         >
           <div className="relative w-full shrink-0" style={{ height: total }}>
             <div

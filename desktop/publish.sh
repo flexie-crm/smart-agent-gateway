@@ -131,18 +131,38 @@ echo "    $SIZE bytes, at $PUBLIC$ARCHIVE"
 # landing page can link to a fixed address and the newest release is always what
 # it points at. The versioned name is kept beside it for anybody who wants a
 # specific build.
-INSTALLER=$(find "$OUTDIR" -maxdepth 1 -name "*.dmg" 2>/dev/null | head -1 || true)
+# The installer for THIS version, named rather than whichever the filesystem
+# happened to hand back first.
+#
+# `find … | head -1` returns an arbitrary entry, not the newest, and the output
+# directory keeps every build somebody ever made: six dmgs sat in the enterprise
+# one, and the publish of 0.1.3 uploaded 0.1.2 as the file people download. The
+# manifests were right, the archive was right, and the only wrong thing was the
+# thing nobody re-downloads to check.
+INSTALLER=$(find "$OUTDIR" -maxdepth 1 -name "*_${VERSION}_*.dmg" 2>/dev/null | head -1 || true)
+if [ -z "$INSTALLER" ]; then
+	# Only a warning: a build with no installer is a legitimate thing to publish,
+	# and the archive above is what every existing installation actually uses.
+	echo "    no installer for $VERSION in $OUTDIR; publishing the update only" >&2
+fi
 if [ -n "$INSTALLER" ]; then
 	echo "==> the installer"
 	STABLE="SAG-$(printf '%s' "$EDITION" | tr '[:lower:]' '[:upper:]' | cut -c1)$(printf '%s' "$EDITION" | cut -c2-).dmg"
-	scp -q "$INSTALLER" "$HOST:/tmp/$(basename "$INSTALLER")"
-	ssh "$HOST" "sudo mkdir -p $DESKTOP &&
-	  sudo cp /tmp/$(basename "$INSTALLER") $DESKTOP/ &&
-	  sudo mv /tmp/$(basename "$INSTALLER") $DESKTOP/$STABLE &&
-	  sudo chmod -R a+rX $DESKTOP"
+	# QUOTED on the far side, because the name has a space in it. Tauri names
+	# the installer "SAG Personal_0.1.6_universal.dmg", and a remote command is
+	# a STRING the far shell splits again: unquoted, `cp /tmp/SAG Personal...`
+	# is two arguments and the copy fails on a file called /tmp/SAG. It survived
+	# because the archive above has no space in its name, and the archive is
+	# what the updater uses; only a person downloading fresh would have noticed.
+	BASE=$(basename "$INSTALLER")
+	scp -q "$INSTALLER" "$HOST:/tmp/$BASE"
+	ssh "$HOST" "sudo mkdir -p '$DESKTOP' &&
+	  sudo cp '/tmp/$BASE' '$DESKTOP/' &&
+	  sudo mv '/tmp/$BASE' '$DESKTOP/$STABLE' &&
+	  sudo chmod -R a+rX '$DESKTOP'"
 	SIZE=$(curl -fsI "$PUBLIC/desktop/$STABLE" | awk 'tolower($1)=="content-length:"{print $2}' | tr -d '\r')
 	[ -n "$SIZE" ] || { echo "    $PUBLIC/desktop/$STABLE is not being served" >&2; exit 1; }
-	echo "    $STABLE, $SIZE bytes, and $(basename "$INSTALLER") beside it"
+	echo "    $STABLE, $SIZE bytes, and $BASE beside it"
 fi
 
 # --------------------------------------------------- and only then, the news
