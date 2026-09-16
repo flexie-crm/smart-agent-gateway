@@ -14,6 +14,11 @@ import "strings"
 // out from under a policy would be a real hole, which is why a governed tool
 // refuses to run the statements that could rename one.
 type Catalog struct {
+	// bareRoutines is how many routines answer to each unqualified name.
+	bareRoutines map[string]int
+	// dialect is kept so a routine body can be read after the routines arrive,
+	// which is later than the views are resolved.
+	dialect  string
 	database string
 	byName   map[string]*Table
 	// ambiguous holds names that two tables answer to when case is ignored. It can
@@ -21,6 +26,154 @@ type Catalog struct {
 	// neither table rather than to the wrong one.
 	ambiguous map[string]bool
 	order     []string
+	// routines are the stored procedures and functions, by lower-cased name,
+	// with the body of each. A name absent here is a routine nothing can account
+	// for, and the guard refuses one of those: an empty catalogue therefore
+	// refuses every call, which is the right answer when nothing is known.
+	routines map[string]string
+}
+
+// WithQualifiedRoutines adds the stored routines to a snapshot and returns it,
+// keyed by the schema a routine lives in as well as by its name.
+//
+// Separate from NewCatalog so that a caller which does not care about routines
+// is untouched, and so that not calling it means every routine is unaccounted
+// for rather than every routine being allowed.
+//
+// A routine's identity is its schema AND its name, and for a while this held
+// only the name. Measured on a live SQL Server: with dbo.f_same returning a
+// constant and app.f_same reading a denied table, the map kept one of the two
+// bodies and SELECT app.f_same() ran the other one. Which body survived was
+// decided by the order the database happened to return its rows in.
+func (c *Catalog) WithQualifiedRoutines(routines []QualifiedRoutine) *Catalog {
+	c.routines = map[string]string{}
+	for _, r := range routines {
+		name := strings.ToLower(r.Name)
+		if r.Namespace != "" {
+			c.routines[strings.ToLower(r.Namespace)+"."+name] = r.Body
+		}
+		c.routines[name] = r.Body
+	}
+	c.countBareNames()
+	c.resolveRoutineCalls()
+	return c
+}
+
+// QualifiedRoutine is one stored routine as the database reports it.
+type QualifiedRoutine struct {
+	Namespace string
+	Name      string
+	Body      string
+}
+
+// countBareNames records how many routines answer to each unqualified name, so
+// one that two schemas both offer can be refused rather than guessed at.
+func (c *Catalog) countBareNames() {
+	c.bareRoutines = map[string]int{}
+	for key := range c.routines {
+		if dot := strings.IndexByte(key, '.'); dot >= 0 {
+			c.bareRoutines[key[dot+1:]]++
+		}
+	}
+}
+
+// resolveRoutineCalls folds what a called routine READS into the view that calls
+// it.
+//
+// A view's column can be a stored function call, and then the tables in the
+// view's own FROM are not the whole story. Measured on all three engines before
+// this existed, with a function returning a column from a denied table:
+//
+//	CREATE VIEW leak_view AS SELECT o.id AS id, f_leak() AS code FROM orders o
+//	SELECT code FROM leak_view   ->   the-key
+//
+// The view was credited with reading orders, which nobody keeps back, so the
+// policy had nothing to object to and the statement named no function for the
+// routine gate to see. Nothing in the statement was wrong; the snapshot was.
+//
+// It runs here rather than in resolve because resolve happens while the catalog
+// is being built and the routines arrive afterwards. A routine whose body cannot
+// be read, and one that calls another routine, leave the view unaccounted for
+// rather than half accounted for.
+func (c *Catalog) resolveRoutineCalls() {
+	analyzer := analyzerFor(c.dialect)
+	for _, key := range c.order {
+		t := c.byName[key]
+		if !t.View || t.Opaque || len(t.calls) == 0 {
+			continue
+		}
+		for _, called := range t.calls {
+			reads, ok := c.routineReads(analyzer, called, map[string]bool{})
+			if !ok {
+				t.Opaque = true
+				break
+			}
+			t.Reads = append(t.Reads, reads...)
+		}
+	}
+}
+
+// routineReads is every table a routine reads, INCLUDING through the routines it
+// calls, and whether the whole of that could be read.
+//
+// The chain used to stop at the first link, which made a view over a function
+// built out of other functions opaque, and an opaque view is refused. Every body
+// is in this same snapshot, so the walk goes to the end. onPath is the walk's own
+// route, so two functions calling each other end it rather than running forever.
+func (c *Catalog) routineReads(analyzer Analyzer, name string, onPath map[string]bool) ([]string, bool) {
+	body, isRoutine := c.Routine(name)
+	if !isRoutine {
+		// A built-in. Refusing every view that calls lower() would refuse most
+		// views worth having.
+		return nil, true
+	}
+	key := strings.ToLower(name)
+	if onPath[key] {
+		return nil, false
+	}
+	onPath[key] = true
+	defer delete(onPath, key)
+
+	if analyzer == nil || strings.TrimSpace(body) == "" {
+		return nil, false
+	}
+	definition, ok := analyzer.ReadDefinition(body)
+	if !ok {
+		return nil, false
+	}
+	reads, ok := c.resolveReads(definition.Reads)
+	if !ok {
+		return nil, false
+	}
+	for _, nested := range definition.Calls {
+		deeper, ok := c.routineReads(analyzer, nested, onPath)
+		if !ok {
+			return nil, false
+		}
+		reads = append(reads, deeper...)
+	}
+	return reads, true
+}
+
+// Routine returns a stored routine's body, and whether the snapshot has one at
+// all. A routine present with an empty body is one whose text this account may
+// not read, which is not the same as absent and is refused just as firmly.
+func (c *Catalog) Routine(name string) (string, bool) {
+	key := strings.ToLower(name)
+	if dot := strings.IndexByte(key, '.'); dot >= 0 {
+		// Qualified: only an exact match will do. A schema this snapshot never
+		// read is a routine this tool cannot account for, not a built-in.
+		body, ok := c.routines[key]
+		return body, ok
+	}
+	if c.bareRoutines[key] > 1 {
+		// Two schemas offer this name and the statement did not say which. Known,
+		// so it is decided about rather than waved through as a built-in, and
+		// bodyless, so it is refused as one whose text cannot be read.
+		return "", true
+	}
+	body, ok := c.routines[key]
+	return body, ok
 }
 
 // Table is one table or view, as the database reports it.
@@ -41,6 +194,10 @@ type Table struct {
 	// view is refused rather than assumed to be harmless.
 	Reads  []string
 	Opaque bool
+	// calls is every function a view's definition invokes, kept from resolve so
+	// that the pass which runs once the routines are known can fold in what a
+	// called routine reads. Nothing outside this package sets it.
+	calls []string
 	// Definition is a view's defining statement as the database reports it. When
 	// it is set, what the view reads and where its columns come from are read out
 	// of it rather than taken on trust.
@@ -64,6 +221,7 @@ type Column struct {
 // name. A view nothing accounts for is left unaccounted for, and refused.
 func NewCatalog(dialect, database string, tables []Table) *Catalog {
 	c := &Catalog{
+		dialect:   dialect,
 		database:  database,
 		byName:    make(map[string]*Table, len(tables)),
 		ambiguous: map[string]bool{},
@@ -194,6 +352,11 @@ func (c *Catalog) Names() []string {
 type Definition struct {
 	Reads  []Reference
 	Origin map[string]Column
+	// Calls are the routines this definition invokes by name. It is filled where
+	// a dialect can name them but cannot tell a stored routine from a built-in:
+	// the guard holds the catalogue and can. A dialect that refuses a nested call
+	// outright leaves this empty.
+	Calls []string
 }
 
 // Reference is a table a definition names, as it was written: the name, and the
@@ -238,7 +401,7 @@ func (c *Catalog) resolve(dialect string) {
 			t.Opaque = true
 			continue
 		}
-		t.Reads, t.Origin = reads, definition.Origin
+		t.Reads, t.Origin, t.calls = reads, definition.Origin, definition.Calls
 	}
 }
 

@@ -63,7 +63,7 @@ func (a *analysis) expandStars(s *scope) {
 
 func (a *analysis) expandStar(s *scope, field *ast.SelectField) (fields []*ast.SelectField, needed, ok bool) {
 	if schema := field.WildCard.Schema.O; schema != "" && !strings.EqualFold(schema, a.guard.Catalog().Database()) {
-		a.refuse("this tool reaches one database, %q, and nothing outside it", a.guard.Catalog().Database())
+		a.refuse("You can reach one database, %q, and nothing outside it.", a.guard.Catalog().Database())
 		return nil, false, false
 	}
 
@@ -71,7 +71,7 @@ func (a *analysis) expandStar(s *scope, field *ast.SelectField) (fields []*ast.S
 	if qualifier := strings.ToLower(field.WildCard.Table.O); qualifier != "" {
 		src, found := s.sources[qualifier]
 		if !found {
-			a.refuse("this tool could not work out what %s.* stands for, so it did not run the statement", field.WildCard.Table.O)
+			a.refuse("What %s.* stands for could not be established. Name the columns you want.", field.WildCard.Table.O)
 			return nil, false, false
 		}
 		covered = []*source{src}
@@ -93,7 +93,7 @@ func (a *analysis) expandStar(s *scope, field *ast.SelectField) (fields []*ast.S
 	// would not hide anything: it would store the stand-in over the real value,
 	// permanently, and the control would be the thing doing the damage.
 	if a.write {
-		a.refuse("this statement writes rows read with *, and one of those columns is hidden in this tool. " +
+		a.refuse("This statement writes rows read with *, and one of those columns is hidden. " +
 			"Name the columns you mean to write, leaving the hidden one out.")
 		return nil, false, false
 	}
@@ -101,7 +101,7 @@ func (a *analysis) expandStar(s *scope, field *ast.SelectField) (fields []*ast.S
 	for _, src := range covered {
 		columns, known := a.columnsOf(src)
 		if !known {
-			a.refuse("this tool could not work out which columns * stands for here, and one of the tables has a hidden column, so it did not run the statement. Name the columns you want.")
+			a.refuse("Which columns * stands for could not be established, and one of the tables has a hidden field. Name the columns you want.")
 			return nil, false, false
 		}
 		for _, column := range columns {

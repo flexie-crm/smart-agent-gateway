@@ -97,7 +97,6 @@ export type ConversationProps<T> = {
   /** Shown over the top of the view while an older page is on its way. */
   notice?: ReactNode;
   /** Shown under the newest row: what the assistant is doing right now. */
-  footer?: ReactNode;
   className?: string;
   /** The behaviours that need to know how it is scrolling. */
   children?: ReactNode;
@@ -112,7 +111,6 @@ export const Conversation = <T,>({
   loadingOlder = false,
   onLoadOlder,
   notice,
-  footer,
   className,
   children,
 }: ConversationProps<T>) => {
@@ -310,9 +308,6 @@ export const Conversation = <T,>({
               })}
             </div>
           </div>
-          {footer && (
-            <div className="mx-auto w-full max-w-[776px] shrink-0 px-4 pb-4">{footer}</div>
-          )}
         </div>
         {/* Over the view rather than in it: a line that appears and disappears
             inside the scrolling content changes its height, which is a shove

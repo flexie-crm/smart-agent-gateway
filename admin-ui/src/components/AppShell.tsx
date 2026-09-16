@@ -15,6 +15,7 @@ import {
   Cpu,
   KeyRound,
   KeySquare,
+  Scale,
   LayoutDashboard,
   Plug,
   Server,
@@ -130,6 +131,20 @@ export const NAVIGATION: { heading: string; items: Section[]; personalHides?: bo
       { to: '/workspaces', label: 'Workspaces', icon: Building2, permission: 'workspaces:view' },
       { to: '/mcp-server', label: 'MCP Server', icon: Server, permission: 'mcp-server:view' },
       { to: '/oauth-clients', label: 'OAuth Clients', icon: KeySquare, permission: 'oauth-clients:view' },
+    ],
+  },
+  {
+    heading: 'About',
+    // Attribution for the open source this product is built on, and the licence
+    // each part travels under.
+    //
+    // No permission, and shown on every edition, because it is not an
+    // administrative screen: it is where a notice several licences require
+    // actually reaches somebody. Putting it behind a role would mean the notice
+    // travels as far as the administrators and no further, and the obligation
+    // is the same whether this is the AGPL build or a commercial one.
+    items: [
+      { to: '/open-source', label: 'Open Source', icon: Scale },
     ],
   },
 ]

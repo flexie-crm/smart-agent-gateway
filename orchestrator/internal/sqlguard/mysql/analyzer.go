@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"unicode"
 
 	"flexie.io/sag/internal/sqlguard"
 	"github.com/pingcap/tidb/pkg/parser"
@@ -93,11 +94,11 @@ func readStatement(sql string) (ast.StmtNode, string) {
 	stmts, _, err := p.Parse(sql, "", "")
 	switch {
 	case err != nil:
-		return nil, "this tool could not read that as a statement, so it was not run. Check the SQL and write it again."
+		return nil, "That could not be read as a statement. Check the SQL and write it again."
 	case len(stmts) == 0:
 		return nil, "the statement was empty"
 	case len(stmts) > 1:
-		return nil, "run one statement at a time; several statements joined together are not allowed"
+		return nil, "Send one statement per call. Statements joined together are not permitted."
 	}
 	return stmts[0], ""
 }
@@ -114,6 +115,24 @@ func (a *analysis) statement(stmt ast.StmtNode) {
 	case *ast.SelectStmt, *ast.SetOprStmt:
 	case *ast.InsertStmt, *ast.UpdateStmt, *ast.DeleteStmt:
 		a.write = true
+	case *ast.CallStmt:
+		// Calling a stored routine, when an administrator has allowed it. The
+		// body is what gets held to the policy, because the call says nothing
+		// about what it does; the decision is CallAllowed's, shared by every
+		// dialect.
+		a.write = true
+		a.call(s)
+	case *ast.ProcedureInfo:
+		// MAKING a stored routine, when an administrator has allowed it. The body
+		// is here in the statement rather than in the catalogue, and it is held to
+		// the same rules by the same code: a routine that would read a table this
+		// tool keeps back is refused before it exists, rather than created and
+		// refused every time somebody calls it.
+		a.write = true
+		a.createProcedure(s)
+	case *ast.DropProcedureStmt:
+		// Taking one away reads nothing, and the capability is what gates it.
+		a.write = true
 	case *ast.ShowStmt:
 		a.show(s)
 	case *ast.ExplainStmt:
@@ -121,12 +140,19 @@ func (a *analysis) statement(stmt ast.StmtNode) {
 		// the same reading. EXPLAIN ANALYZE is not a plan: it runs the thing, and
 		// hands back how many rows each step really saw.
 		if s.Analyze {
-			a.refuse("this tool does not run EXPLAIN ANALYZE, because it runs the statement as well as explaining it. Ask for the plan with EXPLAIN.")
+			a.refuse("You are not permitted to run EXPLAIN ANALYZE, which runs the statement as well as explaining it. Use EXPLAIN for the plan.")
 			return
 		}
 		a.statement(s.Stmt)
+
+	// Named, because these are the shapes an assistant reaches for on purpose
+	// and a refusal that does not name them reads as a parser failure. The other
+	// two dialects name their own equivalent, and this is MySQL's.
+	case *ast.PrepareStmt, *ast.ExecuteStmt, *ast.DeallocateStmt:
+		a.refuse("You are not permitted to run SQL built from a string. Write the statement out.")
+
 	default:
-		a.refuse("that kind of statement is not allowed by this tool")
+		a.refuse("You are not permitted to run that kind of statement.")
 	}
 }
 
@@ -136,7 +162,7 @@ func (a *analysis) statement(stmt ast.StmtNode) {
 // now, the text of a view's definition).
 func (a *analysis) show(s *ast.ShowStmt) {
 	if s.DBName != "" && !strings.EqualFold(s.DBName, a.guard.Catalog().Database()) {
-		a.refuse("this tool reaches one database, %q", a.guard.Catalog().Database())
+		a.refuse("You can reach one database, %q, and nothing outside it.", a.guard.Catalog().Database())
 		return
 	}
 	switch s.Tp {
@@ -151,23 +177,23 @@ func (a *analysis) show(s *ast.ShowStmt) {
 		// one thing hiding a table is meant to prevent.
 		if s.Table != nil {
 			if t, ok := a.guard.Catalog().Lookup(s.Table.Name.O); ok && t.View {
-				a.refuse("this tool does not show how %q is defined", s.Table.Name.O)
+				a.refuse("You are not permitted to see how %q is defined.", s.Table.Name.O)
 				return
 			}
 		}
 		a.showsTable(s.Table)
 	default:
-		a.refuse("that kind of SHOW is not allowed by this tool. It can list tables, and describe the columns and indexes of one.")
+		a.refuse("You are not permitted to run that SHOW. SHOW TABLES, SHOW COLUMNS and SHOW INDEX are available.")
 	}
 }
 
 func (a *analysis) showsTable(t *ast.TableName) {
 	if t == nil {
-		a.refuse("name the table to describe")
+		a.refuse("Name the table to describe.")
 		return
 	}
 	if ok, reason := a.guard.Reaches(t.Name.O); !ok {
-		a.refuse("%s", withoutRetry(reason))
+		a.refuse("%s", reason)
 	}
 }
 
@@ -180,13 +206,6 @@ func restore(n ast.Node) (string, error) {
 		return "", err
 	}
 	return b.String(), nil
-}
-
-// withoutRetry closes a refusal the way the server tool's does: with the one
-// sentence that stops an assistant from spending the rest of the turn looking
-// for another way to ask the same question.
-func withoutRetry(reason string) string {
-	return reason + ". What this tool may reach is fixed by its configuration, so rewording will not help; report that it is not available."
 }
 
 // stripExecutableComments takes out every comment the SERVER might run, and
@@ -280,4 +299,265 @@ func closingComment(runes []rune, start int) int {
 		}
 	}
 	return -1
+}
+
+// call decides whether a stored routine may run, by what its body reads.
+//
+// The name is taken from the parsed call rather than from the text, so a
+// qualified name, odd spacing or backquotes make no difference. One tool is one
+// database, so a name that reaches out of it is refused before anything is
+// looked up.
+func (a *analysis) call(stmt *ast.CallStmt) {
+	if stmt.Procedure == nil {
+		a.refuse("Name the routine to run: which one this is could not be established.")
+		return
+	}
+	if schema := stmt.Procedure.Schema.O; schema != "" &&
+		!strings.EqualFold(schema, a.guard.Catalog().Database()) {
+		a.refuse("You can reach one database, %q, and nothing outside it.", a.guard.Catalog().Database())
+		return
+	}
+	name := stmt.Procedure.FnName.O
+	if name == "" {
+		a.refuse("Name the routine to run: which one this is could not be established.")
+		return
+	}
+	if ok, why := a.guard.CallAllowed(name); !ok {
+		a.refuse("%s", why)
+	}
+}
+
+// qualify joins a schema to a name, when there is one. A qualified name is
+// decided about as stored code whether or not the snapshot has heard of it,
+// which is what stops a routine in a schema nobody read being taken for a
+// built-in.
+func qualify(schema, name string) string {
+	if schema == "" {
+		return name
+	}
+	return schema + "." + name
+}
+
+// createProcedure decides a routine being made, by what its body would read.
+//
+// The same question as calling one and the same answer, because it is the same
+// code: a body is code this tool cannot see through once it exists, so it is
+// read now. What it may not read, it may not be written to read.
+func (a *analysis) createProcedure(info *ast.ProcedureInfo) {
+	name := "the routine"
+	if info.ProcedureName != nil && info.ProcedureName.Name.O != "" {
+		name = info.ProcedureName.Name.O
+	}
+	if schema := info.ProcedureName.Schema.O; schema != "" &&
+		!strings.EqualFold(schema, a.guard.Catalog().Database()) {
+		a.refuse("You can reach one database, %q, and nothing outside it.", a.guard.Catalog().Database())
+		return
+	}
+
+	walker := &routineWalker{reader: &definitionReader{seen: map[string]bool{}}}
+	walker.walk(info.ProcedureBody)
+	if walker.unreadable || walker.reader.unreadable {
+		a.refuse("The body of %q could not be read. Write it out of plain SQL statements.", name)
+		return
+	}
+
+	// A routine that runs another routine does its real work out of sight.
+	definition := sqlguard.Definition{Calls: walker.reader.calls}
+	if ok, why := a.guard.BodyAllowed(name, "create", definition); !ok {
+		a.refuse("%s", why)
+		return
+	}
+
+	// And now each statement in the body, judged exactly as a query is.
+	//
+	// Knowing which TABLES a body touches is too blunt: a body that READS
+	// customers to filter on a hidden field hands nothing back, and refusing it
+	// would refuse most of the procedures worth writing. So every statement goes
+	// through the same descent and the same decision as if somebody had sent it,
+	// and the ONE difference is that a body cannot be rewritten: where a query
+	// would have had the value replaced with a stand-in, a routine is refused,
+	// because there is no moment later at which to do the replacing.
+	for _, stmt := range walker.stmts {
+		inner := &analysis{guard: a.guard}
+		inner.statement(stmt)
+		if inner.reason == "" {
+			stmt.Accept(inner)
+		}
+		if inner.reason == "" {
+			inner.decide()
+		}
+		// And the rewrite, which is where a STAR becomes the columns it stands
+		// for. Without it, SELECT * over a table with a hidden column looked
+		// clean: nothing had yet worked out what the star meant. The rewriting
+		// only ever touches the throwaway copy, and only when something was
+		// hidden, in which case this refuses and the copy is dropped.
+		if inner.reason == "" {
+			inner.rewrite()
+		}
+		if inner.reason != "" {
+			a.refuse("The body of %q is not permitted. %s", name, inner.reason)
+			return
+		}
+		// A hidden field in the body is REPLACED, not refused.
+		//
+		// The policy says what a hidden field is worth to anyone reading through
+		// this tool, and a routine made through this tool is no different from a
+		// query run through it: the value is swapped for the stand-in and the rest
+		// of the routine is created as written. Refusing instead would mean the
+		// policy made the tool unusable for the one thing an administrator turned
+		// on, which is not what a policy is for.
+		//
+		// The replacing already happened: the sub-analysis rewrote the body's AST
+		// in place, and the body belongs to the CREATE, so saying so here is
+		// enough for the outer pass to write the whole statement back out.
+		//
+		// changed is the signal, not the list of names: a star is expanded into
+		// the columns it stands for rather than hidden one at a time, so a body of
+		// SELECT * over a table with a hidden column sets this and names nothing.
+		if inner.changed {
+			a.changed = true
+			a.hiddenFields = append(a.hiddenFields, inner.hiddenNames()...)
+		}
+	}
+}
+
+// routineCall decides a stored function invoked inside a statement.
+//
+// CALL announces itself and a function call does not: `SELECT f()` is a SELECT,
+// and the body it runs is the database's own code, free to read whatever the
+// policy keeps back. Measured before it was written: with a policy hiding
+// customers.ssn, a function returning that column handed it straight over.
+//
+// Only a name the catalog KNOWS is a routine gets here. Everything else is a
+// built-in, and refusing lower() would refuse every statement worth running.
+func (a *analysis) routineCall(name string) {
+	if name == "" || !a.guard.IsRoutine(name) {
+		return
+	}
+	if ok, why := a.guard.CallAllowed(name); !ok {
+		a.refuse("%s", why)
+	}
+}
+
+// CountStatements reads the text with this dialect's own parser.
+//
+// It answers for CREATE PROCEDURE, and cannot for CREATE FUNCTION or CREATE
+// TRIGGER, which this parser does not read at all (measured: both are a parse
+// error). Those fall back to the caller, which is the one place a body's
+// semicolons cannot be told from a statement joined onto the end.
+func (mysqlAnalyzer) CountStatements(sql string) (int, bool) {
+	p := readers.Get().(*parser.Parser)
+	defer readers.Put(p)
+	stmts, _, err := p.Parse(sql, "", "")
+	if err != nil {
+		return 0, false
+	}
+	return len(stmts), true
+}
+
+// BodyKeepsPolicy reads a stored body and reports whether running it would hand
+// back anything the policy keeps back. Same reading as the create path, from the
+// text this engine stores rather than from a statement somebody sent.
+func (mysqlAnalyzer) BodyKeepsPolicy(g *sqlguard.Guard, body string) (bool, string) {
+	stmts := bodyStatements(body)
+	if stmts == nil {
+		return false, "has a body that could not be read, and only routines with a readable SQL body are permitted"
+	}
+	for _, stmt := range stmts {
+		inner := &analysis{guard: g}
+		inner.statement(stmt)
+		if inner.reason == "" {
+			stmt.Accept(inner)
+		}
+		if inner.reason == "" {
+			inner.decide()
+		}
+		if inner.reason == "" {
+			inner.rewrite()
+		}
+		if inner.reason != "" {
+			return false, "has a body that is not permitted: " + strings.TrimSuffix(lowerFirst(inner.reason), ".")
+		}
+		if inner.changed {
+			what := "a hidden field"
+			if names := inner.hiddenNames(); len(names) > 0 {
+				what = "the hidden " + plural(names, "field", "fields") + " " + quoteAll(names)
+			}
+			return false, fmt.Sprintf("returns %s. A value inside a routine that already "+
+				"exists cannot be hidden, so it cannot be run", what)
+		}
+	}
+	return true, ""
+}
+
+// bodyStatements reads a stored body into the statements it is made of, or nil
+// when it cannot be read in full.
+func bodyStatements(body string) []ast.StmtNode {
+	trimmed := strings.TrimSpace(body)
+	if trimmed == "" {
+		return nil
+	}
+	if rest, isReturn := cutWord(trimmed, "RETURN"); isReturn {
+		stmt, reason := readStatement("SELECT " + rest)
+		if reason != "" {
+			return nil
+		}
+		return []ast.StmtNode{stmt}
+	}
+	if stmt, reason := readStatement(trimmed); reason == "" {
+		return []ast.StmtNode{stmt}
+	}
+	reader := readers.Get().(*parser.Parser)
+	parsed, _, err := reader.Parse("CREATE PROCEDURE sag_read_body() "+trimmed, "", "")
+	readers.Put(reader)
+	if err != nil || len(parsed) != 1 {
+		return nil
+	}
+	info, ok := parsed[0].(*ast.ProcedureInfo)
+	if !ok {
+		return nil
+	}
+	walker := &routineWalker{reader: &definitionReader{seen: map[string]bool{}}}
+	walker.walk(info.ProcedureBody)
+	if walker.unreadable || walker.reader.unreadable {
+		return nil
+	}
+	return walker.stmts
+}
+
+// lowerFirst drops the capital off a sentence that is about to be used as a
+// clause inside another one, so a message does not read "... is not permitted:
+// You cannot ...".
+func lowerFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	r := []rune(s)
+	if len(r) > 1 && unicode.IsUpper(r[1]) {
+		// An acronym or a quoted name: leave it alone.
+		return s
+	}
+	r[0] = unicode.ToLower(r[0])
+	return string(r)
+}
+
+// plural picks the word that agrees with how many there are, and quoteAll lists
+// them the way a sentence does, so a message about one field does not say
+// "fields" and a message about two does not read as one long name.
+func plural(items []string, one, many string) string {
+	if len(items) == 1 {
+		return one
+	}
+	return many
+}
+
+func quoteAll(items []string) string {
+	out := make([]string, len(items))
+	for i, s := range items {
+		out[i] = fmt.Sprintf("%q", s)
+	}
+	if len(out) <= 1 {
+		return strings.Join(out, "")
+	}
+	return strings.Join(out[:len(out)-1], ", ") + " and " + out[len(out)-1]
 }

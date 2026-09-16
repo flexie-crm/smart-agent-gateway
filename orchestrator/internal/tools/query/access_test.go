@@ -1,6 +1,10 @@
 package query
 
-import "testing"
+import (
+	"testing"
+
+	"flexie.io/sag/internal/datasource"
+)
 
 // The gate is a security boundary, so its decisions are pinned exactly: each
 // mode allows only its class of statement, unknown statements are refused in
@@ -46,15 +50,15 @@ func TestAccessGate(t *testing.T) {
 		{"lowercase select", AccessRead, "  select 1", true},
 		{"mixed case insert", AccessWrite, "InSeRt INTO t VALUES (1)", true},
 
-		// Stacked statements are refused even when both parts would pass alone.
-		{"stacked selects", AccessRead, "SELECT 1; SELECT 2", false},
-		{"stacked drop after select", AccessRead, "SELECT 1; DROP TABLE t", false},
+		// The one-statement rule moved to oneStatement, which needs the dialect to
+		// tell a routine body from a statement joined onto the end. Its cases are
+		// in TestOneStatementAtATime below, against permitted().
 		{"trailing semicolon ok", AccessRead, "SELECT 1;", true},
 		{"semicolon inside string ok", AccessRead, "SELECT ';' AS sep", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ok, reason := check(tc.mode, tc.sql)
+			ok, reason := check(tc.mode, tc.sql, nil)
 			if ok != tc.ok {
 				t.Fatalf("check(%q, %q) = %v (%q), want %v", tc.mode, tc.sql, ok, reason, tc.ok)
 			}
@@ -82,5 +86,55 @@ func TestAccessValid(t *testing.T) {
 	}
 	if Access("admin").Valid() || Access("").Valid() {
 		t.Fatal("an unknown access mode was accepted")
+	}
+}
+
+// One statement per call, and what that has to mean for a routine body.
+//
+// Counting semicolons cannot answer this: a body is made of statements and is
+// part of the one statement that creates it. Measured on a real session before
+// it was fixed, an agent wrote every procedure body without semicolons and
+// avoided THROW entirely, because THROW needs one before it.
+func TestOneStatementAtATime(t *testing.T) {
+	for _, driver := range []string{"mysql", "postgres", "sqlserver"} {
+		s := settingsFor(t, driver, datasource.CapCreateRoutines, datasource.CapCreateTriggers, datasource.CapCallRoutines)
+		for _, c := range []struct {
+			sql  string
+			want bool
+		}{
+			{"SELECT 1", true},
+			{"SELECT 1;", true},
+			{"SELECT ';' AS sep", true},
+			{"SELECT 1; SELECT 2", false},
+			{"SELECT 1; DROP TABLE t", false},
+		} {
+			if ok, reason := oneStatement(s, c.sql); ok != c.want {
+				t.Errorf("%s: oneStatement(%q) = %v (%q), want %v", driver, c.sql, ok, reason, c.want)
+			}
+		}
+	}
+
+	// A routine body is ONE statement, semicolons and all, and a statement joined
+	// onto the end of one is still two.
+	for _, c := range []struct {
+		driver, sql string
+		want        bool
+	}{
+		{"sqlserver", "CREATE PROCEDURE dbo.p AS BEGIN SET NOCOUNT ON; SELECT 1; END", true},
+		// One statement, and that is the ENGINE's reading rather than a concession:
+		// a T-SQL procedure body runs to the end of the batch, so the DROP becomes
+		// part of the procedure. Put to a live SQL Server, it was accepted, the
+		// table survived, and the stored body contained the DROP.
+		{"sqlserver", "CREATE PROCEDURE dbo.p AS BEGIN SELECT 1 END; DROP TABLE customers", true},
+		{"sqlserver", "CREATE TRIGGER t ON orders AFTER INSERT AS BEGIN SET NOCOUNT ON; SELECT 1; END", true},
+		{"mysql", "CREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END", true},
+		{"mysql", "CREATE PROCEDURE p() BEGIN SELECT 1; END; DROP TABLE customers", false},
+		{"postgres", "CREATE FUNCTION f() RETURNS int LANGUAGE plpgsql AS $$ BEGIN RETURN 1; END $$", true},
+		{"postgres", "CREATE FUNCTION f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$; DROP TABLE customers", false},
+	} {
+		s := settingsFor(t, c.driver, datasource.CapCreateRoutines, datasource.CapCreateTriggers)
+		if ok, reason := oneStatement(s, c.sql); ok != c.want {
+			t.Errorf("%s: oneStatement(%.60q) = %v (%q), want %v", c.driver, c.sql, ok, reason, c.want)
+		}
 	}
 }

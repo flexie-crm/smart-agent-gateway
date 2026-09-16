@@ -118,7 +118,7 @@ func (t *sshTemplate) Fields(variant string) ([]template.Section, error) {
 			},
 		},
 		{
-			Title: "cmdpolicy.Policy",
+			Title: "Policy",
 			Hint: "Choose the rule, then list the commands it applies to.\n\n" +
 				"- Denylist runs anything except what you list. It starts with the commands that destroy data, take the machine down, or lock you out.\n" +
 				"- Allowlist is stronger: only what you list runs, and everything else is refused.\n" +

@@ -23,7 +23,10 @@ var catalogTables = map[string]bool{
 
 // analysis is one reading of one statement.
 type analysis struct {
-	guard *sqlguard.Guard
+	// cteBodies is what each CTE body may see of the WITH it belongs to, worked
+	// out when the WITH is read and looked up again when the body is walked.
+	cteBodies map[ast.Node]cteBody
+	guard     *sqlguard.Guard
 
 	// reason is the first thing found wrong, which is what gets reported: a
 	// person reading a refusal wants to know what to fix first, not last.
@@ -63,6 +66,9 @@ type analysis struct {
 	// that sits inside somebody else's select item is not being returned, and
 	// replacing that select item would blank an answer nobody asked to hide.
 	fields []fieldFrame
+	// hiddenFields are the fields this statement would have had replaced with the
+	// stand-in, by name.
+	hiddenFields []string
 }
 
 // scope is one query's view of the names it may use: what its FROM brought in,
@@ -81,6 +87,20 @@ type scope struct {
 	// looking for all the world like it had been checked.
 	sources map[string]*source
 	order   []*source
+	// ownedBy is the query whose WITH this scope is a body of, when it is one.
+	//
+	// A CTE body does not see its OWN name, and does not see a CTE written after
+	// it: SQL resolves either of those to the table of that name. So the walk out
+	// through the scopes skips the query that owns the WITH, and this scope's own
+	// ctes hold the siblings that really are in scope here.
+	ownedBy *scope
+}
+
+// cteBody is one CTE's own view of the WITH it belongs to: the sibling names in
+// scope inside it, and the query that owns them.
+type cteBody struct {
+	visible map[string]bool
+	owner   *scope
 }
 
 // source is one entry in a FROM.
@@ -153,7 +173,7 @@ func (a *analysis) Enter(n ast.Node) (ast.Node, bool) {
 	switch node := n.(type) {
 	case *ast.SelectStmt:
 		if node.SelectIntoOpt != nil {
-			a.refuse("this tool returns rows to you; it does not write them to a file on the server")
+			a.refuse("You are not permitted to write rows to a file on the server.")
 		}
 		// TABLE t and VALUES ... are a select by another spelling, and they are
 		// not written back as one: the keyword is all that comes out, so a select
@@ -161,7 +181,7 @@ func (a *analysis) Enter(n ast.Node) (ast.Node, bool) {
 		// would be dropped between the decision and the database. What cannot be
 		// written back the way it was decided about does not run.
 		if node.Kind != ast.SelectStmtKindSelect {
-			a.refuse("write that as SELECT * FROM the table; this tool does not run the short form")
+			a.refuse("You are not permitted to run the short TABLE form. Write it as SELECT * FROM the table.")
 		}
 		a.push(node, node.With, node.From)
 	case *ast.SetOprStmt:
@@ -203,11 +223,12 @@ func (a *analysis) Enter(n ast.Node) (ast.Node, bool) {
 	case *ast.VariableExpr:
 		// A variable is a place to put a value in one statement and read it back
 		// in another, which is a way around every rule below.
-		a.refuse("this tool does not run statements that set or read a variable")
+		a.refuse("You are not permitted to set or read a variable.")
 	case *ast.FuncCallExpr:
 		if node.FnName.L == "load_file" {
-			a.refuse("this tool reads the database, not files on the server")
+			a.refuse("You are not permitted to read files on the server.")
 		}
+		a.routineCall(qualify(node.Schema.O, node.FnName.O))
 	}
 	return n, false
 }
@@ -236,9 +257,16 @@ func (a *analysis) push(node ast.Node, with *ast.WithClause, from *ast.TableRefs
 		s.sel = sel
 	}
 	if with != nil {
-		for _, cte := range with.CTEs {
-			s.ctes[strings.ToLower(cte.Name.O)] = true
+		a.declare(s, with)
+	}
+	// A body of somebody else's WITH sees the siblings written before it, and not
+	// the rest. Set before the FROM is read, because deciding what a name in the
+	// FROM is starts with asking whether it is a CTE at all.
+	if body, ok := a.cteBodies[node]; ok {
+		for name := range body.visible {
+			s.ctes[name] = true
 		}
+		s.ownedBy = body.owner
 	}
 	if from != nil {
 		a.sources(s, from.TableRefs)
@@ -264,7 +292,7 @@ func (a *analysis) sources(s *scope, n ast.ResultSetNode) {
 	case *ast.TableSource:
 		a.source(s, v)
 	default:
-		a.refuse("this tool could not work out which tables that statement reads, so it did not run it")
+		a.refuse("Which tables that statement reads could not be established. Write the query a plainer way.")
 	}
 }
 
@@ -292,7 +320,7 @@ func (a *analysis) source(s *scope, ts *ast.TableSource) {
 	case *ast.SelectStmt, *ast.SetOprStmt:
 		src.derived, src.derivedQuery = true, inner
 	default:
-		a.refuse("this tool could not work out which tables that statement reads, so it did not run it")
+		a.refuse("Which tables that statement reads could not be established. Write the query a plainer way.")
 		return
 	}
 	// Every source is kept, in the order the FROM brought it in. The map is only
@@ -308,10 +336,51 @@ func (a *analysis) source(s *scope, ts *ast.TableSource) {
 	s.order = append(s.order, src)
 }
 
-// knowsCTE reports whether a name is one a WITH introduced, here or in a query
-// this one sits inside. Such a name looks exactly like a table and is not one,
-// and a WITH in an inner query is invisible to an outer one, which is why this
-// walks out through the scopes rather than over a single set of names.
+// declare records what each CTE in a WITH can see, and what the query that owns
+// the WITH can see.
+//
+// The order is the whole point. A CTE body sees the names written BEFORE it; it
+// does not see its own name, and it does not see one written after it. That is
+// not a detail: the database resolves such a reference to the TABLE of that
+// name, so
+//
+//	WITH secret_keys AS (SELECT * FROM secret_keys) SELECT * FROM secret_keys
+//
+// reads the real secret_keys, and taking the inner one for the CTE meant the
+// policy was never asked about the one table it was written to keep back.
+// Measured against a live server before this was written: the row came back.
+//
+// RECURSIVE is the exception the standard makes, and there the name IS visible
+// inside its own body, because that is what makes the recursion possible.
+func (a *analysis) declare(s *scope, with *ast.WithClause) {
+	if a.cteBodies == nil {
+		a.cteBodies = map[ast.Node]cteBody{}
+	}
+	for _, cte := range with.CTEs {
+		visible := map[string]bool{}
+		for name := range s.ctes {
+			visible[name] = true
+		}
+		if with.IsRecursive || cte.IsRecursive {
+			visible[strings.ToLower(cte.Name.O)] = true
+		}
+		if cte.Query != nil {
+			if q, ok := cte.Query.Query.(ast.Node); ok && q != nil {
+				a.cteBodies[q] = cteBody{visible: visible, owner: s}
+			}
+		}
+		// And only now is the name in scope for what comes after it.
+		s.ctes[strings.ToLower(cte.Name.O)] = true
+	}
+}
+
+// knowsCTE reports whether a name is one a WITH introduced that is in scope
+// HERE. Such a name looks exactly like a table and is not one, and a WITH in an
+// inner query is invisible to an outer one, which is why this walks out through
+// the scopes rather than over a single set of names.
+//
+// The walk skips the query that owns a WITH when it is walked out of from one of
+// that WITH's own bodies: see ownedBy.
 func (a *analysis) knowsCTE(s *scope, name *ast.TableName) bool {
 	if name.Schema.O != "" {
 		return false
@@ -320,6 +389,9 @@ func (a *analysis) knowsCTE(s *scope, name *ast.TableName) bool {
 	for ; s != nil; s = s.parent {
 		if s.ctes[key] {
 			return true
+		}
+		if s.ownedBy != nil {
+			s = s.ownedBy
 		}
 	}
 	return false
@@ -369,7 +441,7 @@ func (a *analysis) decide() {
 // was really there.
 func (a *analysis) decideAssignment(assign *ast.Assignment) {
 	if assign.Column != nil && a.hiddenColumn(assign.Column) {
-		a.refuse("%q is hidden in this tool, so it cannot be written to: this tool cannot know what is really there, and writing would put the stand-in over it.", assign.Column.Name.O)
+		a.refuse("%q is a hidden field and you cannot write to it: its real value is not visible here, so a write would replace it with the placeholder.", assign.Column.Name.O)
 		return
 	}
 	found := &hiddenReader{a: a}
@@ -377,7 +449,7 @@ func (a *analysis) decideAssignment(assign *ast.Assignment) {
 		assign.Expr.Accept(found)
 	}
 	if found.name != "" {
-		a.refuse("%q is hidden in this tool, so its value cannot be copied into another column, where it would be readable afterwards. Report that it is not available.", found.name)
+		a.refuse("%q is a hidden field and you cannot copy it into another column, where it would then be readable.", found.name)
 	}
 }
 
@@ -427,7 +499,7 @@ func (a *analysis) decideInsert(insert *ast.InsertStmt) {
 	// Named columns say plainly where the rows are going.
 	for _, column := range insert.Columns {
 		if a.hiddenColumn(column) {
-			a.refuse("%q is hidden in this tool, so it cannot be written to: this tool cannot know what is really there, and writing would put the stand-in over it.", column.Name.O)
+			a.refuse("%q is a hidden field and you cannot write to it: its real value is not visible here, so a write would replace it with the placeholder.", column.Name.O)
 			return
 		}
 	}
@@ -448,7 +520,7 @@ func (a *analysis) decideInsert(insert *ast.InsertStmt) {
 		}
 		for _, column := range columns {
 			if a.guard.MasksColumn(src.table, column) {
-				a.refuse("%q is hidden in this tool, and an INSERT without a column list writes every column of %q including that one. Name the columns you mean to write.", column, src.table)
+				a.refuse("%q is a hidden field, and an INSERT without a column list writes every column of %q including that one. Name the columns you mean to write.", column, src.table)
 				return
 			}
 		}
@@ -460,11 +532,11 @@ func (a *analysis) decideTable(ref tableRef) {
 	switch {
 	case isCatalogSchema(schema):
 		if !catalogTables[strings.ToLower(ref.name.Name.O)] {
-			a.refuse("this tool reads only the parts of the catalog that describe tables and columns (tables, columns, statistics, key_column_usage, table_constraints)")
+			a.refuse("You can read only the parts of the catalog that describe tables and columns: tables, columns, statistics, key_column_usage, table_constraints.")
 		}
 		return
 	case schema != "" && !strings.EqualFold(schema, a.guard.Catalog().Database()):
-		a.refuse("this tool reaches one database, %q, and nothing outside it", a.guard.Catalog().Database())
+		a.refuse("You can reach one database, %q, and nothing outside it.", a.guard.Catalog().Database())
 		return
 	}
 	if a.knowsCTE(ref.scope, ref.name) {
@@ -474,13 +546,13 @@ func (a *analysis) decideTable(ref tableRef) {
 		a.sawUnknown = true
 	}
 	if ok, reason := a.guard.Reaches(ref.name.Name.O); !ok {
-		a.refuse("%s", withoutRetry(reason))
+		a.refuse("%s", reason)
 	}
 }
 
 func (a *analysis) decideColumn(ref columnRef) {
 	if schema := ref.name.Schema.O; schema != "" && !isCatalogSchema(schema) && !strings.EqualFold(schema, a.guard.Catalog().Database()) {
-		a.refuse("this tool reaches one database, %q, and nothing outside it", a.guard.Catalog().Database())
+		a.refuse("You can reach one database, %q, and nothing outside it.", a.guard.Catalog().Database())
 		return
 	}
 	name := ref.name.Name.O
@@ -550,7 +622,13 @@ func (a *analysis) hide(field *ast.SelectField, name string) {
 	}
 	field.Expr = ast.NewValueExpr(sqlguard.Hidden, "", "")
 	a.changed = true
+	// Remembered as well as replaced, so a caller that cannot rewrite (a routine
+	// being created) can say WHICH field is the problem rather than that one is.
+	a.hiddenFields = append(a.hiddenFields, name)
 }
+
+// hiddenNames is every field this statement would have had replaced.
+func (a *analysis) hiddenNames() []string { return a.hiddenFields }
 
 type columnOrigin int
 

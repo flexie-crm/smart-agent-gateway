@@ -12,6 +12,7 @@ package postgres
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"flexie.io/sag/internal/sqlguard"
 	pgq "github.com/pganalyze/pg_query_go/v6"
@@ -79,11 +80,11 @@ func readStatement(sql string) (*pgq.ParseResult, string) {
 	tree, err := pg.Parse(sql)
 	switch {
 	case err != nil:
-		return nil, "this tool could not read that as a statement, so it was not run. Check the SQL and write it again."
+		return nil, "That could not be read as a statement. Check the SQL and write it again."
 	case tree == nil || len(tree.Stmts) == 0:
 		return nil, "the statement was empty"
 	case len(tree.Stmts) > 1:
-		return nil, "run one statement at a time; several statements joined together are not allowed"
+		return nil, "Send one statement per call. Statements joined together are not permitted."
 	case tree.Stmts[0].Stmt == nil:
 		return nil, "the statement was empty"
 	}
@@ -109,24 +110,251 @@ func (a *analysis) statement(node *pgq.Node) {
 	case *pgq.Node_DeleteStmt:
 		a.write = true
 		a.delete(v.DeleteStmt, nil)
+	case *pgq.Node_CallStmt:
+		// Calling a stored routine, when an administrator has allowed it. The
+		// body is what gets held to the policy, because the call says nothing
+		// about what it does; the decision is CallAllowed's, shared by every
+		// dialect.
+		a.write = true
+		a.call(v.CallStmt)
+	case *pgq.Node_CreateFunctionStmt:
+		// MAKING a routine, when an administrator has allowed it. The body is here
+		// in the statement rather than in the catalogue, and it is held to the
+		// same rules: a routine that would read what this tool cannot see is
+		// refused before it exists, rather than created and refused on every call.
+		a.write = true
+		a.createFunction(v.CreateFunctionStmt)
 	case *pgq.Node_ExplainStmt:
 		// A plan is a reading of a statement, so the statement it explains gets
 		// the same reading. EXPLAIN ANALYZE is not a plan: it runs the thing.
 		explain := node.GetExplainStmt()
 		for _, option := range explain.GetOptions() {
 			if def := option.GetDefElem(); def != nil && strings.EqualFold(def.GetDefname(), "analyze") {
-				a.refuse("this tool does not run EXPLAIN ANALYZE, because it runs the statement as well as explaining it. Ask for the plan with EXPLAIN.")
+				a.refuse("You are not permitted to run EXPLAIN ANALYZE, which runs the statement as well as explaining it. Use EXPLAIN for the plan.")
 				return
 			}
 		}
 		a.statement(explain.GetQuery())
 	default:
-		a.refuse("that kind of statement is not allowed by this tool")
+		a.refuse("You are not permitted to run that kind of statement.")
 	}
 }
 
-// withoutRetry closes a refusal with the one sentence that stops an assistant
-// spending the rest of the turn looking for another way to ask.
-func withoutRetry(reason string) string {
-	return reason + ". What this tool may reach is fixed by its configuration, so rewording will not help; report that it is not available."
+// createFunction decides a routine being made, by what its body would read.
+//
+// Postgres keeps the body in an option called "as", as text, in whatever
+// language the "language" option names. Only a body written in SQL can be read;
+// a plpgsql one is a different language this does not speak, and an unread body
+// is refused rather than assumed harmless.
+func (a *analysis) createFunction(stmt *pgq.CreateFunctionStmt) {
+	name := "the routine"
+	if parts := stmt.GetFuncname(); len(parts) > 0 {
+		if str := parts[len(parts)-1].GetString_(); str != nil {
+			name = str.GetSval()
+		}
+	}
+
+	language, body := "", ""
+	for _, option := range stmt.GetOptions() {
+		def := option.GetDefElem()
+		switch strings.ToLower(def.GetDefname()) {
+		case "language":
+			language = strings.ToLower(def.GetArg().GetString_().GetSval())
+		case "as":
+			for _, item := range def.GetArg().GetList().GetItems() {
+				if str := item.GetString_(); str != nil {
+					body = str.GetSval()
+				}
+			}
+		}
+	}
+	if language != "sql" {
+		a.refuse("%q is written in %s. Only routines written in plain SQL are permitted.", name, language)
+		return
+	}
+
+	definition, ok := Analyzer{}.ReadDefinition(body)
+	if !ok {
+		a.refuse("The body of %q could not be read. Write it out of plain SQL statements.", name)
+		return
+	}
+	// Only the nested-routine question here. Which tables it may read and which
+	// fields it may return are decided below, statement by statement, because a
+	// body that READS customers to filter on a hidden field returns nothing and
+	// must not be refused for it.
+	if allowed, why := a.guard.BodyAllowed(name, "create", sqlguard.Definition{Calls: definition.Calls}); !allowed {
+		a.refuse("%s", why)
+		return
+	}
+	// And the body itself, judged exactly as a query is, because knowing which
+	// TABLES it touches cannot say whether it hands a hidden field back.
+	inner, reason := readStatement(body)
+	if reason != "" {
+		a.refuse("The body of %q could not be read.", name)
+		return
+	}
+	sub := &analysis{guard: a.guard}
+	sub.statement(inner.Stmts[0].Stmt)
+	if sub.reason == "" {
+		sub.sweep(inner)
+	}
+	if sub.reason == "" {
+		sub.decide()
+	}
+	if sub.reason == "" {
+		sub.rewrite()
+	}
+	if sub.reason != "" {
+		a.refuse("The body of %q is not permitted. %s", name, sub.reason)
+		return
+	}
+	if !sub.changed {
+		return
+	}
+	// A hidden field in the body is REPLACED, not refused, exactly as in a query:
+	// the policy says what the field is worth to anyone reading through this
+	// tool, and a routine made through this tool is no different from a query run
+	// through it.
+	//
+	// Postgres keeps the body as TEXT inside the statement, so the rewritten body
+	// is written back into that option and the whole CREATE is deparsed from the
+	// tree, rather than spliced into the text by hand.
+	rewritten, err := pg.Deparse(inner)
+	if err != nil {
+		a.refuse("The body of %q could not be rewritten with its hidden fields replaced.", name)
+		return
+	}
+	if !setFunctionBody(stmt, rewritten) {
+		a.refuse("The body of %q could not be rewritten with its hidden fields replaced.", name)
+		return
+	}
+	a.changed = true
+}
+
+// setFunctionBody writes a new body into the "as" option, and reports whether it
+// found one to write into.
+func setFunctionBody(stmt *pgq.CreateFunctionStmt, body string) bool {
+	for _, option := range stmt.GetOptions() {
+		def := option.GetDefElem()
+		if !strings.EqualFold(def.GetDefname(), "as") {
+			continue
+		}
+		for _, item := range def.GetArg().GetList().GetItems() {
+			if str := item.GetString_(); str != nil {
+				str.Sval = body
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// call decides whether a stored routine may run, by what its body reads.
+//
+// The name comes from the parsed call rather than the text. Postgres qualifies
+// with a schema rather than a database, and one tool is one database, so a name
+// in more parts than this engine can mean here is refused rather than guessed
+// at.
+func (a *analysis) call(stmt *pgq.CallStmt) {
+	fn := stmt.GetFunccall()
+	if fn == nil {
+		a.refuse("Name the routine to run: which one this is could not be established.")
+		return
+	}
+	var parts []string
+	for _, n := range fn.GetFuncname() {
+		if s := n.GetString_(); s != nil {
+			parts = append(parts, s.GetSval())
+		}
+	}
+	if len(parts) == 0 {
+		a.refuse("Name the routine to run: which one this is could not be established.")
+		return
+	}
+	if len(parts) > 2 {
+		a.refuse("You can reach one database, %q, and nothing outside it.", a.guard.Catalog().Database())
+		return
+	}
+	if ok, why := a.guard.CallAllowed(parts[len(parts)-1]); !ok {
+		a.refuse("%s", why)
+	}
+}
+
+// CountStatements reads the text with the server's own parser, so a dollar
+// quoted body counts as the one statement it is.
+func (Analyzer) CountStatements(sql string) (int, bool) {
+	tree, err := pg.Parse(sql)
+	if err != nil || tree == nil {
+		return 0, false
+	}
+	return len(tree.Stmts), true
+}
+
+// BodyKeepsPolicy reads a stored body and reports whether running it would hand
+// back anything the policy keeps back.
+func (Analyzer) BodyKeepsPolicy(g *sqlguard.Guard, body string) (bool, string) {
+	tree, reason := readStatement(body)
+	if reason != "" {
+		return false, "has a body that could not be read, and only routines with a readable SQL body are permitted"
+	}
+	sub := &analysis{guard: g}
+	sub.statement(tree.Stmts[0].Stmt)
+	if sub.reason == "" {
+		sub.sweep(tree)
+	}
+	if sub.reason == "" {
+		sub.decide()
+	}
+	if sub.reason == "" {
+		sub.rewrite()
+	}
+	if sub.reason != "" {
+		return false, "has a body that is not permitted: " + strings.TrimSuffix(lowerFirst(sub.reason), ".")
+	}
+	if sub.changed {
+		what := "a hidden field"
+		if names := sub.hiddenNames(); len(names) > 0 {
+			what = "the hidden " + plural(names, "field", "fields") + " " + quoteAll(names)
+		}
+		return false, fmt.Sprintf("returns %s. A value inside a routine that already "+
+			"exists cannot be hidden, so it cannot be run", what)
+	}
+	return true, ""
+}
+
+// lowerFirst drops the capital off a sentence that is about to be used as a
+// clause inside another one, so a message does not read "... is not permitted:
+// You cannot ...".
+func lowerFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	r := []rune(s)
+	if len(r) > 1 && unicode.IsUpper(r[1]) {
+		// An acronym or a quoted name: leave it alone.
+		return s
+	}
+	r[0] = unicode.ToLower(r[0])
+	return string(r)
+}
+
+// plural picks the word that agrees with how many there are, and quoteAll lists
+// them the way a sentence does, so a message about one field does not say
+// "fields" and a message about two does not read as one long name.
+func plural(items []string, one, many string) string {
+	if len(items) == 1 {
+		return one
+	}
+	return many
+}
+
+func quoteAll(items []string) string {
+	out := make([]string, len(items))
+	for i, s := range items {
+		out[i] = fmt.Sprintf("%q", s)
+	}
+	if len(out) <= 1 {
+		return strings.Join(out, "")
+	}
+	return strings.Join(out[:len(out)-1], ", ") + " and " + out[len(out)-1]
 }

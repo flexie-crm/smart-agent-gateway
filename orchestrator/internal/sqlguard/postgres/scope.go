@@ -45,7 +45,10 @@ var catalogTables = map[string]bool{
 }
 
 type analysis struct {
-	guard *sqlguard.Guard
+	// hiddenFields are the fields this statement would have had replaced with
+	// the placeholder, so a refusal about a routine can name them.
+	hiddenFields []string
+	guard        *sqlguard.Guard
 
 	// reason is the first thing found wrong, which is what gets reported.
 	reason string
@@ -193,16 +196,132 @@ func (a *analysis) sweep(tree *pgq.ParseResult) {
 		switch msg := m.Interface().(type) {
 		case *pgq.RangeVar:
 			if !a.seenTables[msg] {
-				a.refuse("this tool could not work out where %q sits in that statement, so it did not run it. "+
+				a.refuse("Where %q sits in that statement could not be established. "+
 					"Write the query a plainer way.", msg.GetRelname())
 			}
 		case *pgq.ColumnRef:
 			if !a.seenColumns[msg] {
-				a.refuse("this tool could not work out where a column sits in that statement, so it did not run it. " +
+				a.refuse("Where a column sits in that statement could not be established. " +
 					"Write the query a plainer way.")
 			}
+		case *pgq.FuncCall:
+			a.routineCall(msg)
 		}
 	})
+}
+
+// routineCall decides a stored function invoked inside a statement.
+//
+// CALL announces itself and a function call does not: `SELECT f()` is a SELECT,
+// and the body it runs is the database's own code, free to read whatever the
+// policy keeps back. Measured before it was written: with a policy hiding
+// customers.ssn, a function returning that column handed it straight over.
+//
+// It rides the sweep rather than the descent because a call can sit anywhere an
+// expression can, and the sweep is the pass that visits everything. Only a name
+// the catalog KNOWS is a routine is decided about: everything else is a built-in,
+// and refusing lower() would refuse every statement worth running.
+func (a *analysis) routineCall(call *pgq.FuncCall) {
+	names := call.GetFuncname()
+	if len(names) == 0 {
+		return
+	}
+	name, ok := routineName(call)
+	if !ok {
+		return
+	}
+	bare := name
+	if dot := strings.LastIndex(bare, "."); dot >= 0 {
+		bare = bare[dot+1:]
+	}
+	if takesStatementAsText[bare] {
+		a.refuse("You are not permitted to run %s, which is handed what to read as text rather than "+
+			"as part of the statement.", bare)
+		return
+	}
+	if !a.guard.IsRoutine(name) {
+		return
+	}
+	if ok, why := a.guard.CallAllowed(name); !ok {
+		a.refuse("%s", why)
+	}
+}
+
+// routineName is what a call NAMES, as the guard reads a routine's name: the
+// whole of it, schema and all, because a routine's identity is its schema and
+// its name and two schemas are free to offer the same one.
+//
+// It reports false for a call that names nothing, and for the one shape that
+// carries a name NOBODY WROTE. Standard SQL has syntax for a handful of
+// functions, and this parser rewrites each into the pg_catalog function that
+// implements it: SUBSTRING(x FROM 1 FOR 2) becomes pg_catalog.substring,
+// EXTRACT becomes pg_catalog.extract, TRIM becomes pg_catalog.btrim, and so do
+// POSITION, OVERLAY, NORMALIZE, XMLEXISTS and COLLATION FOR. The rule that a
+// QUALIFIED name is stored code whatever the snapshot knows then refused every
+// one of them, so a policy with a table rule on it could not run SUBSTRING:
+// measured, all seven came back "this tool cannot establish what
+// pg_catalog.substring does".
+//
+// The parser marks its own rewrites, and that is the discriminator rather than a
+// list of names to keep up to date. It cannot be forged either: the only way to
+// get this mark is to write one of the standard forms, and each of those maps to
+// one fixed function. A pg_catalog name somebody writes out in full keeps the
+// ordinary rule and is still refused.
+func routineName(call *pgq.FuncCall) (string, bool) {
+	if call.GetFuncformat() == pgq.CoercionForm_COERCE_SQL_SYNTAX {
+		return "", false
+	}
+	var parts []string
+	for _, n := range call.GetFuncname() {
+		if str := n.GetString_(); str != nil && str.GetSval() != "" {
+			parts = append(parts, strings.ToLower(str.GetSval()))
+		}
+	}
+	if len(parts) == 0 {
+		return "", false
+	}
+	return strings.Join(parts, "."), true
+}
+
+// takesStatementAsText is every built-in that is handed a query, a table, a
+// schema or the whole database as a VALUE, and reads it.
+//
+// These are the one thing no parser can help with. The parser reads this
+// statement correctly and completely: a function call, with a string constant as
+// its argument. A string is data. `query_to_xml('SELECT ssn FROM customers')`
+// has no table in it and no column in it, because there is nothing there but
+// characters, which the function decides at RUN TIME to treat as SQL. So the
+// statement this side reads and the statement the server runs are two different
+// statements, which is precisely the disagreement this package exists to
+// prevent. Measured against a live server before this was written: the hidden
+// field and the denied table both came back.
+//
+// The other two dialects already close the same door, by name, for the same
+// reason: the T-SQL analyzer refuses EXEC('...') and sp_executesql, and the
+// MySQL one refuses PREPARE and EXECUTE. This is that rule, finally written
+// here.
+//
+// Refused rather than read. Parsing the inner string and holding it to the
+// policy would work for the query_ ones, and it is not worth the machinery: this
+// is an XML export facility from 2008 that an assistant answering questions
+// about somebody's data has no reason to reach for. If a customer ever needs it,
+// the honest answer is to read the argument, not to widen this.
+//
+// What this does NOT cover is a function an extension adds later with the same
+// shape, and there is no structural signal to catch one: an argument of type
+// regclass is a hint, not a rule, and the catalog this package holds does not
+// carry function signatures. The backstop is the property test, which asserts
+// that no statement this guard allows ever returns the secret.
+var takesStatementAsText = map[string]bool{
+	// A query, as a string.
+	"query_to_xml": true, "query_to_xmlschema": true, "query_to_xml_and_xmlschema": true,
+	// A table, as a value.
+	"table_to_xml": true, "table_to_xmlschema": true, "table_to_xml_and_xmlschema": true,
+	// A whole schema, and the whole database.
+	"schema_to_xml": true, "schema_to_xmlschema": true, "schema_to_xml_and_xmlschema": true,
+	"database_to_xml": true, "database_to_xmlschema": true, "database_to_xml_and_xmlschema": true,
+	// A cursor, which is a query somebody declared earlier.
+	"cursor_to_xml": true, "cursor_to_xmlschema": true,
 }
 
 // walk visits every message in a tree. Nothing is named here, so a node type

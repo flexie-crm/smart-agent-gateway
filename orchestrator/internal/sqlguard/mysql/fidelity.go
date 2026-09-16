@@ -39,11 +39,11 @@ func faithful(sql string) string {
 	}
 	written, err := restore(first)
 	if err != nil {
-		return "this tool could not write that statement back out, so it did not run it"
+		return "That statement could not be written back out with the hidden field replaced."
 	}
 	second, reason := readStatement(written)
 	if reason != "" {
-		return "this tool could not read back the statement it had written, so it did not run it"
+		return "The statement could not be read back after the hidden field was replaced."
 	}
 
 	before, after := &surface{}, &surface{}
@@ -51,8 +51,8 @@ func faithful(sql string) string {
 	second.Accept(after)
 
 	if lost := before.missingFrom(after); lost != "" {
-		return fmt.Sprintf("this tool cannot rewrite that statement without changing what %s means, so it did not run it. "+
-			"Write the value a different way, or ask for the columns you want without the ones that are hidden.", lost)
+		return fmt.Sprintf("%s cannot be kept as it is while a hidden field is replaced. "+
+			"Write the value a different way, or name the columns you want without the hidden ones.", lost)
 	}
 	// A function the reader calls something else. CHAR(65) is read as a call to
 	// char_func, which is the reader's own name for it and not a name the
@@ -61,9 +61,8 @@ func faithful(sql string) string {
 	// here, which is why this is asked of the ORIGINAL TEXT: a name nobody wrote
 	// is a name that was invented on the way through.
 	if invented := after.functionNotWrittenIn(sql); invented != "" {
-		return fmt.Sprintf("this tool cannot rewrite a statement that uses %s without changing it into something the database "+
-			"would not run, so it did not run it. Ask for the columns you want without the ones that are hidden, and it will "+
-			"run untouched.", strings.ToUpper(invented))
+		return fmt.Sprintf("%s cannot be kept as it is while a hidden field is replaced. "+
+			"Name the columns you want without the hidden ones, and the statement runs untouched.", strings.ToUpper(invented))
 	}
 	return ""
 }

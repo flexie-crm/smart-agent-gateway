@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"flexie.io/sag/internal/datasource"
@@ -35,7 +36,7 @@ var queryTimeout = 20 * time.Second
 // while either gate is unsure: a policy that cannot be read is a policy that
 // cannot be enforced, and that stops the statement rather than waving it on.
 func run(ctx context.Context, settings Settings, statement string, args []any, maxRows int) (*datasource.Result, string, error) {
-	if ok, reason := check(settings.Access, statement); !ok {
+	if ok, reason := permitted(settings, statement); !ok {
 		return nil, reason, nil
 	}
 	if maxRows <= 0 || maxRows > hardMaxRows {
@@ -84,7 +85,14 @@ func run(ctx context.Context, settings Settings, statement string, args []any, m
 		decision = checked
 	}
 
-	if isReadOnly(statement) {
+	// Which way a statement goes is about whether it can RETURN ROWS, not about
+	// whether it changes anything. A routine call is the case that separates the
+	// two: it is treated as a write for permission, because nothing can tell
+	// from the verb what its body does, and it is run as a query, because
+	// returning a result set is usually the whole point of calling it. Sent
+	// through Exec it came back with a row count and no rows, which is a
+	// procedure call that answers nothing.
+	if isReadOnly(statement) || callsRoutine(settings, statement) {
 		// A read is held to a hard deadline: past it the driver kills it on the
 		// server and returns its plan, so a heavy query cannot lock the database.
 		readCtx, cancel := context.WithTimeout(ctx, queryTimeout)
@@ -96,8 +104,46 @@ func run(ctx context.Context, settings Settings, statement string, args []any, m
 		if decision.ListsTables {
 			hideTables(guard, res)
 		}
-		return res, "", nil
+		return withNotes(res), "", nil
 	}
 	res, err := conn.Exec(ctx, decision.SQL, args)
-	return res, "", err
+	if err == nil && makesStoredCode(settings, statement) {
+		// The snapshot no longer describes this database: a routine was made,
+		// changed or removed. Without this, calling the procedure just created
+		// was refused as one this tool had never heard of.
+		guards.stale(settings)
+	}
+	return withNotes(res), "", err
+}
+
+// withNotes says out loud what a field alone would not.
+//
+// Truncation was a boolean on the result. A model that does not look at it reads
+// 200 rows as the whole answer and draws a conclusion from a fifth of the data,
+// and nothing anywhere says otherwise. A second result set was worse: a
+// procedure ending in two SELECTs handed back the first and lost the other in
+// silence. One statement per call is this tool's rule and is not changing, so
+// the answer is to SAY so rather than to carry it.
+func withNotes(res *datasource.Result) *datasource.Result {
+	if res == nil {
+		return res
+	}
+	var notes []string
+	if res.Truncated {
+		notes = append(notes, fmt.Sprintf("Only the first %d rows are here and there are more. "+
+			"Narrow the query, or COUNT first, if you need the whole answer", res.RowCount))
+	}
+	if len(res.BinaryColumns) > 0 {
+		notes = append(notes, fmt.Sprintf("Binary data is not returned, so %s came back as a size rather "+
+			"than as bytes. Leave those columns out, or convert them in the query if you need something readable",
+			strings.Join(res.BinaryColumns, ", ")))
+	}
+	if res.MoreResults {
+		notes = append(notes, "The statement produced more than one result set and only the first is here. "+
+			"One is returned per call, so ask for them one at a time")
+	}
+	if len(notes) > 0 {
+		res.Note = strings.Join(notes, ". ")
+	}
+	return res
 }

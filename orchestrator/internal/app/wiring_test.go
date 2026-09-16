@@ -24,12 +24,12 @@ import (
 // It deliberately asserts nothing about behaviour. It asks one question: is the
 // thing the server needs present in the server?
 func TestTheWiringRegistersWhatTheServerNeeds(t *testing.T) {
-	for _, driver := range []string{"mysql", "postgres"} {
+	for _, driver := range []string{"mysql", "postgres", "sqlserver"} {
 		if _, ok := datasource.Get(driver); !ok {
 			t.Errorf("no %s driver: internal/app must import internal/datasource/%s, or nothing can connect to that kind of database", driver, driver)
 		}
 	}
-	for _, dialect := range []string{"mysql", "postgres"} {
+	for _, dialect := range []string{"mysql", "postgres", "sqlserver"} {
 		if !sqlguard.Supports(dialect) {
 			t.Errorf("no %s analyzer: internal/app must import internal/sqlguard/%s, or a query tool with a policy cannot be saved or run", dialect, dialect)
 		}

@@ -43,22 +43,22 @@ func (a *analysis) decideTable(ref tableRef) {
 	switch {
 	case strings.EqualFold(schema, "information_schema"):
 		if !catalogTables[strings.ToLower(rel.GetRelname())] {
-			a.refuse("this tool reads only the parts of information_schema that describe tables and columns " +
-				"(tables, columns, table_constraints, key_column_usage)")
+			a.refuse("You can read only the parts of information_schema that describe tables and columns: " +
+				"tables, columns, table_constraints, key_column_usage.")
 		}
 		return
 	case strings.HasPrefix(strings.ToLower(schema), "pg_"):
 		// pg_catalog names tables through joins on oids, and holds the text of
 		// view and function bodies. Nothing here could narrow a read of it
 		// honestly, so it is refused rather than half-narrowed.
-		a.refuse("this tool does not read the server's own catalog schemas. Ask information_schema instead: " +
-			"it describes the same tables and columns and can be held to what this tool may see.")
+		a.refuse("You are not permitted to read the server's own catalog schemas. " +
+			"information_schema describes the same tables and columns.")
 		return
 	case schema != "" && !a.guard.Catalog().Knows(schema):
 		// A database holds many schemas, and this tool answers for the ones its
 		// connection resolves names in. One it does not is one nothing here has a
 		// snapshot of.
-		a.refuse("this tool reaches the schemas its connection resolves names in, and %q is not one of them", schema)
+		a.refuse("You can reach the schemas this connection resolves names in, and %q is not one of them.", schema)
 		return
 	}
 
@@ -72,21 +72,26 @@ func (a *analysis) decideTable(ref tableRef) {
 		// schema in front of it to refuse. Postgres keeps the pg_ prefix for
 		// itself, and a table of ours with that name would be in the snapshot.
 		if strings.HasPrefix(strings.ToLower(rel.GetRelname()), "pg_") {
-			a.refuse("this tool does not read the server's own catalog. Ask information_schema instead: " +
-				"it describes the same tables and columns and can be held to what this tool may see.")
+			a.refuse("You are not permitted to read the server's own catalog. " +
+				"information_schema describes the same tables and columns.")
 			return
 		}
 		a.sawUnknown = true
 	}
 	if ok, reason := a.guard.Reaches(rel.GetRelname()); !ok {
-		a.refuse("%s", withoutRetry(reason))
+		a.refuse("%s", reason)
 	}
 }
 
 func (a *analysis) decideColumn(ref columnRef) {
-	if ref.star || ref.column == "" {
-		// A star is expanded rather than decided about here; what it stands for
-		// is decided one column at a time when it is.
+	if ref.star {
+		// A star standing alone as a select item is EXPANDED, and what it stands
+		// for is decided one column at a time when it is. A star anywhere else is
+		// expanded by nothing, so it has to be decided here.
+		a.decideNestedStar(ref)
+		return
+	}
+	if ref.column == "" {
 		return
 	}
 	if ref.whole {
@@ -143,6 +148,72 @@ func (a *analysis) decideColumn(ref columnRef) {
 // from a table with something hidden in it, and left alone otherwise. Using a row
 // without returning it (WHERE c IS NOT NULL, ORDER BY c) gives nothing away and
 // is allowed, which is the same rule every other reference follows.
+// decideNestedStar decides a star that is not the whole select item.
+//
+// ROW(c.*) and concat(c.*) hand every column over as ONE value, and there is no
+// select item left to replace: the expander in rewrite.go only ever looks at an
+// item that IS a star. So this used to be recorded, satisfy the sweep, and never
+// be decided at all. Measured before this was written, against a live server
+// with customers.ssn hidden: `SELECT c.ssn` came back as the stand-in and
+// `SELECT ROW(c.*)` came back as (1,a@example.com,123-45-6789,notes).
+//
+// Refused rather than expanded, and only when something really is hidden. That
+// is the same answer this package already gives a T-SQL FOR XML, and for the
+// same reason: with the row rolled into one value there is nothing left to put
+// the stand-in in.
+func (a *analysis) decideNestedStar(ref columnRef) {
+	if ref.target != nil {
+		if _, whole := starOf(&pgq.Node{Node: &pgq.Node_ResTarget{ResTarget: ref.target}}); whole {
+			return
+		}
+	}
+	hidden, ok := a.starCovers(ref.scope, ref.qualifier)
+	if !ok {
+		a.refuse("What * stands for here could not be established. " +
+			"Name the columns you want.")
+		return
+	}
+	if hidden {
+		a.refuse("A * inside an expression hands back every column at once, and one of them is hidden, " +
+			"leaving nowhere to put the placeholder. Name the columns you want.")
+	}
+}
+
+// starCovers reports whether a star standing for these sources would take in a
+// column this tool keeps back, and whether it could be worked out at all.
+//
+// It answers the same question as the first half of expandStar and deliberately
+// does not share code with it: that one builds the replacement and refuses as it
+// goes, and this runs while deciding, where nothing may be rewritten yet.
+func (a *analysis) starCovers(s *scope, qualifier string) (hidden, ok bool) {
+	covered := s.order
+	if qualifier != "" {
+		src, found := s.sources[qualifier]
+		if !found {
+			for outer := s.parent; outer != nil && !found; outer = outer.parent {
+				src, found = outer.sources[qualifier]
+			}
+		}
+		if !found {
+			return false, false
+		}
+		covered = []*source{src}
+	}
+	for _, src := range covered {
+		if src.table == "" {
+			continue
+		}
+		columns, known := a.guard.Catalog().Columns(src.table)
+		if !known {
+			return false, false
+		}
+		if a.guard.MasksAnyColumn(src.table, columns) {
+			return true, true
+		}
+	}
+	return false, true
+}
+
 func (a *analysis) decideRow(ref columnRef) {
 	if ref.target == nil {
 		return
@@ -158,8 +229,8 @@ func (a *analysis) decideRow(ref columnRef) {
 		return
 	}
 	if a.guard.MasksAnyColumn(src.table, columns) {
-		a.refuse("%q here means the whole row of %q, which hands back every column at once including one that is "+
-			"hidden in this tool. Name the columns you want.", ref.column, src.table)
+		a.refuse("%q here means the whole row of %q, which hands back every column at once including a "+
+			"hidden one. Name the columns you want.", ref.column, src.table)
 	}
 }
 
@@ -187,13 +258,13 @@ func (a *analysis) sourceNamed(from *scope, name string) *source {
 // was really there.
 func (a *analysis) decideAssignment(ref assignRef) {
 	if a.hiddenName(ref.target.GetName(), ref.scope) {
-		a.refuse("%q is hidden in this tool, so it cannot be written to: this tool cannot know what is really "+
-			"there, and writing would put the stand-in over it.", ref.target.GetName())
+		a.refuse("%q is a hidden field and you cannot write to it: its real value is not visible here, "+
+			"so a write would replace it with the placeholder.", ref.target.GetName())
 		return
 	}
 	if name := a.firstHiddenIn(ref.target.GetVal()); name != "" {
-		a.refuse("%q is hidden in this tool, so its value cannot be copied into another column, where it would "+
-			"be readable afterwards. Report that it is not available.", name)
+		a.refuse("%q is a hidden field and you cannot copy it into another column, where it would then "+
+			"be readable.", name)
 	}
 }
 
@@ -209,8 +280,8 @@ func (a *analysis) decideInsert(ref insertRef) {
 			continue
 		}
 		if a.hiddenName(rt.GetName(), ref.scope) {
-			a.refuse("%q is hidden in this tool, so it cannot be written to: this tool cannot know what is really "+
-				"there, and writing would put the stand-in over it.", rt.GetName())
+			a.refuse("%q is a hidden field and you cannot write to it: its real value is not visible here, "+
+				"so a write would replace it with the placeholder.", rt.GetName())
 			return
 		}
 	}
@@ -227,7 +298,7 @@ func (a *analysis) decideInsert(ref insertRef) {
 		}
 		for _, column := range columns {
 			if a.guard.MasksColumn(src.table, column) {
-				a.refuse("%q is hidden in this tool, and an INSERT without a column list writes every column of "+
+				a.refuse("%q is a hidden field, and an INSERT without a column list writes every column of "+
 					"%q including that one. Name the columns you mean to write.", column, src.table)
 				return
 			}
@@ -369,7 +440,12 @@ func (a *analysis) hide(target *pgq.ResTarget, column string) {
 		Val: &pgq.A_Const_Sval{Sval: &pgq.String{Sval: sqlguard.Hidden}},
 	}}}
 	a.changed = true
+	a.hiddenFields = append(a.hiddenFields, column)
 }
+
+// hiddenNames is every field this statement would have had replaced, so a
+// refusal about a routine can NAME them instead of saying "a field".
+func (a *analysis) hiddenNames() []string { return a.hiddenFields }
 
 // nameOf is the name Postgres itself would have given a select item that had no
 // alias, so a caller reading the columns back finds the one it asked for rather

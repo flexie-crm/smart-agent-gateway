@@ -85,7 +85,7 @@ func TestQueryHeavyReadTimesOutWithPlan(t *testing.T) {
 		t.Fatalf("the read was not cancelled promptly: %v", elapsed)
 	}
 	// The failure carries the plan and says what happened.
-	if !strings.Contains(string(res.Content), "query plan") {
+	if !strings.Contains(string(res.Content), "plan (EXPLAIN)") {
 		t.Fatalf("the failure does not carry the EXPLAIN plan: %s", res.Content)
 	}
 }
@@ -278,6 +278,9 @@ func TestTheFormEndsWithThePolicy(t *testing.T) {
 	for _, s := range sections {
 		titles = append(titles, s.Title)
 	}
+	// The roster is spelled out rather than only checking the last one, so a
+	// section added by accident is a failing test rather than a surprise on a
+	// form somebody is filling in.
 	if got := strings.Join(titles, " | "); got != "Connection | TLS | SSH tunnel | Policy" {
 		t.Fatalf("sections = %q", got)
 	}
@@ -285,8 +288,10 @@ func TestTheFormEndsWithThePolicy(t *testing.T) {
 	policy := sections[len(sections)-1]
 	keys := map[string]template.Field{}
 	for _, f := range policy.Fields {
-		if !strings.HasPrefix(f.Key, "policy.") {
-			t.Fatalf("a field that is not part of the policy landed in it: %q", f.Key)
+		// The capability checkboxes live here too: what stored code may do is
+		// decided by reading it against these same rules, so it is one screen.
+		if !strings.HasPrefix(f.Key, "policy.") && !strings.HasPrefix(f.Key, "allow.") {
+			t.Fatalf("a field that belongs to neither the policy nor its capabilities landed in it: %q", f.Key)
 		}
 		keys[f.Key] = f
 	}
@@ -464,3 +469,43 @@ func (stubMachines) Dial(context.Context, int64, int64, string, string, int, str
 	return nil, nil
 }
 func (stubMachines) Online(int64, int64, string) bool { return false }
+
+// The Policy tab turns itself on for a SQL Server tool, and that is the whole
+// user-facing outcome of adding the dialect. Nothing on this path was changed to
+// make it happen: the gate is sqlguard.Supports, so registering an analyzer is
+// what opens it.
+//
+// The control is the second half. A driver with no analyzer must still refuse a
+// policy rather than accept one it cannot enforce, and without that assertion
+// this test would pass just as well if the gate had been removed altogether.
+func TestAPolicyIsAcceptedForSQLServerAndRefusedWithoutAnAnalyzer(t *testing.T) {
+	settings := map[string]any{
+		"access": "read", "host": "db.internal", "database": "shop", "username": "app_ro",
+		"policy.table_mode": "denylist", "policy.tables": "payroll",
+		"policy.field_mode": "denylist", "policy.fields": "customers.ssn",
+	}
+	config, err := tmpl().Config("sqlserver", settings)
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	parsed, err := ParseConfig(config)
+	if err != nil {
+		t.Fatalf("a policy on a SQL Server tool was refused: %v", err)
+	}
+	if !parsed.Policy.Active() {
+		t.Fatal("the policy names a table and a field, so it governs something")
+	}
+	if parsed.Connection.Driver != "sqlserver" {
+		t.Fatalf("the driver did not survive the round trip: %q", parsed.Connection.Driver)
+	}
+
+	// The control: the same policy on a driver this build has no analyzer for.
+	unguarded := config
+	for _, from := range []string{`"driver":"sqlserver"`, `"driver": "sqlserver"`} {
+		unguarded = []byte(strings.Replace(string(unguarded), from, `"driver":"mysql_not_a_driver"`, 1))
+	}
+	if _, err := ParseConfig(unguarded); err == nil {
+		t.Fatal("a policy was accepted for a driver that cannot enforce one, " +
+			"which would be stored and quietly ignored")
+	}
+}

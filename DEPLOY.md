@@ -7,6 +7,7 @@ known to be broken or untested, it says so.
 
 **Contents**
 
+0. [Which command do I want?](#0-which-command-do-i-want)
 1. [What you need installed](#1-what-you-need-installed)
 2. [Development](#2-development)
 3. [Building the applications](#3-building-the-applications)
@@ -15,6 +16,169 @@ known to be broken or untested, it says so.
 6. [Secrets and keys](#6-secrets-and-keys)
 7. [Setting up a new build machine](#7-setting-up-a-new-build-machine)
 8. [When it goes wrong](#8-when-it-goes-wrong)
+
+---
+
+## 0. Which command do I want?
+
+Every build and every deploy this project has. Find your row, run the command.
+Nothing here needs a command from another row first.
+
+### Working on it (your own Mac)
+
+| I want to | Command | What happens |
+|---|---|---|
+| Work on the server or the web pages | `make dev` | server on :8080, restarts when you save a file |
+| Work on the personal app's pages | `make dev-personal` | the whole personal edition from source on :8123; save a file, reload the window |
+| Work on the console alone | `make admin-dev` | the console's own dev server, talking to `make dev` |
+| Work on the chat alone | `make ui-dev` | the chat's own dev server |
+| Check everything still passes | `make ci` | Go + both front ends. Run it before you call anything done |
+
+### Building and installing on your own Mac
+
+| I want to | Command | Where it lands |
+|---|---|---|
+| The web pages and gateway | `make build-web` | `chat-ui/dist`, `admin-ui/dist`, `desktop/.local/sag-dev` |
+| SAG Personal, to click around in | `make build-personal` | `/Applications/SAG Personal.app` (built, gated, installed) |
+| SAG Enterprise, to click around in | `make build-enterprise` | `/Applications/SAG Enterprise.app` |
+| All three | `make build-all` | all of the above, then a list of what is current |
+| All three, and restart the dev server | `make rebuild-all` | the same, plus `make dev-restart` |
+
+Skip the 30-minute engine while developing: `make build-personal
+BUILD_ARGS=--no-engine`. Never give that build to anybody: it has no engine in
+it at all.
+
+### Building on Windows (PowerShell, from the repository root)
+
+| I want to | Command | Where it lands |
+|---|---|---|
+| SAG Personal installer | `.\desktop\personal\windows\build.ps1` | `desktop\.local\out\personal\SAG Personal_<version>_x64-setup.exe` |
+| ...without rebuilding the database | `.\desktop\personal\windows\build.ps1 -SkipDatabase` | the same, faster |
+| Run the gate | `.\desktop\personal\windows\e2e.ps1` | proves a first run reaches ready |
+
+`make build-personal` and `make desktop-e2e` also work on Windows: they dispatch
+to those two scripts (`Makefile:113-114`).
+
+**There is no enterprise build on Windows.** `desktop/enterprise/` has no
+`windows` directory. **Nothing on Windows is signed or published** either: no
+certificate, no update manifest. A Windows installer is something you hand over
+by hand today. [Section 3](#windows) has the detail.
+
+### Giving an application to customers (macOS only)
+
+| I want to | Command |
+|---|---|
+| Release SAG Personal | `make release EDITION=personal` |
+| Release SAG Enterprise | `make release EDITION=enterprise` |
+| Publish a build you already made | `make release-publish EDITION=personal` |
+
+One command: builds universal, signs, notarises, staples, uploads, and asks the
+live endpoint the question an old installation asks. Everyone on an older
+version updates within six hours.
+
+It refuses to start unless two things are set up, because finding out after a
+twenty-minute build is too late:
+
+1. **The five signing variables** ([section 4](#4-signing-and-releasing)). It
+   names the ones you are missing. All five matter: without the three
+   `APPLE_API_*` ones the build **skips notarising and says nothing**, and an
+   application with no notarisation ticket is refused by macOS and will not run
+   at all on Apple silicon. `desktop/publish.sh` also refuses to upload an
+   application or an installer with no ticket stapled to it.
+2. **Somewhere to publish to**: `deploy/release.env` (copy
+   `deploy/release.env.example` and fill it in), or `SAG_REPO_SSH` exported for
+   the one command.
+
+**Bump the version first.** It lives in exactly one place per edition:
+`desktop/personal/shell/tauri.conf.json` and
+`desktop/enterprise/shell/tauri.conf.json`. Publishing over a version already
+being served is refused.
+
+### The server (api, worker, chat)
+
+| I want to | Command | What happens |
+|---|---|---|
+| Deploy this commit | `./deploy/deploy.sh` | copies the commit, builds the images there, rolls all three services |
+| See what it would do | `./deploy/deploy.sh --dry-run` | prints every step, changes nothing |
+| Go back to an earlier build | `./deploy/deploy.sh --rollback <tag>` | all three services back on that tag |
+| Set up a box for the first time | [section 5](#5-production) | secrets, compose files, TLS |
+
+It refuses to run from a dirty tree, because it tags images with a commit
+somebody will later check out. The tag is the short commit hash.
+
+### The GPU machines that run our own models
+
+| I want to | Command | Where |
+|---|---|---|
+| Build the node for every card generation | `cd inference && ./packaging/release.sh matrix` | in Docker, into `inference/dist` |
+| Build one | `cd inference && ./packaging/release.sh cuda` | the same |
+| Install it on a Linux machine | `curl -fsSL <url>/install.sh \| sudo sh -s -- --url <server> --token <token>` | the console prints the whole line under **Machines** |
+| Test it fast while developing | `make node-check` | seconds, no engine build |
+
+The token is yours, lasts an hour, and is destroyed by the machine that uses it.
+`matrix` builds **eight**: `cpu`, and CUDA for compute capability 80, 86, 89,
+90, 100, 103 and 120 (`inference/packaging/release.sh:120` is the list). The
+installer reads the card and fetches the match, so the pasted command is the
+same on every machine.
+
+### How many builds there are, and what each one is
+
+**Two desktop applications. Not four.** There is no dev build and no prod build
+of either: the only flags the build scripts take are `--universal` and
+`--no-engine`, and neither has anything to do with dev
+(`desktop/personal/build.sh:35`, `desktop/enterprise/build.sh:20`).
+
+**1. SAG Personal - one build.** It is the whole product: gateway, database,
+pages and engine all inside the bundle. It has **no login screen at all** - one
+person on their own computer, one line saying so, and a Continue button. Its
+console is deliberately **limited**: the whole **Access** group (Users, Groups,
+Roles, Workspaces) is hidden, because there is nobody to administer
+(`admin-ui/src/components/AppShell.tsx:126`). All of that is compiled in by
+`VITE_SAG_PERSONAL=1`, so a personal bundle simply IS the personal product and
+cannot become the other one while running.
+
+**2. SAG Enterprise - one build.** A **window onto a server** and nothing else:
+no pages, no gateway, no database, no engine. Everything a person sees in it is
+served by the server they named on first run.
+
+So "enterprise dev" and "enterprise prod" are **not two builds**. They are the
+same application pointed at two different servers, and what changes is what the
+SERVER says about itself:
+
+| The server it points at | What the sign-in shows |
+|---|---|
+| a working copy (`sag dev`) | email, password, **and** a "Sign in as the development user" button |
+| production | email and password |
+
+That button is in the web pages, not in the application, and it appears because
+the server answered `dev:true` at `/v1/meta`. Point the same enterprise
+application at production and it is gone. Nothing was rebuilt.
+
+**The web** is not a desktop build at all. It is the server people open in a
+browser, and it is what `./deploy/deploy.sh` ships.
+
+**Therefore: if SAG Personal shows an email-and-password form, you are not
+looking at SAG Personal.** It has no such form to show. Either the wrong pages
+were bundled, or the window is pointed at a server that is not its own gateway.
+[Section 8](#8-when-it-goes-wrong) tells you which, with one command.
+
+### Which one do I have to rebuild?
+
+| I changed | Web | Personal | Enterprise |
+|---|---|---|---|
+| `chat-ui/` or `admin-ui/` | `make build-web` | `make build-personal` | nothing: deploy the server |
+| `orchestrator/` | `make build-web` | `make build-personal` | nothing: deploy the server |
+| `desktop/personal/` | - | `make build-personal` | - |
+| `desktop/enterprise/` | - | - | `make build-enterprise` |
+| `desktop/shared/` | - | `make build-personal` | `make build-enterprise` |
+| `inference/` | it joins over the network | `make build-personal` | - |
+
+The enterprise column is nearly empty and that is the point: it holds no product
+code. A change to a page or to the server reaches it the moment the server it
+points at is deployed. It needs rebuilding only when its own window changes.
+
+**Never built here before?** [Section 1](#1-what-you-need-installed) is what has
+to be installed first. Nothing above works without it.
 
 ---
 
@@ -137,7 +301,53 @@ Without them those suites **skip**, and a whole package can pass without running
 
 ## 3. Building the applications
 
-### The order is JS, then Go, then Rust — and it matters
+### One codebase, three products
+
+There is no separate enterprise source tree. `orchestrator/`, `admin-ui/` and
+`chat-ui/` are built once and packaged three ways, and what differs is decided at
+**build time** (a flag and an output directory) or at **run time** (what the
+application is pointed at), never by a fork.
+
+| | **Web** | **Personal** | **Enterprise** |
+|---|---|---|---|
+| What it is | the server people reach in a browser | one Mac application that IS the whole product | one Mac application that is a window onto a server |
+| Gateway (`sag`) | on the server | **inside the bundle** | none |
+| Database | on the server | **bundled MariaDB**, its own data directory | none |
+| Console + chat pages | served by the gateway | **inside the bundle** (`Resources/console`, `Resources/chat`) | **none**: served by the server it is pointed at |
+| Inference engine | a machine that joins the fleet | **inside the bundle** (macOS only) | none |
+| Bundle size on disk | n/a | **203 MB** (universal) | **13 MB** (one architecture) |
+| Shell source | n/a | `desktop/personal/shell/` | `desktop/enterprise/shell/` |
+| Shared Rust | n/a | `desktop/shared` | `desktop/shared` (the same crate) |
+| Version lives in | n/a | `desktop/personal/shell/tauri.conf.json` | `desktop/enterprise/shell/tauri.conf.json` |
+| Update key | n/a | `sag-updater-personal.key` | `sag-updater-enterprise.key` |
+| Bundle identifier | n/a | `io.flexie.sag.personal` | `io.flexie.sag.enterprise` |
+
+The two shells are thin and share `desktop/shared`, which is where the machine
+link, the device identity and the folder picker live. Everything a person
+actually uses is the same code in all three; the editions differ in **where it
+runs**, not in what it does.
+
+### The one flag that makes a desktop page
+
+Both front ends are one source and two products:
+
+```sh
+npm run build                                      # the WEB pages
+VITE_SAG_PERSONAL=1 SAG_OUT_DIR=dist/personal npm run build   # the DESKTOP pages
+```
+
+`personal/build.sh` sets both. Doing it by hand once put the **enterprise**
+console inside the personal application, which is a different product wearing the
+right name. `SAG_OUT_DIR` exists because without it a desktop build overwrites
+`admin-ui/dist` and `chat-ui/dist/app`, which are what a running web server is
+serving.
+
+Enterprise builds **no** front end at all. Grep its script: there is no `npm` in
+it. Its pages come from whatever server the person names on first run, which is
+why an enterprise application does not need rebuilding when the console changes.
+**Deploy the server instead.**
+
+### The order is JS, then Go, then Rust, and it matters
 
 The Rust shell packages whatever is in the payload directory *at the moment it
 runs*. Anything built after it is simply not in the application, and nothing
@@ -147,23 +357,45 @@ this in the right order. Do not run the steps by hand.
 ### macOS
 
 ```sh
-./desktop/personal/build.sh                 # everything, engine included (~30 min)
-./desktop/personal/build.sh --no-engine     # skip the inference engine (much faster)
+./desktop/personal/build.sh                 # everything, engine included
+./desktop/personal/build.sh --no-engine     # skip the engine: DEVELOPMENT ONLY
 ./desktop/personal/build.sh --universal     # one app for Apple silicon and Intel
-./desktop/enterprise/build.sh --universal   # the enterprise edition
+./desktop/enterprise/build.sh               # this machine's architecture
+./desktop/enterprise/build.sh --universal   # both
 ```
 
-Output lands in `desktop/.local/out/personal/` — the `.app` and a `.dmg` beside
-it.
+Output lands in `desktop/.local/out/personal/` and `.../enterprise/`: the `.app`,
+and a `.dmg` beside it when the build was signed.
 
-Build, gate and install in one step:
+Build and install in one step. **These are the names to use**; the scripts above
+are what they run.
 
 ```sh
-make desktop-install BUILD_ARGS=--no-engine
-make enterprise-install
+make build-personal    BUILD_ARGS=--no-engine   # personal, into /Applications
+make build-enterprise                           # enterprise, into /Applications
+make build-web                                  # the web pages and gateway
+make build-all                                  # all three
 ```
 
-`desktop-install` installs **only if the gate passes**.
+`build-personal` runs `make desktop-e2e` and installs **only if it passes**, then
+checks that the pages inside the installed bundle are this commit's.
+`build-enterprise` has no gate of its own, and that is not an oversight: the
+edition carries no first run, no database and no pages, so there is nothing in it
+for a gate to drive. What `make e2e` proves about the pages proves it here too.
+
+None of these is how you cut a release. They build for THIS machine's
+architecture and install locally. A release is `make release EDITION=...`, which
+builds universal, signs, notarises and publishes. See section 4.
+
+**`--no-engine` is for development and must never be handed to anybody**: it
+produces a macOS application with no `sag-inference` in it at all. It cannot
+reach `make release`, which always passes `--universal` and nothing else, so the
+thing to guard against is building one of these and installing it somewhere by
+hand, not a release accidentally carrying the flag. How long the engine step
+takes is decided by whether `inference/target/<target>/release/sag-inference`
+already exists: cold it is ~30 minutes per architecture, warm it is a file copy
+taking seconds. The script prints the same "~30 minutes" either way, so check
+before quoting it.
 
 ### Windows
 
@@ -178,7 +410,7 @@ Run these in PowerShell, from the repository root.
 
 Output: `desktop\.local\out\personal\SAG Personal_<version>_x64-setup.exe`.
 
-`make desktop-build` and `make desktop-e2e` dispatch to these on Windows, so the
+`make build-personal` and `make desktop-e2e` dispatch to these on Windows, so the
 same command works on either platform.
 
 Two things about the Windows edition specifically:
@@ -214,8 +446,9 @@ cd inference
 ./packaging/release.sh cuda /srv/dist
 ```
 
-`matrix` produces seven builds: `cpu`, and CUDA for compute capability 80, 86,
-89, 90, 100, 103 and 120. The installer reads the card and fetches the match, so
+`matrix` produces **eight** builds: `cpu`, and CUDA for compute capability 80,
+86, 89, 90, 100, 103 and 120. The list is `CUDA_MATRIX` at
+`inference/packaging/release.sh:120`, and `SAG_CUDA_MATRIX` overrides it. The installer reads the card and fetches the match, so
 the command a customer pastes is identical on every machine.
 
 ---
@@ -259,15 +492,32 @@ export APPLE_SIGNING_IDENTITY="Developer ID Application: <NAME> (<TEAM ID>)"
 export APPLE_API_KEY=<KEY ID>
 export APPLE_API_ISSUER=<ISSUER UUID>
 export APPLE_API_KEY_PATH="$HOME/apple-signing/AuthKey_<KEY ID>.p8"
-export TAURI_SIGNING_PRIVATE_KEY_PATH="$HOME/apple-signing/sag-updater-personal.key"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 
+# personal
+export TAURI_SIGNING_PRIVATE_KEY_PATH="$HOME/apple-signing/sag-updater-personal.key"
 ./desktop/personal/build.sh --universal
+
+# enterprise: the SAME Apple identity and notary key, its OWN update key
+export TAURI_SIGNING_PRIVATE_KEY_PATH="$HOME/apple-signing/sag-updater-enterprise.key"
+./desktop/enterprise/build.sh --universal
 ```
 
-The build signs everything the bundle *carries*, not just what Tauri made — the
-gateway, the whole bundled database and its libraries. Apple's notary reads
-every Mach-O in a bundle and refuses the lot if one is unsigned.
+The Apple side is shared: one Developer ID and one App Store Connect key for both
+editions, because Apple caps how many a team may hold and both applications are
+the same company. The **update** key is per edition and must not be crossed: its
+public half is compiled into the application, so signing an enterprise archive
+with the personal key produces an update every enterprise installation refuses.
+
+`--universal` matters only for something you will DISTRIBUTE. Building for this
+machine's architecture is the right thing when you are installing here, and it is
+half the Rust compile.
+
+The build signs everything the bundle *carries*, not just what Tauri made. For
+personal that is the gateway, the whole bundled database and its libraries, and
+the engine; for enterprise there is nothing but the window, which is why its
+build is minutes rather than a quarter of an hour. Apple's notary reads every
+Mach-O in a bundle and refuses the lot if one is unsigned.
 
 It then checks its own work and **fails the build** if any of this is wrong:
 
@@ -364,6 +614,20 @@ archive *by name*:
 **Publish every architecture's manifest.** A universal build that publishes only
 one leaves the other half of your users frozen with nothing to tell them.
 
+**Publishing is per edition, and it is a separate decision from building.** A
+build that is signed and installed locally is a finished application; publishing
+is what makes it something a stranger can download and something an existing
+installation will update itself to. Each edition has its own key, its own
+manifest names and its own version number, so publishing one never touches the
+other:
+
+```sh
+make release-publish EDITION=personal
+make release-publish EDITION=enterprise
+```
+
+Skip it entirely when you only meant to build and install here.
+
 ### How an installed copy updates itself
 
 It asks 90 seconds after launch, then every six hours. It downloads and installs
@@ -404,33 +668,50 @@ docker stack deploy -c repo.yml sagrepo
 
 ### Deploying a change
 
-Never edit files on the server. Ship a commit.
-
 ```sh
-C=$(git rev-parse --short HEAD)
-git archive --format=tar HEAD orchestrator scripts deploy | gzip > /tmp/sag-$C.tgz
-scp /tmp/sag-$C.tgz you@server:/tmp/
-
-ssh you@server "set -e
-  rm -rf ~/sag/build/orchestrator ~/sag/build/scripts ~/sag/build/deploy
-  cd ~/sag/build && tar xzf /tmp/sag-$C.tgz
-  docker build -t flexie-sag/orchestrator:$C -t flexie-sag/orchestrator:latest \
-    --build-arg SAG_VERSION=$C -f orchestrator/Dockerfile .
-  docker service update --force --image flexie-sag/orchestrator:latest sag_orchestrator"
+./deploy/deploy.sh              # this commit, to the server in deploy/release.env
+./deploy/deploy.sh --dry-run    # what it would do, without doing it
 ```
 
-**Clear the code directories first.** `tar x` overlays; it never removes. A file
-deleted in a commit stays on the box for ever, and the failure is a build error
-about a symbol declared twice, in a file the commit no longer contains.
+That is the whole of it. Never edit files on the server: the script ships a
+commit, and refuses to run at all from a tree with uncommitted changes, because
+it tags an image with a commit somebody will later try to check out.
 
-Migrations are their own step, before the roll:
+**What it does, and why each step is there.** Every one of these was a line in
+this runbook that did not work:
+
+1. **Archives the whole tree.** The orchestrator's image builds the console INTO
+   itself (KB/19: one origin, so the session cookie can be `SameSite=Lax`), so
+   its docker context is the repository root. An archive of `orchestrator/`
+   alone dies at `COPY admin-ui/package*.json`.
+2. **Extracts into `~/sag/src/<commit>`,** a directory per commit. Sharing one
+   directory means `tar` overlaying without removing, so a file deleted in a
+   commit lives on the box for ever; and clearing that directory fails anyway,
+   because a container-built inference leaves root-owned cargo output in it.
+3. **Passes `SAG_VERSION=<commit>`.** There is no repository on a server, only
+   the archive, so `build-stamp.sh` has nothing to ask and answers `no-repo`.
+   Without this every log line names a build nobody can look up.
+4. **Tags by commit** as well as `latest`, or there is nothing to roll back TO.
+5. **Rolls all three services.** `sag_worker` runs the SAME image as
+   `sag_orchestrator`. Rolling the orchestrator alone leaves the worker on the
+   old build running old job handlers, and nothing says so.
+6. **Asks the containers what they are running,** not the service list, which
+   reports the image it was told to use before the task has actually changed.
+
+Migrations are their own step, before the roll, and only when there are any:
+
+```sh
+git diff --name-only <deployed>..HEAD -- orchestrator/schema orchestrator/internal/migrations
+```
+
+Empty means skip it. Otherwise, before rolling:
 
 ```sh
 ssh you@server 'docker run --rm --network sag_default \
-  -e SAG_DB_DSN="..." flexie-sag/orchestrator:latest migrate up'
+  -e SAG_DB_DSN="..." flexie-sag/orchestrator:<commit> migrate up'
 ```
 
-Then check. A service log interleaves old runs and reads as if it worked:
+Then check, because a service log interleaves old runs and reads as if it worked:
 
 ```sql
 SELECT MAX(version_id) FROM sag.sag_db_version;
@@ -453,8 +734,12 @@ docker exec <container> sag version    # e.g. 0.1.5+1550136
 ### Rolling back
 
 ```sh
-docker service update --force --image flexie-sag/orchestrator:<previous> sag_orchestrator
+./deploy/deploy.sh --rollback 27a5388
 ```
+
+It puts all three services back, for the same reason they all had to move.
+`ssh <host> docker images flexie-sag/orchestrator` lists what is still on the box
+to go back to; the deploy tags by commit so there is always something.
 
 An update to a desktop application **cannot** be recalled, only superseded by a
 higher version. The publish script refuses to overwrite a live one for exactly
@@ -518,6 +803,53 @@ Signing is separate and not set up yet — section 4.
 ---
 
 ## 8. When it goes wrong
+
+**SAG Personal is asking for an email and a password.**
+It cannot. The personal edition has no login form at all: it shows one line, "This
+is your personal installation", and a **Continue** button. An email-and-password
+form means the window is not showing the personal build. Two ways that happens,
+and one command tells them apart:
+
+First, **what port is it on?** The application does not have a fixed one: it
+takes the first free port in 8080-8119 at every launch, and writes down which
+(`desktop/loopback-ports.json` is the list, `gateway.rs` picks from it). It
+records the answer here, so this is the question to ask on somebody else's Mac
+as well as your own:
+
+```sh
+cat ~/Library/Application\ Support/SAG\ Personal/gateway.json
+# {"port":8082,"pid":75611}
+```
+
+Then ask that port who it is:
+
+```sh
+curl -s http://127.0.0.1:<port>/v1/meta
+```
+
+The personal gateway answers `"single_user":true,"local_sign_in":true,"dev":false`.
+Anything else, and the window is pointed at a **different server** - almost always
+a working copy of your own on the same port. Check who is there:
+
+```sh
+lsof -nP -iTCP:<port> -sTCP:LISTEN
+```
+
+If two things are listed, that is the problem: stop the other one. (The
+application refuses a port anything is already answering on, so this means the
+other server started afterwards.)
+
+If `/v1/meta` does say `single_user:true` and you still get a form, then the
+WRONG PAGES were bundled, and the bundle can be asked directly:
+
+```sh
+grep -rc "Sign in to continue" "/Applications/SAG Personal.app/Contents/Resources/chat"
+```
+
+Zero is correct: that copy belongs to the web build. Anything else means the
+pages were built without `VITE_SAG_PERSONAL=1`, which happens when somebody runs
+`npm run build` by hand and copies the result in instead of running
+`make build-personal`.
 
 **The build succeeded but the application is the old one.**
 The order is JS, then Go, then Rust. The Rust shell packages the payload as it

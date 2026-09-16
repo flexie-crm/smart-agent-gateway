@@ -41,6 +41,15 @@ linters:
       - path: internal/store/sqldb/
         linters:
           - sqlclosecheck
+    # lib/ is third-party code we keep ourselves rather than fetch
+    # (lib/sqlserver/README.md). Most of it is machine-generated, which the
+    # linter already skips on its own by reading the "Code generated" line; the
+    # ANTLR runtime beside it is hand-written and is not skipped that way.
+    # Neither is ours to change: the only honest fix for anything reported here
+    # would be a patch carried forward across every update, which is exactly the
+    # kind of debt holding these files was meant to avoid.
+    paths:
+      - lib/
 
 formatters:
   enable:

@@ -20,15 +20,21 @@ func (Analyzer) ReadDefinition(definition string) (sqlguard.Definition, bool) {
 	if reason != "" {
 		return sqlguard.Definition{}, false
 	}
+	reader := &definitionReader{seen: map[string]bool{}}
 	sel := tree.Stmts[0].Stmt.GetSelectStmt()
-	if sel == nil {
+	switch {
+	case sel != nil:
+		reader.query(sel, nil)
+	case tree.Stmts[0].Stmt.GetCallStmt() != nil:
+		// CALL p(): a body that runs another routine. The routine it names is
+		// picked up by calledRoutines below and followed from there, the same as
+		// a function called in an expression. It reads no table of its own, which
+		// is why there is nothing to walk here.
+	default:
 		return sqlguard.Definition{}, false
 	}
 
-	reader := &definitionReader{seen: map[string]bool{}}
-	reader.query(sel, nil)
-
-	out := sqlguard.Definition{Reads: reader.reads}
+	out := sqlguard.Definition{Reads: reader.reads, Calls: calledRoutines(tree)}
 	if origin := originsOf(projectionOf(sel)); len(origin) > 0 {
 		out.Origin = origin
 	}
@@ -172,4 +178,27 @@ func (d *definitionReader) query(sel *pgq.SelectStmt, ctes map[string]bool) {
 		d.seen[key] = true
 		d.reads = append(d.reads, sqlguard.Reference{Schema: rel.GetSchemaname(), Name: rel.GetRelname()})
 	})
+}
+
+// calledRoutines is every function this definition invokes, by name.
+//
+// A function call is an expression here, indistinguishable in the tree from
+// now() or lower(), so this reports the names and lets the guard decide: it
+// holds the catalogue, and only a name the catalogue knows is a stored routine.
+// Refusing on every function call would refuse every body worth having.
+func calledRoutines(tree *pgq.ParseResult) []string {
+	var out []string
+	walk(tree.ProtoReflect(), func(m protoreflect.Message) {
+		call, ok := m.Interface().(*pgq.FuncCall)
+		if !ok {
+			return
+		}
+		// The same name the statement path decides about, which is the whole of
+		// it: the last part alone made a call into a schema nobody read look like
+		// a bare built-in, and a built-in is waved through.
+		if name, ok := routineName(call); ok {
+			out = append(out, name)
+		}
+	})
+	return out
 }

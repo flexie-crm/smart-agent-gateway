@@ -65,7 +65,6 @@ type backgroundManager struct {
 // that actually needs it.
 func noComputer() Computer { return Computer{} }
 
-
 func newBackgroundManager(a *App, log zerolog.Logger) *backgroundManager {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &backgroundManager{

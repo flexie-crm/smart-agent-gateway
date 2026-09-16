@@ -5,7 +5,7 @@ import {
   CollapsibleTrigger,
 } from '@/components/ui/collapsible';
 import { cn } from '@/lib/utils';
-import { Loader2, ChevronDownIcon, Lightbulb } from 'lucide-react';
+import { ChevronDownIcon, Lightbulb } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { normalizeMarkdown } from '@/lib/content-normalizer';
@@ -141,27 +141,30 @@ export const ReasoningTrigger = memo(
       <CollapsibleTrigger
         className={cn(
           'flex items-center gap-1.5 text-muted-foreground text-sm transition-colors select-none',
-          !isStreaming && hasReasoning ? 'hover:text-muted-foreground cursor-pointer' : 'cursor-default',
+          hasReasoning ? 'hover:text-muted-foreground cursor-pointer' : 'cursor-default',
           className
         )}
-        disabled={isStreaming || !hasReasoning}
+        // Open while it is still being written, which is when somebody most
+        // wants to read it. It used to be disabled during streaming, so the one
+        // moment the reasoning was live was the one moment it could not be
+        // opened, and by the time it could the model had moved on.
+        disabled={!hasReasoning}
         {...props}
       >
         {children ?? (
           <>
-            {isStreaming ? (
-              <Loader2 className="size-3.5 shrink-0 animate-spin opacity-70" />
-            ) : (
-              <Lightbulb className="size-3.5 shrink-0 opacity-50" />
-            )}
+            {/* No spinner and no "Reasoning…" here. The activity line below the
+                row says what the agent is doing, once, and this is the thing it
+                is doing it to: a block you can open and read. Two spinners
+                saying the same word in one row is how the indicator came to be
+                two elements in the first place. */}
+            <Lightbulb className="size-3.5 shrink-0 opacity-50" />
             <span>
-              {isStreaming
-                ? 'Reasoning...'
-                : duration > 0
-                  ? `Reasoned for ${duration}s${sourceLabel}`
-                  : `Thought process${sourceLabel}`}
+              {duration > 0
+                ? `Reasoned for ${duration}s${sourceLabel}`
+                : `Thought process${sourceLabel}`}
             </span>
-            {!isStreaming && hasReasoning && (
+            {hasReasoning && (
               <ChevronDownIcon
                 style={{height: '20px', width: '20px', marginTop: '4px'}}
                 className={cn(

@@ -576,12 +576,50 @@ const clientMetadataPath = "/connect/mcp/client-metadata.json"
 // redirect would be an identity no local install could actually use, because the
 // specification has the authorization server match redirect URIs exactly.
 //
-// Concrete addresses rather than a wildcard: exact matching is the rule, and
-// these are the two a local installation is served on (the desktop binds
-// 127.0.0.1:8080, a working copy runs on localhost:8080).
-var LoopbackRedirectURIs = []string{
-	"http://127.0.0.1:8080" + mcpCallbackPath,
-	"http://localhost:8080" + mcpCallbackPath,
+// Concrete addresses rather than a wildcard, because exact matching is the rule:
+// an authorization server compares the redirect it is sent against this list
+// byte for byte, so a port that is not named here cannot be used.
+//
+// Which is why there is a RANGE. The desktop application does not get to pick
+// its port freely: it binds the first free one in LoopbackPorts, so whatever it
+// lands on is a port this document already names. It used to ask the operating
+// system for any free port, the comment here said it bound 8080, and the two
+// were never the same number: every OAuth connection from the installed
+// application was refused at the consent screen with "the redirect_uri does not
+// match a URI registered for this client", which is the authorization server
+// being right. The list is shared with the half that does the binding
+// (desktop/loopback-ports.json) and both halves assert it.
+//
+// localhost as well as 127.0.0.1 for the first port only: that is what a working
+// copy started with a bare ":8080" calls itself (see personalBaseURL). Anything
+// else names its host, and names it 127.0.0.1.
+var LoopbackRedirectURIs = loopbackRedirectURIs()
+
+// LoopbackPorts are the ports a local installation may listen on. The count is
+// generous on purpose: a person's own machine is full of other software, and
+// the one thing this must never do is run out and fall back to a port nobody
+// published.
+var LoopbackPorts = loopbackPorts()
+
+const (
+	firstLoopbackPort = 8080
+	loopbackPortCount = 40
+)
+
+func loopbackPorts() []int {
+	ports := make([]int, 0, loopbackPortCount)
+	for p := firstLoopbackPort; p < firstLoopbackPort+loopbackPortCount; p++ {
+		ports = append(ports, p)
+	}
+	return ports
+}
+
+func loopbackRedirectURIs() []string {
+	uris := make([]string, 0, loopbackPortCount+1)
+	for _, p := range loopbackPorts() {
+		uris = append(uris, fmt.Sprintf("http://127.0.0.1:%d%s", p, mcpCallbackPath))
+	}
+	return append(uris, fmt.Sprintf("http://localhost:%d%s", firstLoopbackPort, mcpCallbackPath))
 }
 
 // mcpCallbackPath is where a service sends the person back after they authorize.

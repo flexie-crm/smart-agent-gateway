@@ -381,7 +381,7 @@ func TestTheFormEndsWithThePolicy(t *testing.T) {
 	for _, section := range sections {
 		titles = append(titles, section.Title)
 	}
-	if got := strings.Join(titles, " | "); got != "Connection | Limits | cmdpolicy.Policy" {
+	if got := strings.Join(titles, " | "); got != "Connection | Limits | Policy" {
 		t.Fatalf("sections = %q", got)
 	}
 	for _, field := range sections[len(sections)-1].Fields {

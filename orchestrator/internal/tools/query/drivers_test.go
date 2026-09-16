@@ -9,6 +9,8 @@ package query
 import (
 	_ "flexie.io/sag/internal/datasource/mysql"
 	_ "flexie.io/sag/internal/datasource/postgres"
+	_ "flexie.io/sag/internal/datasource/sqlserver"
 	_ "flexie.io/sag/internal/sqlguard/mysql"
 	_ "flexie.io/sag/internal/sqlguard/postgres"
+	_ "flexie.io/sag/internal/sqlguard/sqlserver"
 )

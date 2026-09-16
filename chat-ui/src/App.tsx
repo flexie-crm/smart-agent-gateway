@@ -41,6 +41,7 @@ import { assistantTimelineItems, rendersNothing } from '@lib/message-parts';
 import type { ChatMessage, AgentActivity, FileAttachment, MessagePart } from '@lib/chat-types';
 import type { ClientToolRegistry } from '@lib/client-tool-dispatcher';
 import { t, resolveDynamic } from '@lib/utils';
+import { activityLabel } from '@lib/activity-label';
 
 /**
  * The thumbnail of an attached image.
@@ -298,7 +299,13 @@ declare global {
 
 interface MessageItemProps {
   message: ChatMessage;
-  isReasoningStreaming: boolean;
+  /** What the agent is doing. The streaming row shows it, so that what the
+   *  agent is doing and what it has said are one element the virtual list
+   *  measures together. It used to be a footer BELOW the list: the moment
+   *  reasoning began, that footer unmounted while a reasoning block mounted
+   *  inside the row, and the column changed height twice in two places for
+   *  what a reader sees as one continuous state. */
+  activity: AgentActivity;
   showReasoning: boolean;
   showTools: boolean;
   theme?: ChatTheme;
@@ -322,8 +329,39 @@ function roleStyle(t: RoleTheme | undefined, paddingWhenBg?: string): React.CSSP
   return out;
 }
 
+/** One object, so a completed row's props never change identity. */
+const IDLE: AgentActivity = { kind: 'idle' };
+
+/**
+ * What the agent is doing, at the end of the row it is doing it in.
+ *
+ * Reasoning is deliberately absent when it is being SHOWN: the reasoning block
+ * above says "Reasoning…" with its own spinner, and two spinners saying the
+ * same thing is worse than one. When reasoning is withheld there is no block,
+ * so this speaks for it.
+ *
+ * Text arriving needs no line at all. The text is the indicator.
+ */
+const ActivityLine = memo(({ activity, lang }: {
+  activity: AgentActivity;
+  lang?: Record<string, string>;
+}) => {
+  // The decision is activityLabel's (lib/activity-label.ts), where it can be
+  // tested without building an application and watching a turn. This draws it.
+  const label = activityLabel(activity, lang);
+  if (label === null) return null;
+  return (
+    <div className="flex items-center gap-2 text-muted-foreground text-sm">
+      <Loader2 className="size-4 animate-spin" />
+      <span>{label}</span>
+    </div>
+  );
+});
+ActivityLine.displayName = 'ActivityLine';
+
 const MessageItem = memo(
-  ({ message, isReasoningStreaming, showReasoning, showTools, theme, sendMessage, respondToConfirmation, lang }: MessageItemProps) => {
+  ({ message, activity, showReasoning, showTools, theme, sendMessage, respondToConfirmation, lang }: MessageItemProps) => {
+    const isReasoningStreaming = activity.kind === 'reasoning';
     // user role already has Tailwind px-4 py-3 + rounded-lg, so no bg-padding default needed.
     const userStyle = roleStyle(theme?.user);
     const assistantStyle = roleStyle(theme?.assistant, '0.75rem 1rem');
@@ -457,12 +495,18 @@ const MessageItem = memo(
             </Message>
           ) : null;
         })}
+        {/* Last, because it is what happens NEXT. Inside the row rather than
+            below the list, so the virtual list measures it with everything
+            else and a change of state is one height change instead of two. */}
+        {isAssistantMessage(message) && message.isStreaming && (
+          <ActivityLine activity={activity} lang={lang} />
+        )}
       </div>
     );
   },
   (prev, next) =>
     prev.message === next.message &&
-    prev.isReasoningStreaming === next.isReasoningStreaming &&
+    prev.activity === next.activity &&
     prev.showReasoning === next.showReasoning &&
     prev.showTools === next.showTools &&
     prev.theme === next.theme &&
@@ -1081,24 +1125,10 @@ const FlexieAiAgent: React.FC<FlexieChatProps> = ({ streamEndpoint, fetchEndpoin
           // Activity indicator: reasoning falls through to the Reasoning component
           // when showReasoning is on; when it's off we show a spinner instead so the
           // user isn't staring at an empty surface during the think phase.
-          footer={(activity.kind === 'running' || activity.kind === 'tool' || activity.kind === 'uploading' || (activity.kind === 'reasoning' && !config.showReasoning)) ? (
-            <div className="flex items-center gap-2 text-muted-foreground text-sm">
-              <Loader2 className="size-4 animate-spin" />
-              <span>
-                {activity.kind === 'tool'
-                  ? t('agent_is_using', config.lang, 'Agent is using {tool}...', { tool: activity.name })
-                  : activity.kind === 'uploading'
-                  ? activity.detail
-                  : activity.kind === 'reasoning'
-                  ? t('agent_is_thinking', config.lang, 'Thinking...')
-                  : t('agent_is_running', config.lang, 'Running...')}
-              </span>
-            </div>
-          ) : null}
           renderItem={(message) => (
             <MessageItem
               message={message}
-              isReasoningStreaming={!!message.isStreaming && activity.kind === 'reasoning'}
+              activity={message.isStreaming ? activity : IDLE}
               showReasoning={config.showReasoning}
               showTools={config.showTools}
               theme={config.theme}

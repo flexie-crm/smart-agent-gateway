@@ -25,6 +25,9 @@ import (
 
 func pgFixture(t *testing.T) datasource.Config {
 	t.Helper()
+	// This fixture remakes the database, so a guard cached from a run that
+	// described the old one would be describing nothing.
+	guards.forget()
 	dsn := os.Getenv("SAG_TEST_PG_DSN")
 	if dsn == "" {
 		t.Skip("SAG_TEST_PG_DSN not set; skipping the PostgreSQL policy suite")

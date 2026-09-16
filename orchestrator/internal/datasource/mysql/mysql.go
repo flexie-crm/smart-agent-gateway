@@ -53,6 +53,27 @@ func (Driver) Fields() []datasource.Field {
 	}
 }
 
+// Capabilities is what a MySQL tool may be allowed beyond rows.
+func (Driver) Capabilities() []datasource.Capability {
+	return []datasource.Capability{
+		{
+			Key: datasource.CapCallRoutines, Label: "Call stored procedures and functions",
+			Verbs: []string{"CALL"},
+			Help:  "The tool may run a stored procedure or function. Its body is read first and held to the rules above: one that reads a table you keep back, or returns a hidden field, is refused.",
+		},
+		{
+			Key: datasource.CapCreateRoutines, Label: "Create procedures and functions",
+			Objects: []string{"PROCEDURE", "FUNCTION"},
+			Help:    "The tool may create, change and remove stored procedures and functions. The body is checked against the rules above before it is created.",
+		},
+		{
+			Key: datasource.CapCreateTriggers, Label: "Create triggers",
+			Objects: []string{"TRIGGER"},
+			Warn:    "A trigger runs on somebody else's write, where these rules cannot see it. Tick this only where the tool is trusted with the whole database.",
+		},
+	}
+}
+
 // registerTLS turns the connection's datasource.TLS settings into the driver's TLSConfig
 // name. Plain modes map to the driver's built-in names; anything with a CA, a
 // client certificate, or a server name is built into a *tls.Config and
@@ -164,7 +185,17 @@ func (Driver) Query(ctx context.Context, db *sql.DB, statement string, args []an
 		return nil, fmt.Errorf("read columns: %w", err)
 	}
 
+	// The column types, so a value is written as what the database says it is: a
+	// BLOB is not text and a DATE is not a moment. A driver that cannot say
+	// leaves its values exactly as they were.
+	types := columnTypeNames(rows, len(cols))
+
 	res := &datasource.Result{Columns: cols, Rows: [][]any{}}
+	for i, name := range types {
+		if datasource.IsBinaryColumn(name) && i < len(cols) {
+			res.BinaryColumns = append(res.BinaryColumns, cols[i])
+		}
+	}
 	for rows.Next() {
 		if res.RowCount >= limit {
 			res.Truncated = true
@@ -178,7 +209,7 @@ func (Driver) Query(ctx context.Context, db *sql.DB, statement string, args []an
 		if err := rows.Scan(ptrs...); err != nil {
 			return nil, fmt.Errorf("read row: %w", err)
 		}
-		res.Rows = append(res.Rows, normalizeRow(cells))
+		res.Rows = append(res.Rows, normalizeRow(cells, types))
 		res.RowCount++
 	}
 	if err := rows.Err(); err != nil {
@@ -187,6 +218,9 @@ func (Driver) Query(ctx context.Context, db *sql.DB, statement string, args []an
 		}
 		return nil, fmt.Errorf("read rows: %w", err)
 	}
+	// A routine can end in several SELECTs. Only the first is returned, which is
+	// the rule, but losing the rest without a word is not: say there were more.
+	res.MoreResults = rows.NextResultSet()
 	return res, nil
 }
 
@@ -232,7 +266,7 @@ func explain(ctx context.Context, db *sql.DB, statement string, args []any) stri
 			break
 		}
 		vals := make([]string, len(cols))
-		for i, c := range normalizeRow(cells) {
+		for i, c := range normalizeRow(cells, columnTypeNames(rows, len(cols))) {
 			if c == nil {
 				vals[i] = "NULL"
 			} else {
@@ -269,14 +303,32 @@ func (Driver) Exec(ctx context.Context, db *sql.DB, statement string, args []any
 // normalizeRow turns MySQL driver values into JSON-friendly ones: the
 // driver hands text and decimals back as []byte, which becomes a string; NULL
 // stays nil; everything else passes through.
-func normalizeRow(cells []any) []any {
+// normalizeRow turns driver values into ones fit to put in front of a model,
+// using the type the database declared for each column. datasource.Cell is
+// shared by every driver so that a BLOB and a DATE mean the same thing whichever
+// engine they came from.
+func normalizeRow(cells []any, types []string) []any {
 	out := make([]any, len(cells))
 	for i, c := range cells {
-		if b, ok := c.([]byte); ok {
-			out[i] = string(b)
-			continue
+		name := ""
+		if i < len(types) {
+			name = types[i]
 		}
-		out[i] = c
+		out[i] = datasource.Cell(c, name)
+	}
+	return out
+}
+
+// columnTypeNames is what the database calls each column, or nothing when the
+// driver will not say.
+func columnTypeNames(rows *sql.Rows, n int) []string {
+	infos, err := rows.ColumnTypes()
+	if err != nil || len(infos) != n {
+		return nil
+	}
+	out := make([]string, n)
+	for i, info := range infos {
+		out[i] = info.DatabaseTypeName()
 	}
 	return out
 }
@@ -353,5 +405,32 @@ func (Driver) Schema(ctx context.Context, db *sql.DB, database string) (*datasou
 	if err := views.Err(); err != nil {
 		return nil, fmt.Errorf("read the database's views: %w", err)
 	}
+	// The routines, with their bodies. information_schema.ROUTINES holds the
+	// text; a body this account may not see comes back empty, which leaves the
+	// routine unaccountable and therefore refused rather than assumed harmless.
+	const routines = `
+		SELECT ROUTINE_NAME, ROUTINE_SCHEMA, IFNULL(ROUTINE_DEFINITION, '')
+		FROM information_schema.ROUTINES
+		WHERE ROUTINE_SCHEMA = ?`
+
+	routineRows, err := db.QueryContext(ctx, routines, database)
+	if err != nil {
+		return nil, fmt.Errorf("read the database's routines: %w", err)
+	}
+	defer func() { _ = routineRows.Close() }()
+
+	for routineRows.Next() {
+		var name, namespace, body string
+		if err := routineRows.Scan(&name, &namespace, &body); err != nil {
+			return nil, fmt.Errorf("read the database's routines: %w", err)
+		}
+		schema.Routines = append(schema.Routines, datasource.Routine{
+			Name: name, Namespace: namespace, Body: body,
+		})
+	}
+	if err := routineRows.Err(); err != nil {
+		return nil, fmt.Errorf("read the database's routines: %w", err)
+	}
+
 	return schema, nil
 }

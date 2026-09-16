@@ -7,7 +7,7 @@
 
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -510,13 +510,63 @@ fn write_record(state: &Path, running: &Running) -> Result<(), String> {
     fs::write(record_path(state), raw).map_err(|e| format!("cannot record the gateway: {e}"))
 }
 
+/// The first port a personal installation may listen on, and how many there are.
+///
+/// Shared with the gateway, which publishes one redirect address per port in the
+/// OAuth client metadata document it hosts (desktop/loopback-ports.json, and a
+/// test on each side). The two MUST agree, and for a while they did not: this
+/// asked the operating system for any free port, the document named 8080, and so
+/// every OAuth connection from the installed application was refused at the
+/// consent screen by the service's own authorization server. It matches redirect
+/// addresses exactly, as the specification tells it to, and a port nobody
+/// published is a port it has never heard of.
+///
+/// Forty of them because this is somebody's own machine: 8080 is the most
+/// contested port in software, and running out and quietly taking an unpublished
+/// port is the failure this exists to prevent.
+const FIRST_PORT: u16 = 8080;
+const PORT_COUNT: u16 = 40;
+
+/// The first published port nothing else is holding.
+///
+/// In order, so a machine with nothing else running is always on 8080 and the
+/// address a person bookmarks stays the same between launches.
 fn free_port() -> Result<u16, String> {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| format!("no free port for the gateway: {e}"))?;
-    listener
-        .local_addr()
-        .map(|a| a.port())
-        .map_err(|e| e.to_string())
+    for port in FIRST_PORT..FIRST_PORT + PORT_COUNT {
+        if unoccupied(port) {
+            return Ok(port);
+        }
+    }
+    Err(format!(
+        "every address this application can be reached on is in use (ports {}-{}). \
+         Close whatever is using them and start it again.",
+        FIRST_PORT,
+        FIRST_PORT + PORT_COUNT - 1
+    ))
+}
+
+/// Whether a port is free, asked the only way that answers the question.
+///
+/// Binding it is NOT the question, and believing it was shipped a release that
+/// showed people another server's pages. A working copy of the server listening
+/// on `*:8080` leaves `127.0.0.1:8080` bindable, because the narrower address is
+/// a different socket: the bind succeeded, this said "free", the gateway started
+/// on a port that already had a server on it, and the window loaded the OTHER
+/// one, which is a different product with a login screen.
+///
+/// So ask whether anything ANSWERS there first. Two servers on one port is
+/// broken whichever of them the kernel hands a connection to, and a port
+/// somebody else is serving is not free by any reading.
+fn unoccupied(port: u16) -> bool {
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    if TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok() {
+        return false;
+    }
+    // And we can have it. Bound and released, so something can still win the
+    // moment in between; then the gateway fails to start and says so, which is
+    // the honest outcome. Taking an unpublished port instead would start
+    // perfectly and break only once somebody tried to connect a service.
+    TcpListener::bind(address).is_ok()
 }
 
 /// Asks the gateway whether it is well, rather than whether something is
@@ -540,4 +590,62 @@ fn healthy(port: u16) -> bool {
         return false;
     }
     response.starts_with("HTTP/1.") && response.contains(" 200") && response.contains("\"status\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FIRST_PORT, PORT_COUNT};
+
+    /// A port somebody else is serving is not free, however it was bound.
+    ///
+    /// The second half is the regression: a server on the WILDCARD address
+    /// leaves the loopback address bindable, so "can I bind it" answered yes on
+    /// a port that already had a server on it. The application started there and
+    /// the window showed the other server, which is a different product with a
+    /// login screen. Asking who ANSWERS is the question, and this proves the
+    /// answer changes when the holder goes away, so it is not a test that cannot
+    /// fail.
+    #[test]
+    fn a_port_somebody_is_serving_is_not_free() {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").expect("a port to hold");
+        let port = held.local_addr().expect("its address").port();
+        assert!(!super::unoccupied(port), "port {port} is held and was called free");
+        drop(held);
+        assert!(super::unoccupied(port), "port {port} was let go and is still called taken");
+
+        let wildcard = std::net::TcpListener::bind("0.0.0.0:0").expect("a wildcard port to hold");
+        let port = wildcard.local_addr().expect("its address").port();
+        assert!(
+            !super::unoccupied(port),
+            "port {port} has a server on every address and was called free: \
+             the application would start a second gateway there and the window \
+             would load whichever one the kernel picked"
+        );
+    }
+
+    /// The ports this half binds are the ports the gateway publishes.
+    ///
+    /// Two languages, two build systems, and a disagreement that nothing reports:
+    /// the application starts, the console works, and only a person pressing
+    /// Connect on a service finds out, by being refused by somebody else's
+    /// authorization server with an error that reads like the other end's fault.
+    /// That is exactly what happened, so the list lives in one file both halves
+    /// read and both halves assert. A Go test does the same.
+    #[test]
+    fn this_half_binds_what_the_gateway_publishes() {
+        #[derive(serde::Deserialize)]
+        struct Contract {
+            ports: Vec<u16>,
+        }
+        let agreed: Contract = serde_json::from_str(include_str!("../../../loopback-ports.json"))
+            .expect("loopback-ports.json is not valid JSON");
+
+        let binds: Vec<u16> = (FIRST_PORT..FIRST_PORT + PORT_COUNT).collect();
+        assert_eq!(
+            agreed.ports, binds,
+            "the gateway publishes a redirect address for each of {:?} and this half binds {:?}: \
+             an installation on a port nobody published is refused by every service it tries",
+            agreed.ports, binds
+        );
+    }
 }

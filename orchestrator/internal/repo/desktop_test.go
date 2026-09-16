@@ -222,3 +222,54 @@ func TestWindowsIsOfferedOnlyWhenItsInstallerIsThere(t *testing.T) {
 		t.Errorf("named a version with no manifest to read it from: %q", got.Version)
 	}
 }
+
+// The page has to say there are TWO products, name both, and say who makes them.
+//
+// It is tested because it is the kind of thing that reads fine to whoever wrote
+// it and is wrong to everybody else: the page sold "Private AI for your company"
+// while the only thing anybody could download was the personal edition, so a
+// visitor either downloaded the wrong expectation or left.
+func TestThePageNamesBothEditionsAndWhoMakesThem(t *testing.T) {
+	dir := t.TempDir()
+	writeInstaller(t, dir, "SAG-Personal.dmg", 3*1024*1024)
+	writeManifest(t, dir, "personal-darwin-x86_64.json", release{Version: "0.1.8"})
+	page := render(t, dir)
+
+	for _, want := range []string{
+		"Flexie SAG Personal",
+		"Flexie SAG Enterprise",
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("the page never names %q", want)
+		}
+	}
+
+	// Enterprise is a conversation, not a download, and it goes to sales rather
+	// than to the company's front page: somebody ready to talk should not have to
+	// go and find the address.
+	if !strings.Contains(page, "mailto:sales@flexie.io") {
+		t.Error("there is no way to reach sales about the enterprise edition")
+	}
+
+	// Who makes it, linked. A visitor arriving from a search has no other way to
+	// know, and it must not live only in the footer.
+	if !strings.Contains(page, "A product by") || !strings.Contains(page, `href="https://flexie.io/"`) {
+		t.Error("the page does not say it is a product by Flexie CRM, linked")
+	}
+	hero := page[:strings.Index(page, `<section id="get">`)]
+	if !strings.Contains(hero, "A product by") {
+		t.Error("the attribution is below the fold; it belongs where somebody lands")
+	}
+
+	// And the positioning: a record-keeping system is not the same as one that
+	// acts, which is the whole argument for this product existing.
+	if !strings.Contains(hero, "CRM or an ERP") {
+		t.Error("the page does not say what this is FOR, next to what a company already runs")
+	}
+	// And the headline has to name the thing. "Does the work" could be a
+	// dishwasher; what a visitor needs in the first line is what this IS and
+	// what it reaches.
+	if !strings.Contains(hero, "AI agent") {
+		t.Error("the headline never says what the product is")
+	}
+}

@@ -25,6 +25,7 @@
 #
 #   export SAG_TEST_DSN='root:sagtest-root@tcp(127.0.0.1:3307)/flexie_sag_test?parseTime=true'
 #   export SAG_TEST_PG_DSN='postgres://sagtest:sagtest@127.0.0.1:5433/postgres'
+#   export SAG_TEST_MSSQL_DSN='sqlserver://sa:SagTest!2026pw@127.0.0.1:1434'
 #   export SAG_TEST_TUNNEL='ssh://jump:jumppass@127.0.0.1:2222/test-db-postgres:5432'
 #   export SAG_TEST_TUNNEL_DB='postgres://sagtest:sagtest@ignored/postgres'
 
@@ -101,6 +102,37 @@ services:
       interval: 3s
       timeout: 5s
       retries: 20
+
+  # Microsoft SQL Server, for the driver suite and for the query tool's policy on
+  # it. Here for the same reason PostgreSQL is: the policy is enforced by reading
+  # a statement the way the server reads it, and whether those two readings agree
+  # is a question only a real server can answer.
+  #
+  # It matters more on this engine than on either other one, because the parser
+  # is NOT the server's own (lib/tsql is generated from a community grammar), so
+  # there is a real gap for the two readings to differ in. It is also the only
+  # place a token splice can be shown to produce SQL the server will actually
+  # run: every unit test in the analyzer checks the text it emitted, and none of
+  # them can say whether SQL Server accepts it.
+  #
+  # No tmpfs and no durability settings, unlike the two above: this image runs as
+  # a non-root user with its own opinions about its data directory, and the suite
+  # against it is seconds either way. The password is the image's own complexity
+  # rule rather than a decision.
+  test-db-mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    ports:
+      # 1434, so it cannot be confused with a server holding anything real.
+      - "1434:1433"
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "SagTest!2026pw"
+      MSSQL_PID: Developer
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
 
   # An SSH bastion in front of the PostgreSQL above, for the end-to-end tunnel
   # test. The point of it is the address it forwards to: test-db-postgres:5432

@@ -112,6 +112,15 @@ type Driver interface {
 	Dialect() Dialect
 	// Fields are the connection settings this driver needs, in form order.
 	Fields() []Field
+	// Capabilities are the things this engine can be ALLOWED to do beyond
+	// reading and writing rows, each one off until an administrator turns it on.
+	//
+	// It is on the driver because the answer differs per engine and nowhere
+	// else: calling a stored routine is CALL on MySQL and EXEC on SQL Server,
+	// and an engine with none returns nothing and shows no checkboxes. A new
+	// database declares its own here and the form grows by itself, the same way
+	// its connection fields already do.
+	Capabilities() []Capability
 	// Connect builds a pool for a config. It does not verify the connection;
 	// Conn.Ping does.
 	//
@@ -138,6 +147,23 @@ type Driver interface {
 type Schema struct {
 	Database string
 	Tables   []TableSchema
+	// Routines are the stored procedures and functions this database holds, with
+	// the body of each. They are here for one reason: a statement that CALLS one
+	// says nothing about what it does, so the only way to hold a routine to a
+	// policy is to read what it was written as. A body the connected account may
+	// not see comes back empty, which leaves the routine unaccounted for and so
+	// refused, rather than assumed harmless.
+	Routines []Routine
+}
+
+// Routine is one stored procedure or function, as the database reports it.
+type Routine struct {
+	Name string
+	// Namespace is the schema it lives in, on an engine that has them.
+	Namespace string
+	// Body is the statement it was created with. Empty when the account may not
+	// read it, or the engine encrypted it: both mean unaccountable, not safe.
+	Body string
 }
 
 // TableSchema is one table or view, as the database reports it.
@@ -171,6 +197,61 @@ type Dialect struct {
 	Introspection string
 }
 
+// Capability is something an administrator may switch on for one tool, beyond
+// the rows it reads and writes.
+//
+// Everything here is OFF unless it is ticked. That direction is the whole point:
+// every tool that existed before a capability was invented goes on behaving
+// exactly as it did, and the safe answer is the one nobody has to remember.
+type Capability struct {
+	// Key is what the setting is stored as, and must not change once shipped.
+	Key   string
+	Label string
+	Help  string
+	// Verbs are the leading keywords this unlocks in the access gate. A
+	// capability with none gates something the gate cannot see by its first
+	// word, and is enforced by whatever does see it.
+	Verbs []string
+	// Objects are the kinds of thing CREATE, ALTER and DROP may name under this
+	// capability. CREATE is already a write, so the leading word cannot separate
+	// CREATE TABLE from CREATE TRIGGER; this is what does. An object kind no
+	// capability claims is left exactly as it was.
+	Objects []string
+	// Warn is said in the form when ticking this costs something an
+	// administrator should decide deliberately rather than discover.
+	Warn string
+}
+
+// HasCapability reports whether a driver offers one, so a caller can ask before
+// acting on a setting an engine may not have.
+func HasCapability(driverKey, capability string) bool {
+	d, ok := Get(driverKey)
+	if !ok {
+		return false
+	}
+	for _, c := range d.Capabilities() {
+		if c.Key == capability {
+			return true
+		}
+	}
+	return false
+}
+
+// The capabilities this product knows how to reason about. A driver names the
+// ones it can offer; these constants are what the rest of the code matches on,
+// so a typo is a build failure rather than a setting that silently does
+// nothing.
+const (
+	// CapCallRoutines allows calling a stored procedure or function.
+	CapCallRoutines = "call_routines"
+	// CapCreateRoutines allows creating or altering one.
+	CapCreateRoutines = "create_routines"
+	// CapCreateTriggers allows creating a trigger, which is the one capability
+	// that puts work beyond any reading of a statement: a trigger runs on
+	// somebody else's write, and no policy can see what it does.
+	CapCreateTriggers = "create_triggers"
+)
+
 // QueryTimeout is returned by a read that ran past its deadline and was
 // cancelled on the server, so it could not keep holding the database. Plan is
 // the statement's EXPLAIN output, so a caller can show why it was slow (a full
@@ -192,6 +273,18 @@ type Result struct {
 	Truncated bool     `json:"truncated,omitempty"`
 	Affected  *int64   `json:"rows_affected,omitempty"`
 	InsertID  *int64   `json:"insert_id,omitempty"`
+	// MoreResults says the statement produced another result set that is not
+	// here. One statement per call is the rule and one result set follows from
+	// it; what does not follow is losing the others in silence.
+	MoreResults bool `json:"more_results,omitempty"`
+	// BinaryColumns are the columns whose bytes were not returned. Named so a
+	// caller can say it once, rather than leaving a model to work it out from
+	// every cell of every row.
+	BinaryColumns []string `json:"binary_columns,omitempty"`
+	// Note is what a caller must be TOLD rather than left to infer from a flag.
+	// A model that does not read `truncated` reads a capped answer as the whole
+	// one, and nothing anywhere says otherwise.
+	Note string `json:"note,omitempty"`
 }
 
 // Conn is an open connection to a datasource: query or execute through it, and

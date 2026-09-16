@@ -41,8 +41,10 @@ import (
 	// which is why there is a test next door that asks for them by name.
 	_ "flexie.io/sag/internal/datasource/mysql"
 	_ "flexie.io/sag/internal/datasource/postgres"
+	_ "flexie.io/sag/internal/datasource/sqlserver"
 	_ "flexie.io/sag/internal/sqlguard/mysql"
 	_ "flexie.io/sag/internal/sqlguard/postgres"
+	_ "flexie.io/sag/internal/sqlguard/sqlserver"
 )
 
 type App struct {

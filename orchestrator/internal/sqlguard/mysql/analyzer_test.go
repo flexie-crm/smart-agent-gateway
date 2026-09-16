@@ -110,8 +110,8 @@ func TestADeniedTableCannotBeReachedAnyWay(t *testing.T) {
 		"SELECT * FROM unreadable_view",
 	} {
 		reason := refused(t, g, sql)
-		if !strings.Contains(reason, "rewording will not help") && !strings.Contains(reason, "not allowed") {
-			t.Errorf("%s: refusal should tell the assistant not to retry, got %q", sql, reason)
+		if !strings.Contains(reason, "do not have access") && !strings.Contains(reason, "cannot be established") {
+			t.Errorf("%s: refusal should say it is out of reach, got %q", sql, reason)
 		}
 	}
 }
@@ -167,7 +167,11 @@ func TestOnlyStatementsTheGuardCanReadEndToEndAreRun(t *testing.T) {
 		"EXECUTE s",
 		// Bodies this side cannot see.
 		"CALL p()",
-		"CREATE PROCEDURE p() BEGIN SELECT 1; END",
+		// CREATE PROCEDURE is NOT here any more, and that is the point of the
+		// change: a body is read now and held to the policy, so one that stays
+		// inside it is created. See create_routine_test.go, which asserts both
+		// directions. What is still refused is a body this cannot read in full.
+		"CREATE PROCEDURE p() BEGIN CALL other(); END",
 		"CREATE VIEW v AS SELECT * FROM secret_keys",
 		// Ways to move a policy out from under itself.
 		"RENAME TABLE customers TO c2",
@@ -406,13 +410,13 @@ func TestAWriteReadsAHiddenFieldLikeAnythingElse(t *testing.T) {
 		"INSERT INTO customers SELECT * FROM customers",
 	} {
 		reason := refused(t, g, sql)
-		if !strings.Contains(reason, "written to") && !strings.Contains(reason, "column list") {
+		if !strings.Contains(reason, "cannot write to it") && !strings.Contains(reason, "column list") {
 			t.Errorf("%s: refused for the wrong reason: %q", sql, reason)
 		}
 	}
 	// Copied out through a SET, where there is no select list to hide it in.
 	reason := refused(t, g, "UPDATE customers SET email = ssn")
-	if !strings.Contains(reason, "copied") {
+	if !strings.Contains(reason, "cannot copy it") {
 		t.Errorf("refused for the wrong reason: %q", reason)
 	}
 
@@ -778,7 +782,7 @@ func TestTheShortFormOfASelectIsRefused(t *testing.T) {
 	g := standard(t)
 	for _, sql := range []string{"TABLE customers", "TABLE orders", "VALUES ROW(1,2)"} {
 		reason := refused(t, g, sql)
-		if !strings.Contains(reason, "short form") {
+		if !strings.Contains(reason, "short TABLE form") {
 			t.Errorf("%s: refused for the wrong reason: %q", sql, reason)
 		}
 	}
@@ -941,7 +945,7 @@ func TestAStatementThatCannotBeRewrittenFaithfullyIsRefused(t *testing.T) {
 	// A backslash in a value: written back with the escaping gone, so the value
 	// becomes a different one and the query quietly returns the wrong rows.
 	reason := refused(t, g, `SELECT ssn, id FROM customers WHERE note = 'a\\b'`)
-	if !strings.Contains(reason, "changing what") {
+	if !strings.Contains(reason, "cannot be kept as it is") {
 		t.Errorf("refused for the wrong reason: %q", reason)
 	}
 	// A function written back under a name the database does not have.

@@ -21,6 +21,7 @@ import { Groups, Roles, Users } from '@/pages/Access'
 import { Workspaces } from '@/pages/Workspaces'
 import { MCPServer } from '@/pages/MCPServer'
 import { OAuthClients } from '@/pages/OAuthClients'
+import { Licences } from './pages/Licences'
 
 /**
  * The console.
@@ -141,6 +142,7 @@ function Gate() {
         <Route path="/workspaces" element={<Workspaces />} />
         <Route path="/mcp-server" element={<MCPServer />} />
         <Route path="/oauth-clients" element={<OAuthClients />} />
+        <Route path="/open-source" element={<Licences />} />
 
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

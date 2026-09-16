@@ -78,12 +78,28 @@ func (c *guardCache) load(ctx context.Context, settings Settings, conn *datasour
 		return entry.guard, nil
 	}
 
+	// A connection carried through somebody's computer must say WHICH computer,
+	// or two people whose laptops both answer to the same host name would share
+	// one snapshot. Nothing may be kept against a far side with no identity:
+	// that is a fault in the caller, and sharing quietly is the worse answer.
+	if r := settings.Connection.Reach; r != nil && r.Via == "" {
+		return nil, fmt.Errorf("the connection is carried through %s, which did not say which one", r.Describe)
+	}
+
 	schema, err := conn.Schema(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("read what the database holds: %w", err)
 	}
+	// What the administrator ticked travels with the guard, because the guard is
+	// the only thing that can see a routine called from the middle of a
+	// statement. The gate in access.go reads the leading word, which catches EXEC
+	// and CALL and nothing else.
+	var opts []sqlguard.Option
+	if settings.May(datasource.CapCallRoutines) {
+		opts = append(opts, sqlguard.MayCallRoutines())
+	}
 	guard, err := sqlguard.New(settings.Connection.Driver, settings.Policy,
-		catalogOf(settings.Connection.Driver, schema))
+		catalogOf(settings.Connection.Driver, schema), opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -118,10 +134,41 @@ func (c *guardCache) sweep() {
 	}
 }
 
+// stale drops the snapshot for one tool, so the next statement reads the
+// database again.
+//
+// A snapshot is trusted for five minutes, which is right for tables somebody
+// else changes and wrong for the routine this tool JUST made: an agent that
+// creates a procedure and calls it was told "this tool cannot establish what it
+// does" for as long as the old snapshot lived. Anything that makes, changes or
+// removes stored code therefore takes the snapshot away as it goes.
+func (c *guardCache) stale(settings Settings) {
+	key := cacheKey(settings)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.entries, key)
+}
+
+// forget drops every cached guard.
+//
+// Nothing in the running product calls it, and that is deliberate: a customer's
+// database is not dropped and built again underneath a live tool, which is why a
+// snapshot may be trusted for five minutes at a time. A test does exactly that,
+// several times in one process, and a catalog taken from the database before is
+// then a description of one that no longer exists. Without this a suite passes
+// or fails on the order its tests happen to run in.
+func (c *guardCache) forget() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = map[string]*guardEntry{}
+}
+
 // cacheKey is what makes two calls the same tool: the same database reached the
-// same way, under the same policy. Editing the policy makes a different key, so
-// an edited tool is governed by what it now says rather than by what it said
-// when its catalog was last read.
+// same way, under the same policy and the same capabilities. Editing either
+// makes a different key, so an edited tool is governed by what it now says
+// rather than by what it said when its catalog was last read: a guard built
+// while the routine box was unticked would otherwise go on refusing routines
+// after somebody ticked it.
 //
 // "The same way" includes the bastion, because reaching one address through two
 // different machines reaches two different databases. Private names repeat:
@@ -136,9 +183,18 @@ func cacheKey(settings Settings) string {
 	parts := []string{
 		c.Driver, c.Host, strconv.Itoa(c.Port), c.Database, c.Username,
 		string(p.TableMode), p.Tables, string(p.FieldMode), p.Fields,
+		strconv.FormatBool(settings.May(datasource.CapCallRoutines)),
 	}
 	if c.SSH != nil {
 		parts = append(parts, c.SSH.Host, strconv.Itoa(c.SSH.Port), c.SSH.User)
+	}
+	// And WHICH computer the connection is carried through, for the same reason
+	// the bastion is here: localhost:3306 on one person's laptop is not
+	// localhost:3306 on another's, and without this the first of them to read a
+	// catalog would impose it on the second. Demonstrated before it was added:
+	// two callers differing only in their far side produced one key.
+	if c.Reach != nil {
+		parts = append(parts, "via", c.Reach.Via)
 	}
 	return strings.Join(parts, "\x00")
 }
@@ -182,5 +238,15 @@ func catalogOf(dialect string, schema *datasource.Schema) *sqlguard.Catalog {
 			Definition: t.Definition,
 		})
 	}
-	return sqlguard.NewCatalog(dialect, schema.Database, tables)
+	// The schema each routine lives in travels with it: two schemas are free to
+	// offer the same name, and keeping only the name let one stand in for the
+	// other. Measured on a live SQL Server, where the drivers deliberately read
+	// more than one schema.
+	routines := make([]sqlguard.QualifiedRoutine, 0, len(schema.Routines))
+	for _, r := range schema.Routines {
+		routines = append(routines, sqlguard.QualifiedRoutine{
+			Namespace: r.Namespace, Name: r.Name, Body: r.Body,
+		})
+	}
+	return sqlguard.NewCatalog(dialect, schema.Database, tables).WithQualifiedRoutines(routines)
 }

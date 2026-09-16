@@ -105,7 +105,7 @@ func TestAViewNothingCanAccountForIsRefused(t *testing.T) {
 	)
 	for _, name := range []string{"no_definition", "unreadable", "reaches_unknown", "reaches_elsewhere"} {
 		reason := refused(t, g, "SELECT id FROM "+name)
-		if !strings.Contains(reason, "cannot establish") {
+		if !strings.Contains(reason, "cannot be established") {
 			t.Errorf("%s: expected it to say the view cannot be vouched for, got %q", name, reason)
 		}
 		if g.Shows(name) {

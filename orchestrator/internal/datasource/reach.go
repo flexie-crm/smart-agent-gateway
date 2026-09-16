@@ -30,6 +30,16 @@ type Reach struct {
 	// Describe names the far side for an error a person will read ("the chat
 	// application"), so a failure says where it happened.
 	Describe string
+	// Via identifies WHICH far side this is, so two callers reaching the same
+	// host name on two different computers are not mistaken for one.
+	//
+	// It is not used to reach anything: Dial already holds whatever it needs.
+	// It exists because a private name repeats, and localhost:3306 on one
+	// person's laptop is not localhost:3306 on another's. Anything cached
+	// against a connection has to be keyed by this as well, or the first caller
+	// to arrive decides what the second one sees. Never a secret: it is held in
+	// memory for as long as the cache entry is.
+	Via string
 }
 
 // openReach starts a local forwarder that carries every connection through the

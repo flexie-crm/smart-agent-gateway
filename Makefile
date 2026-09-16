@@ -28,6 +28,11 @@ AIR_BIN := $(TOOLS_DIR)/air-$(AIR_VERSION)
 # they skip, and only the pure-unit tests run.
 export SAG_TEST_DSN ?=
 
+# The same, for the SQL Server driver and the query tool's policy on it. It
+# carries more weight than the other two: this dialect's parser is not the
+# server's own, so it is the only place the two readings can be shown to agree.
+export SAG_TEST_MSSQL_DSN ?=
+
 # The same, for the PostgreSQL driver and the query tool's policy on it.
 # Those suites are the only ones that can find out whether this side reads a
 # statement the way the server does, so a run without this proves less than
@@ -127,40 +132,32 @@ link-e2e: ## The machine link end to end: the real Rust client against the real 
 	cd desktop && cargo build -p sag-desktop --example link_client
 	cd orchestrator && SAG_LINK_E2E=1 go test ./internal/link/ -count=1 -v -timeout 600s
 
+# ---------------------------------------------------------------- the products
+#
+# ONE name per thing you can want. If two targets would build the same product,
+# there is one target. This block used to hold four overlapping ways to build the
+# two applications (desktop-build, desktop-install, build-personal, and a copy of
+# the enterprise steps written out again inside rebuild-all), which is how an
+# afternoon goes into working out which one you were supposed to have run.
+#
+# What each of them produces, and where it lands, is in DEPLOY.md section 0.
+
 .PHONY: desktop-e2e
-desktop-e2e: $(CHAT_UI)/node_modules ## Desktop end-to-end gate: the built application, first run to ready. Needs make desktop-build first.
+desktop-e2e: $(CHAT_UI)/node_modules ## Gate: drive the BUILT personal application, first run to ready
 	$(DESKTOP_E2E)
 
-.PHONY: desktop-build
-desktop-build: ## Build the personal application for this platform
-	$(DESKTOP_BUILD) $(BUILD_ARGS)
-
-# The personal edition's development loop, and the reason it exists: building
-# and installing the application to see a label move is most of ten minutes,
-# nearly all of it Rust. This runs the same stack from source with the pages
-# served by their own build tool, through the gateway so the origin is the one
-# the application has, and a saved file is a reload. `make desktop-install` is
-# for proving the APPLICATION; this is for building the product inside it.
+# The personal edition's development loop, and the reason it exists: building and
+# installing the application to see a label move is most of ten minutes, nearly
+# all of it Rust. This runs the same stack from source with the pages served by
+# their own build tool, through the gateway so the origin is the one the
+# application has, and a saved file is a reload. `make build-personal` is for
+# proving the APPLICATION; this is for building the product inside it.
 .PHONY: dev-personal
 dev-personal: $(ADMIN_UI)/node_modules $(CHAT_UI)/node_modules ## Run the personal edition from source, pages reloading as you edit them
 	./desktop/personal/dev.sh $(DEV_ARGS)
 
 DESKTOP_APP = desktop/.local/out/personal/SAG Personal.app
-
-.PHONY: desktop-install
-desktop-install: ## Build, gate, and install the personal application. Installs ONLY if the gate passes.
-	./desktop/personal/build.sh $(BUILD_ARGS)
-	$(MAKE) desktop-e2e
-# The application this builds, from where this build put it. Both were stale:
-# the name was "SAG Assistant" before the rename and the path was out/ before the
-# split into out/personal, so this built the new one, gated the new one, then
-# installed a day-old application under the old name and reported a passing gate.
-# It is checked to exist first, because copying nothing succeeds quietly.
-	@test -d "$(DESKTOP_APP)" || { echo "desktop-install: nothing built at $(DESKTOP_APP)" >&2; exit 1; }
-	rm -rf "/Applications/SAG Personal.app"
-	cp -R "$(DESKTOP_APP)" /Applications/
-	xattr -dr com.apple.quarantine "/Applications/SAG Personal.app"
-	@echo "installed after a passing gate: $(DESKTOP_APP)"
+ENTERPRISE_APP = desktop/.local/out/enterprise/SAG Enterprise.app
 
 # Building what we ship: one target per edition, each from A to Z, each ending by
 # PROVING that what landed is what this repository is.
@@ -170,7 +167,7 @@ desktop-install: ## Build, gate, and install the personal application. Installs 
 # had been rebuilt but not reinstalled and a window that had been reinstalled but
 # not reloaded. A build that cannot say what it produced has not finished.
 .PHONY: build-web
-build-web: $(CHAT_UI)/node_modules $(ADMIN_UI)/node_modules ## Build the web edition: both pages and the gateway
+build-web: $(CHAT_UI)/node_modules $(ADMIN_UI)/node_modules ## Build the WEB pages and gateway into this working copy
 	@echo "==> the chat"
 	cd $(CHAT_UI) && npm run build
 	@echo "==> the console"
@@ -182,40 +179,60 @@ build-web: $(CHAT_UI)/node_modules $(ADMIN_UI)/node_modules ## Build the web edi
 	@echo "  the pages are served from disk: a browser needs a reload, nothing else"
 
 .PHONY: build-personal
-build-personal: ## Build, gate and install the personal application, from A to Z
-	$(MAKE) desktop-install
+build-personal: $(CHAT_UI)/node_modules $(ADMIN_UI)/node_modules ## Build + gate + install SAG Personal into /Applications (this machine's architecture)
+# The node_modules prerequisites are not decoration: build.sh runs `npm run
+# build` in both front ends and installs nothing (grep it: there is no npm
+# install in that script). Without these, the one command DEPLOY.md gives a
+# newcomer for "try the real application" dies partway through a long build on a
+# fresh clone, with an npm error rather than one of this system's refusals.
+#
+# $(DESKTOP_BUILD), never the script by name: on Windows that variable is the
+# PowerShell build and naming the shell script here would make this target work
+# on one platform and quietly do nothing on the other.
+	$(DESKTOP_BUILD) $(BUILD_ARGS)
+	$(MAKE) desktop-e2e
+# The application this builds, from where this build put it. Both were stale
+# once: the name was "SAG Assistant" before the rename and the path was out/
+# before the split into out/personal, so this built the new one, gated the new
+# one, then installed a day-old application under the old name and reported a
+# passing gate. It is checked to exist first, because copying nothing succeeds
+# quietly.
+	@test -d "$(DESKTOP_APP)" || { echo "build-personal: nothing built at $(DESKTOP_APP)" >&2; exit 1; }
+	rm -rf "/Applications/SAG Personal.app"
+	cp -R "$(DESKTOP_APP)" /Applications/
+	xattr -dr com.apple.quarantine "/Applications/SAG Personal.app"
 	@./scripts/assert-current.sh "SAG Personal.app (chat)" "/Applications/SAG Personal.app/Contents/Resources/chat"
 	@./scripts/assert-current.sh "SAG Personal.app (console)" "/Applications/SAG Personal.app/Contents/Resources/console"
+	@echo "  installed after a passing gate: $(DESKTOP_APP)"
 
 .PHONY: build-enterprise
-build-enterprise: ## Build and install the enterprise application, from A to Z
-	$(MAKE) enterprise-install
-	@echo "  ✓ SAG Enterprise.app carries no pages: it serves whatever its server serves"
-	@echo "    an application already open keeps the pages it loaded. Cmd-R."
-
-.PHONY: build-all
-build-all: build-web build-personal build-enterprise ## Build every edition
-	@$(MAKE) versions
-
-.PHONY: versions
-versions: ## What every surface is built from, and whether it is current
-	@./scripts/versions.sh
-
-ENTERPRISE_APP = desktop/.local/out/enterprise/SAG Enterprise.app
-
-.PHONY: enterprise-install
-enterprise-install: ## Build and install the enterprise application
+build-enterprise: ## Build + install SAG Enterprise into /Applications (this machine's architecture)
 	./desktop/enterprise/build.sh $(BUILD_ARGS)
 # No gate of its own, and the reason is what this edition IS: it carries a window
 # and the page that asks for a server, and everything a person sees after that
 # comes from the server they named. There is no first run to prove, no database
 # to create, and the chat inside it is whichever one that server is serving. What
 # `make e2e` proves about the pages proves it here too.
-	@test -d "$(ENTERPRISE_APP)" || { echo "enterprise-install: nothing built at $(ENTERPRISE_APP)" >&2; exit 1; }
+	@test -d "$(ENTERPRISE_APP)" || { echo "build-enterprise: nothing built at $(ENTERPRISE_APP)" >&2; exit 1; }
 	rm -rf "/Applications/SAG Enterprise.app"
 	cp -R "$(ENTERPRISE_APP)" /Applications/
 	xattr -dr com.apple.quarantine "/Applications/SAG Enterprise.app"
-	@echo "installed: $(ENTERPRISE_APP)"
+	@echo "  installed: $(ENTERPRISE_APP)"
+	@echo "  it carries no pages: it serves whatever its server serves"
+	@echo "  an application already open keeps the pages it loaded. Cmd-R."
+
+.PHONY: build-all
+build-all: build-web build-personal build-enterprise ## Build and install all three products here
+	@$(MAKE) versions
+
+.PHONY: rebuild-all
+rebuild-all: build-all ## build-all, and restart the running dev gateway on top
+	$(MAKE) dev-restart
+	@echo "rebuilt: pages, gateway, and both applications in /Applications"
+
+.PHONY: versions
+versions: ## What every surface is built from, and whether it is current
+	@./scripts/versions.sh
 
 .PHONY: fmt
 fmt: ## Format the Go sources
@@ -226,9 +243,24 @@ fmt-check: ## Fail when sources are not formatted
 	@cd $(ORCHESTRATOR) && out=$$(gofmt -l .); \
 	if [ -n "$$out" ]; then echo "not formatted:"; echo "$$out"; exit 1; fi
 
+# lib/ holds third-party code we keep ourselves (lib/sqlserver/README.md), most
+# of it machine-generated. vet reports there on decisions nobody made, and the
+# only honest fix for anything it finds is a change to the grammar it came from,
+# never an edit to the output.
+#
+# What is filtered is the OUTPUT and not the input, because leaving the package
+# out of the list does nothing: go vet follows imports and prints a dependency's
+# diagnostics alongside the importer's. Measured both ways round rather than
+# assumed: vetting ONLY internal/sqlguard/sqlserver still prints every lib/ line,
+# and vetting internal/store, which does not import it, is clean. Anything vet
+# says about code somebody wrote still fails the build.
+#
+# golangci-lint needs none of this, and is left alone: it honours the
+# "Code generated ... DO NOT EDIT." line by itself.
 .PHONY: vet
 vet: ## Run go vet
-	cd $(ORCHESTRATOR) && go vet ./...
+	@cd $(ORCHESTRATOR) && out=$$(go vet ./... 2>&1 | grep -v '^lib/' || true); \
+	if [ -n "$$out" ]; then echo "$$out"; exit 1; fi
 
 .PHONY: lint
 lint: $(LINT_BIN) ## Run the linters
@@ -251,11 +283,12 @@ $(LINT_BIN):
 	mv $(TOOLS_DIR)/golangci-lint $@
 
 .PHONY: test-db-up
-test-db-up: ## Start the databases the suite runs against (ports 3307 and 5433, in memory)
+test-db-up: ## Start the databases the suite runs against (ports 3307, 5433 and 1434)
 	cd $(ORCHESTRATOR) && docker compose -f docker-compose.test-db.yml up -d --wait
 	@echo 'Point the suite at them:'
 	@echo "  export SAG_TEST_DSN='root:sagtest-root@tcp(127.0.0.1:3307)/flexie_sag_test?parseTime=true'"
 	@echo "  export SAG_TEST_PG_DSN='postgres://sagtest:sagtest@127.0.0.1:5433/postgres'"
+	@echo "  export SAG_TEST_MSSQL_DSN='sqlserver://sa:SagTest!2026pw@127.0.0.1:1434'"
 	@echo "  export SAG_TEST_TUNNEL='ssh://jump:jumppass@127.0.0.1:2222/test-db-postgres:5432'"
 	@echo "  export SAG_TEST_TUNNEL_DB='postgres://sagtest:sagtest@ignored/postgres'"
 
@@ -325,24 +358,6 @@ dev-restart: ## Rebuild the gateway and restart it on :8080, with orchestrator/.
 	nohup ./desktop/.local/sag-dev dev >> desktop/.local/sag-dev.log 2>&1 & \
 	until curl -sf -o /dev/null http://localhost:8080/v1/meta; do sleep 1; done; \
 	echo "gateway restarted on :8080 (log: desktop/.local/sag-dev.log)"
-
-# Everything a person runs, rebuilt from source, in the one order that works.
-#
-# The pages first, because both editions bundle what is in dist/; the gateway
-# next, because it serves them; the applications last, because each carries the
-# gateway it was built with. The personal one goes through its own gate and
-# installs only if that passes.
-.PHONY: rebuild-all
-rebuild-all: ## Rebuild and install everything: pages, gateway, both desktop editions
-	$(MAKE) ui-build
-	$(MAKE) admin-build
-	$(MAKE) dev-restart
-	./desktop/enterprise/build.sh
-	rm -rf "/Applications/SAG Enterprise.app"
-	cp -R "desktop/.local/out/enterprise/SAG Enterprise.app" /Applications/
-	xattr -dr com.apple.quarantine "/Applications/SAG Enterprise.app"
-	$(MAKE) desktop-install
-	@echo "rebuilt: pages, gateway, and both applications in /Applications"
 
 .PHONY: dev
 dev: $(AIR_BIN) ## Run the API server, rebuilding and restarting on every change
@@ -465,6 +480,53 @@ node-packaging: ## Check the unit file and the installer that put the node on a 
 node-boot: ## Boot the node under a real init and watch it survive (Linux, needs docker)
 	$(INFERENCE)/packaging/boot_test.sh $(TARBALL)
 
+# Cutting a release, in ONE command, because it was five environment variables
+# and two scripts remembered in the right order. EDITION says which product.
+#
+#   make release EDITION=personal
+#
+# It refuses rather than producing something that cannot be shipped: an unsigned
+# build gets rejected by the notary, and a build for one architecture strands
+# every machine of the other. What it needs is in DEPLOY.md section 4.
+.PHONY: release
+release: ## Build, sign, notarise and publish a release. EDITION=personal|enterprise
+	@test "$(EDITION)" = "personal" -o "$(EDITION)" = "enterprise" || \
+		{ echo "release: say which one, EDITION=personal or EDITION=enterprise" >&2; exit 2; }
+# ALL of them, named one by one, because the build SKIPS IN SILENCE what it has
+# no key for. Checking only the signing identity let a signed but UNNOTARISED
+# application be published, which macOS refuses to open and Apple silicon
+# refuses to execute: the three API_* variables are what notarising needs, and
+# without them the notary step prints nothing at all and the build succeeds.
+# (TAURI_SIGNING_PRIVATE_KEY_PASSWORD is deliberately not here: empty is a
+# legitimate value for it.)
+	@missing=""; \
+	for v in APPLE_SIGNING_IDENTITY APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH TAURI_SIGNING_PRIVATE_KEY_PATH; do \
+		eval "val=\$$$$v"; [ -n "$$val" ] || missing="$$missing $$v"; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		echo "release: these are not set:$$missing" >&2; \
+		echo "  Without them the build skips signing or notarising IN SILENCE" >&2; \
+		echo "  and publishes something nobody can run. DEPLOY.md section 4 has" >&2; \
+		echo "  the five lines to export." >&2; \
+		exit 2; \
+	fi
+# Checked HERE and not only inside publish.sh, which checks the same thing: there
+# it is discovered after a twenty minute build, and the build is the expensive
+# half. Same two ways in as publish.sh reads them, and no third invented one.
+	@test -n "$$SAG_REPO_SSH" -o -f "$${SAG_RELEASE_ENV:-deploy/release.env}" || \
+		{ echo "release: nowhere to publish to." >&2; \
+		  echo "  cp deploy/release.env.example deploy/release.env   and fill it in," >&2; \
+		  echo "  or set SAG_REPO_SSH for this one command." >&2; exit 2; }
+	./desktop/$(EDITION)/build.sh --universal
+	./desktop/publish.sh $(EDITION)
+
+# EDITION is required here too, and not defaulted to personal as it once was.
+# `make release` refuses without it and this quietly chose one, so the same
+# omission behaved two ways: forget the flag in the middle of an enterprise
+# release and this published personal, saying so only in a line nobody reads
+# twice.
 .PHONY: release-publish
-release-publish: ## Publish a built desktop release to the download host. EDITION=personal|enterprise
-	./desktop/publish.sh $(or $(EDITION),personal)
+release-publish: ## Publish an ALREADY BUILT release. EDITION=personal|enterprise
+	@test "$(EDITION)" = "personal" -o "$(EDITION)" = "enterprise" || \
+		{ echo "release-publish: say which one, EDITION=personal or EDITION=enterprise" >&2; exit 2; }
+	./desktop/publish.sh $(EDITION)

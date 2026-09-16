@@ -110,8 +110,8 @@ func TestADeniedTableCannotBeReachedAnyWay(t *testing.T) {
 		"SELECT * FROM orders, LATERAL (SELECT value FROM secret_keys) k",
 	} {
 		reason := refused(t, g, sql)
-		if !strings.Contains(reason, "rewording will not help") {
-			t.Errorf("%s: refusal should tell the caller not to try again: %q", sql, reason)
+		if !strings.Contains(reason, "do not have access") && !strings.Contains(reason, "cannot be established") {
+			t.Errorf("%s: refusal should say it is out of reach: %q", sql, reason)
 		}
 	}
 }
@@ -166,7 +166,11 @@ func TestOnlyStatementsTheGuardCanReadEndToEndAreRun(t *testing.T) {
 		"DROP TABLE orders",
 		"ALTER TABLE customers RENAME TO safe",
 		"CREATE VIEW v AS SELECT * FROM customers",
-		"CREATE FUNCTION f() RETURNS int AS $$ SELECT 1 $$ LANGUAGE sql",
+		// A routine in plain SQL is NO LONGER here: its body is read now and held
+		// to the policy, so one that stays inside it is created. See
+		// create_routine_test.go, which asserts both directions. A body in a
+		// language this cannot read is still refused.
+		"CREATE FUNCTION f() RETURNS int AS $$ BEGIN RETURN 1; END $$ LANGUAGE plpgsql",
 		"DO $$ BEGIN END $$",
 		"COPY customers TO STDOUT",
 		"COPY customers FROM '/tmp/x'",
@@ -392,7 +396,7 @@ func TestAWriteReadsAHiddenFieldLikeAnythingElse(t *testing.T) {
 		"INSERT INTO customers (email) VALUES ('x') ON CONFLICT (id) DO UPDATE SET profile = customers.ssn",
 	} {
 		reason := refused(t, g, sql)
-		if !strings.Contains(reason, "copied into another column") {
+		if !strings.Contains(reason, "copy it into another column") {
 			t.Errorf("%s: %q", sql, reason)
 		}
 	}
@@ -402,7 +406,7 @@ func TestAWriteReadsAHiddenFieldLikeAnythingElse(t *testing.T) {
 		"INSERT INTO customers (ssn) VALUES ($1)",
 	} {
 		reason := refused(t, g, sql)
-		if !strings.Contains(reason, "cannot be written to") {
+		if !strings.Contains(reason, "cannot write to it") {
 			t.Errorf("%s: %q", sql, reason)
 		}
 	}

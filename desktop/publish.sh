@@ -88,6 +88,23 @@ LOCAL="$OUTDIR/$(basename "$ARCHIVE")"
 [ -f "$LOCAL" ] || { echo "the manifest names $ARCHIVE, which was not built" >&2; exit 1; }
 [ -f "$LOCAL.sig" ] || { echo "$LOCAL.sig is missing, so nothing could verify it" >&2; exit 1; }
 
+# Notarised, or nobody can run it.
+#
+# The build notarises only when APPLE_API_KEY and APPLE_API_KEY_PATH are set,
+# and when they are not it prints NOTHING and carries on: a perfectly signed
+# application with no ticket, which macOS refuses to open and Apple silicon
+# refuses to execute at all. Nothing downstream noticed, so this is where it is
+# noticed. A published release cannot be recalled, only superseded, which makes
+# "check afterwards" the wrong side of the line.
+if ! xcrun stapler validate "$OUTDIR/$NAME.app" >/dev/null 2>&1; then
+	echo "refusing to publish: $NAME.app has no notarisation ticket stapled to it." >&2
+	echo "  It would be refused by macOS on the machine it was downloaded to." >&2
+	echo "  The build skips notarising in silence when APPLE_API_KEY," >&2
+	echo "  APPLE_API_KEY_PATH or APPLE_API_ISSUER is unset. Set all three and" >&2
+	echo "  build again: DEPLOY.md section 4." >&2
+	exit 1
+fi
+
 echo "==> $EDITION $VERSION"
 echo "    $(basename "$LOCAL") ($(du -h "$LOCAL" | cut -f1))"
 for m in $MANIFESTS; do echo "    $(basename "$m")"; done
@@ -147,6 +164,19 @@ if [ -z "$INSTALLER" ]; then
 fi
 if [ -n "$INSTALLER" ]; then
 	echo "==> the installer"
+	# The dmg has a ticket of its OWN, and it is checked here for the same reason
+	# the application's is: the build only WARNS when Apple refuses this one. It
+	# prints "the installer was NOT accepted", exits 0, and everything after it
+	# carries on. Nobody updating notices, because an update downloads the
+	# archive; the person who notices is the one downloading fresh, which is a
+	# new customer, on a machine that then refuses to open it.
+	if ! xcrun stapler validate "$INSTALLER" >/dev/null 2>&1; then
+		echo "refusing to publish: $(basename "$INSTALLER") has no notarisation" >&2
+		echo "  ticket stapled to it. Anybody downloading it fresh would be" >&2
+		echo "  refused by macOS. The build says so and carries on; this does not." >&2
+		echo "  Look for 'the installer was NOT accepted' in the build output." >&2
+		exit 1
+	fi
 	STABLE="SAG-$(printf '%s' "$EDITION" | tr '[:lower:]' '[:upper:]' | cut -c1)$(printf '%s' "$EDITION" | cut -c2-).dmg"
 	# QUOTED on the far side, because the name has a space in it. Tauri names
 	# the installer "SAG Personal_0.1.6_universal.dmg", and a remote command is

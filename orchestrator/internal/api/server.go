@@ -102,6 +102,7 @@ func newRouter(a *app.App) http.Handler {
 			mountAudio(r, a)
 			mountConfig(r, a)
 			mountStats(r, a)
+			mountLicences(r)
 			mountSetup(r, a)
 			mountBrains(r, a)
 			mountMCPServers(r, a)

@@ -38,6 +38,9 @@ type queryTemplate struct {
 func (t queryTemplate) reachFor(call tool.Call) *datasource.Reach {
 	return &datasource.Reach{
 		Describe: "the chat application",
+		// Which computer this is, so nothing cached against the connection is
+		// handed to somebody whose own computer answers to the same host name.
+		Via: fmt.Sprintf("%d/%d/%s", call.WorkspaceID, call.UserID, call.DeviceID),
 		Dial: func(ctx context.Context, host string, port int) (net.Conn, error) {
 			return t.machines.Dial(ctx, call.WorkspaceID, call.UserID, call.DeviceID, host, port, "a database query")
 		},
@@ -102,7 +105,7 @@ func (t queryTemplate) Fields(variant string) ([]template.Section, error) {
 		connection = append(connection, template.ReachChatField("database"))
 	}
 
-	return []template.Section{
+	sections := []template.Section{
 		{Title: "Connection", Fields: connection},
 		{
 			Title:  "TLS",
@@ -114,47 +117,84 @@ func (t queryTemplate) Fields(variant string) ([]template.Section, error) {
 			Hint:   "Reach a database that is only accessible through a bastion. Leave blank for a direct connection.",
 			Fields: convertFields(datasource.SSHFields()),
 		},
-		policySection(),
-	}, nil
+	}
+	return append(sections, policySection(d)), nil
+}
+
+// capabilityFields is one checkbox per thing the database says it can be
+// allowed to do, and nothing when it says none.
+//
+// The list comes from the driver rather than from here, because the answer
+// differs per engine and adding a database must not mean editing this file.
+// That is the same rule the connection fields already follow, and it is why
+// SQL Server arrived without this template changing by a line.
+//
+// Absent rather than disabled where an engine offers nothing: a control that
+// can only ever do nothing is worse than no control.
+//
+// They sit inside Policy rather than in a tab of their own because they are not
+// a separate subject: stored code is the one thing that can reach past a table
+// and field rule, and what it may do is decided by reading it against those
+// same rules. Split across two tabs, somebody set the rules on one screen and
+// never saw the switch that let code run under them.
+func capabilityFields(d datasource.Driver) []template.Field {
+	caps := d.Capabilities()
+	fields := make([]template.Field, 0, len(caps))
+	for _, c := range caps {
+		help := c.Help
+		if c.Warn != "" {
+			// The warning leads, because it is the part somebody skimming needs.
+			help = c.Warn
+			if c.Help != "" {
+				help = c.Warn + " " + c.Help
+			}
+		}
+		fields = append(fields, template.Field{
+			Key:   "allow." + c.Key,
+			Label: c.Label,
+			Type:  template.FieldCheckbox,
+			Help:  help,
+			Span:  6,
+		})
+	}
+	return fields
 }
 
 // policySection is what this tool may see of the database. It comes last
 // because it is the one part of the form that is about the assistant rather
 // than about the connection.
-func policySection() template.Section {
+func policySection(d datasource.Driver) template.Section {
+	fields := []template.Field{
+		{
+			Key: "policy.table_mode", Label: "Table rule", Type: template.FieldSelect, Required: true,
+			Options: modeChoices("tables"),
+			// A new tool starts as a denylist with nothing in it, which is the
+			// tool as it was before there was a policy at all: it sees the whole
+			// database, and an administrator narrows it when they mean to.
+			Default: string(sqlguard.ModeDenylist), Span: 3,
+		},
+		{
+			Key: "policy.field_mode", Label: "Field rule", Type: template.FieldSelect, Required: true,
+			Options: modeChoices("fields"),
+			Default: string(sqlguard.ModeDenylist), Span: 3,
+		},
+		{
+			Key: "policy.tables", Label: "Tables", Type: template.FieldTextarea,
+			Help: "One per line: orders, log_*. Blank with a denylist means every table is in reach.",
+		},
+		{
+			Key: "policy.fields", Label: "Fields", Type: template.FieldTextarea,
+			Help: "One per line, each with its table: customers.ssn, *.password. Blank with a denylist means nothing is hidden.",
+		},
+	}
 	return template.Section{
 		Title: "Policy",
-		Hint: "What this tool may see. Leave it blank and it sees everything the account it connects as can reach.\n\n" +
-			"- Tables: a denylist reaches everything except what you list; an allowlist reaches only what you list.\n" +
-			"- Fields: a denylist hides the fields you list; an allowlist shows only the fields you list, and only for the tables it names, so a field added to one of those tables later is hidden from the day it appears.\n" +
-			"- One entry per line. A table is written on its own (orders, log_*). A field is written with the table it belongs to (customers.ssn, customers.*, *.password). A * stands for any run of characters.\n" +
-			"- A hidden field comes back as " + sqlguard.Hidden + " wherever it is selected, on its own or inside an expression. It can still be used to decide which rows come back, what order they are in, and what they join to: what is kept back is the value, not the field.\n" +
-			"- A query that asks about a hidden field gets an honest answer about it (how many rows match, which come first), so somebody determined can narrow a value down a question at a time. What this guarantees is that the value itself is never in the answer.\n\n" +
-			"The statement is read before it runs, so a table you keep back is out of reach through a view, a WITH, or a subquery as surely as directly, and it is left out when the tables are listed. This stops a mistake and closes the ways round a list of names; " +
-			"what really bounds this tool is the account it connects as, so take the grant away as well.",
-		Fields: []template.Field{
-			{
-				Key: "policy.table_mode", Label: "Table rule", Type: template.FieldSelect, Required: true,
-				Options: modeChoices("tables"),
-				// A new tool starts as a denylist with nothing in it, which is the
-				// tool as it was before there was a policy at all: it sees the whole
-				// database, and an administrator narrows it when they mean to.
-				Default: string(sqlguard.ModeDenylist), Span: 3,
-			},
-			{
-				Key: "policy.field_mode", Label: "Field rule", Type: template.FieldSelect, Required: true,
-				Options: modeChoices("fields"),
-				Default: string(sqlguard.ModeDenylist), Span: 3,
-			},
-			{
-				Key: "policy.tables", Label: "Tables", Type: template.FieldTextarea,
-				Help: "Read as the table rule says. Blank with a denylist means every table is in reach.",
-			},
-			{
-				Key: "policy.fields", Label: "Fields", Type: template.FieldTextarea,
-				Help: "Each one written as table.field. Read as the field rule says; blank with a denylist means nothing is hidden.",
-			},
-		},
+		Hint: "Limit what this tool can see. Blank lists mean it sees everything the account it connects as can reach.\n\n" +
+			"- Denylist: everything except what you list. Allowlist: only what you list.\n" +
+			"- One entry per line. Tables on their own (orders, log_*), fields with their table (customers.ssn, *.password). A * matches any characters.\n" +
+			"- A hidden field comes back as " + sqlguard.Hidden + ". It still works in WHERE, ORDER BY, GROUP BY and joins.\n\n" +
+			"The rules hold through views, CTEs and subqueries. They are not a hard boundary: a hidden value can still be narrowed down by filtering on it, so take the grant away from the database account too.",
+		Fields: append(fields, capabilityFields(d)...),
 	}
 }
 
@@ -536,9 +576,9 @@ func lines(list string) []string {
 // heavyQueryMessage is what the model reads when a read was cancelled for
 // running too long: what happened, and the plan to fix it.
 func heavyQueryMessage(plan string) string {
-	return fmt.Sprintf("the query did not return within %d seconds and was cancelled on the database, so no rows came back. "+
-		"It looks heavy: a full table scan, a missing index, or a very large result. Here is its query plan (EXPLAIN); use it "+
-		"to narrow the query with a WHERE, a smaller LIMIT, or an indexed column, then try again:\n\n%s",
+	return fmt.Sprintf("The query did not return within %d seconds and was cancelled on the database, so no rows "+
+		"came back. It looks heavy: a full table scan, a missing index, or a very large result. Its plan (EXPLAIN) "+
+		"is below; narrow the query with a WHERE, a smaller LIMIT, or an indexed column, then try again:\n\n%s",
 		int(queryTimeout.Seconds()), plan)
 }
 
@@ -618,8 +658,12 @@ func describeDescription(label, driver string, access Access) string {
 	}
 	// Short: how to write a good query against THIS database, and what it will
 	// refuse, is what its guide is for (tool_guide).
-	return fmt.Sprintf("%s a %s database by running SQL (%s). The statement goes in sql, values for "+
-		"its ? placeholders in params. Read its guide before writing a query.",
+	// The placeholder is the engine's own and saying "?" was wrong on two of the
+	// three: SQL Server wants @p1 and Postgres wants $1. Measured, an agent sent
+	// a ? to SQL Server and got "Incorrect syntax near '?'" back. The dialect
+	// already says which; this stops the description contradicting it.
+	return fmt.Sprintf("%s a %s database by running SQL (%s). The statement goes in sql and its "+
+		"parameter values in params. Read its guide before writing a query.",
 		verb, driver, label)
 }
 
@@ -630,5 +674,12 @@ func cleanDBError(err error) string {
 	for _, prefix := range []string{"run query: ", "run statement: ", "read row: ", "read rows: ", "read columns: "} {
 		msg = strings.TrimPrefix(msg, prefix)
 	}
-	return "the query could not be run: " + msg
+	// "the database rejected it" rather than "the query could not be run",
+	// because the query DID run and this is the answer. Most of what arrives
+	// here is the database doing its job: a constraint, a check, a stored
+	// routine raising its own error. Measured over a real session, seventeen of
+	// twenty-five failures were a procedure's own RAISERROR, every one of them
+	// labelled as though this tool had broken, which invites a model to try the
+	// same thing a different way instead of reading what it was told.
+	return "The database rejected it: " + msg
 }

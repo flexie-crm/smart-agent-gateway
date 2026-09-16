@@ -50,6 +50,12 @@ func (a *analysis) query(sel *pgq.SelectStmt, parent *scope) {
 	for _, window := range sel.GetWindowClause() {
 		a.expression(window, s, nil)
 	}
+	// DISTINCT ON (expr): the expressions decide which row survives and are not
+	// returned unless the select list names them too. Missed here, the sweep saw
+	// a column nobody had accounted for and refused an ordinary query.
+	for _, distinct := range sel.GetDistinctClause() {
+		a.expression(distinct, s, nil)
+	}
 	a.expression(sel.GetLimitCount(), s, nil)
 	a.expression(sel.GetLimitOffset(), s, nil)
 	for _, values := range sel.GetValuesLists() {
@@ -179,19 +185,60 @@ func (a *analysis) delete(stmt *pgq.DeleteStmt, parent *scope) {
 	a.returning(stmt.GetReturningList(), s)
 }
 
+// withClause reads a WITH, IN THE ORDER IT WAS WRITTEN.
+//
+// The order is the whole point, and this used to register every name first and
+// walk the bodies afterwards. SQL says a CTE body does not see its own name and
+// does not see one written after it, so the database resolves either of those to
+// the TABLE of that name:
+//
+//	WITH secret_keys AS (SELECT * FROM secret_keys) SELECT * FROM secret_keys
+//
+// reads the real secret_keys. Registering the names up front made the body's own
+// reference look like the CTE, and the policy was never asked about the one
+// table it was written to keep back. Measured against a live server before this
+// was written: the row came back.
+//
+// RECURSIVE is the exception, and the only one: there the name IS in scope
+// inside its own body, because that is what the recursion is made of.
 func (a *analysis) withClause(with *pgq.WithClause, s *scope) {
 	if with == nil {
 		return
 	}
 	for _, cte := range with.GetCtes() {
-		if c := cte.GetCommonTableExpr(); c != nil {
-			s.ctes[strings.ToLower(c.GetCtename())] = true
+		c := cte.GetCommonTableExpr()
+		if c == nil {
+			continue
 		}
-	}
-	for _, cte := range with.GetCtes() {
-		if c := cte.GetCommonTableExpr(); c != nil {
-			a.statementIn(c.GetCtequery(), s)
+		name := strings.ToLower(c.GetCtename())
+
+		// The body is read under a frame of its own, holding exactly the names
+		// in scope for it: the siblings written before it, plus its own when the
+		// WITH says RECURSIVE. A snapshot rather than the live set, because what
+		// a name turns out to be is decided after the whole walk, by which time
+		// the set below would hold every name in the WITH.
+		//
+		// Its parent is the query OUTSIDE this one, not this one: a body sees
+		// neither the rest of this WITH nor this query's own FROM. It is
+		// deliberately not registered as a scope, because it brings in no
+		// sources and nothing is ever rewritten in it.
+		body := &scope{
+			parent:  s.parent,
+			feeds:   a.feeding > 0,
+			ctes:    map[string]bool{},
+			sources: map[string]*source{},
 		}
+		for earlier := range s.ctes {
+			body.ctes[earlier] = true
+		}
+		if with.GetRecursive() {
+			body.ctes[name] = true
+		}
+		a.statementIn(c.GetCtequery(), body)
+
+		// And only now is the name in scope, for the CTEs after it and for the
+		// query that owns the WITH.
+		s.ctes[name] = true
 	}
 }
 
@@ -251,7 +298,7 @@ func (a *analysis) from(node *pgq.Node, s *scope) {
 			a.expression(f, s, nil)
 		}
 	default:
-		a.refuse("this tool could not work out which tables that statement reads, so it did not run it")
+		a.refuse("Which tables that statement reads could not be established. Write the query a plainer way.")
 	}
 }
 

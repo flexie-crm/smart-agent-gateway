@@ -79,7 +79,7 @@ func (a *analysis) expandStar(s *scope, qualifier string) (fields []*pgq.Node, n
 	if qualifier != "" {
 		src, found := s.sources[qualifier]
 		if !found {
-			a.refuse("this tool could not work out what %s.* stands for, so it did not run the statement", qualifier)
+			a.refuse("What %s.* stands for could not be established. Name the columns you want.", qualifier)
 			return nil, false, false
 		}
 		covered = []*source{src}
@@ -102,7 +102,7 @@ func (a *analysis) expandStar(s *scope, qualifier string) (fields []*pgq.Node, n
 		// Replacing a hidden one there would not hide anything: it would store
 		// the stand-in over the real value, permanently, and the control would be
 		// the thing doing the damage.
-		a.refuse("this statement writes rows read with *, and one of those columns is hidden in this tool. " +
+		a.refuse("This statement writes rows read with *, and one of those columns is hidden. " +
 			"Name the columns you mean to write, leaving the hidden one out.")
 		return nil, false, false
 	}
@@ -110,8 +110,8 @@ func (a *analysis) expandStar(s *scope, qualifier string) (fields []*pgq.Node, n
 	for _, src := range covered {
 		columns, known := a.columnsOf(src)
 		if !known {
-			a.refuse("this tool could not work out which columns * stands for here, and one of the tables has a hidden " +
-				"column, so it did not run the statement. Name the columns you want.")
+			a.refuse("Which columns * stands for could not be established, and one of the tables has a hidden " +
+				"field. Name the columns you want.")
 			return nil, false, false
 		}
 		for _, column := range columns {
@@ -194,7 +194,7 @@ func (a *analysis) narrowCatalog(s *scope) {
 		if s.sel == nil {
 			// A statement that changes rows has no WHERE this can be added to in
 			// one place, and half a narrowing is worse than none.
-			a.refuse("this tool does not read information_schema as part of a statement that changes rows. " +
+			a.refuse("You are not permitted to read information_schema inside a statement that changes rows. " +
 				"Ask what the database holds with a SELECT of its own.")
 			return
 		}

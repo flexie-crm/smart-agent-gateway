@@ -36,6 +36,28 @@ The desktop applications carry a copy of MariaDB, which is distributed under the
 GNU General Public License version 2. It is included unmodified and is executed
 as a separate program; the applications communicate with it over a socket.
 
+The server carries the code it uses to read Transact-SQL in
+orchestrator/lib/sqlserver, which is the only third-party source held in this
+repository rather than fetched by a package manager. Three licences apply to it
+and all three are permissive:
+
+  * The parsing engine is BSD 3-Clause, Copyright (c) 2012-2023 The ANTLR
+    Project, taken from github.com/antlr4-go/antlr/v4 v4.13.1. One line of it was
+    changed, replacing golang.org/x/exp/slices with the standard library's
+    slices. See lib/sqlserver/antlr/LICENSE.
+
+  * The generated parser is BSD 3-Clause, Copyright (c) 2025 Bytebase, taken from
+    github.com/bytebase/parser at commit 57b6ef7a2640. See
+    lib/sqlserver/tsql/LICENSE.bytebase.
+
+  * The grammar it is generated from (TSqlLexer.g4, TSqlParser.g4) is MIT, from
+    the antlr/grammars-v4 project, with five copyright holders named in the file
+    itself. See lib/sqlserver/tsql/LICENSE.grammar.
+
+All three require their notices to be kept with the code, which is why those
+files sit beside it and must not be removed. None of them imposes any obligation
+on the rest of this work.
+
 Every other dependency and its licence is listed by the package manager of the
 part that uses it: go.mod for the server, package.json for the front ends, and
 Cargo.toml for the desktop shells and the inference node.
