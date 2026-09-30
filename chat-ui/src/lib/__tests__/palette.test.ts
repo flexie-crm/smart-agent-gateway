@@ -28,6 +28,28 @@ function block(selector: string): Record<string, string> {
   return out
 }
 
+/** The hue angle and the chroma of an oklch colour. */
+function hueOf(colour: string): number {
+  return Number(parts(colour)[2])
+}
+
+/**
+ * How much colour it has. Needed alongside the hue, because a hue angle means
+ * nothing without it: a grey written as oklch(0.92 0.003 255) has a nominal
+ * hue of 255, which is NUMERICALLY close to a blue at 248 while having no
+ * colour at all. A rule that compared only hues passed a grey border on a blue
+ * card, which is the mismatch it was written to catch.
+ */
+function chromaOf(colour: string): number {
+  return Number(parts(colour)[1])
+}
+
+function parts(colour: string): [number, number, number] {
+  const m = colour.match(/oklch\(([\d.]+)\s+([\d.]+)\s+([\d.]+)/)
+  if (!m) throw new Error(`not an oklch colour: ${colour}`)
+  return [Number(m[1]), Number(m[2]), Number(m[3])]
+}
+
 /** oklch(L C H) to linear sRGB, which is what luminance is measured in. */
 function linear(colour: string): [number, number, number] {
   const m = colour.match(/oklch\(([\d.]+)\s+([\d.]+)\s+([\d.]+)/)
@@ -90,9 +112,23 @@ it('keeps quiet text readable at the small sizes an interface uses it at', () =>
     // conversation, and it is the thing that repeats most.
     expect(contrast(night['--said-foreground'], night['--said'])).toBeGreaterThan(7)
     expect(luminance(night['--said'])).toBeLessThan(luminance(night['--foreground']))
-    expect(Math.abs(lightnessOf(night['--said']) - lightnessOf(night['--background']))).toBeLessThan(
-      0.1,
-    )
+
+    // Measured against the page rather than compared in lightness, and the
+    // rule changed with the colour. It used to require the surface to sit
+    // within 0.1 of the background's lightness, which is the right rule for a
+    // GREY card: lightness is the only thing that can separate one from the
+    // page, so a grey that is much lighter is just a glare.
+    //
+    // This surface is blue, so hue separates it and lightness does not have to.
+    // What still has to hold is that it is a surface and not a light, and the
+    // quantity for that is luminance against the page: the blue is 1.58:1,
+    // where the grey it replaced was 1.20:1 and a white card would be 16.7:1.
+    // So the ceiling is on the ratio, well below a card, and there is a floor
+    // too, because the grey was close enough to the page that a short message
+    // read as part of the answer above it.
+    const againstThePage = contrast(night['--said'], night['--background'])
+    expect(againstThePage).toBeGreaterThan(1.25)
+    expect(againstThePage).toBeLessThan(2.5)
   })
 
   it('carries a hint of colour, so it is a material rather than grey plastic', () => {
@@ -134,5 +170,33 @@ it('is not white behind black either', () => {
     expect(contrast(day['--foreground'], day['--background'])).toBeGreaterThan(7)
     expect(contrast(day['--muted-foreground'], day['--background'])).toBeGreaterThan(4)
     expect(contrast(day['--said-foreground'], day['--said'])).toBeGreaterThan(7)
+  })
+
+  it('shows what the person said as a card, not as the page', () => {
+    // The daylight half of the night rule above, and the same quantity, so the
+    // two are comparable: how far the surface is from the page it sits on.
+    //
+    // A near-white card is the failure here, the mirror of a lamp at night: a
+    // short message reads as part of the answer above it because nothing tells
+    // them apart. The pale blue is 1.0865:1 against the page where the grey it
+    // replaced was 1.0599:1, so the floor sits between them. The ceiling keeps
+    // it a card rather than a slab: a saturated blue at the same lightness
+    // measures 1.52:1.
+    //
+    // The page is oklch(0.988 ...) and not white, which matters: the first
+    // version of these bounds was computed against pure white and put the
+    // floor above the value it was meant to admit. The numbers here are the
+    // ones this file's own arithmetic produces.
+    const againstThePage = contrast(day['--said'], day['--background'])
+    expect(againstThePage).toBeGreaterThan(1.07)
+    expect(againstThePage).toBeLessThan(1.3)
+
+    // And the edge around it belongs to the card. A grey hairline on a blue
+    // card is the mismatch this catches, and it takes BOTH parts: the border
+    // has to carry as much colour as the fill, and carry it at the same hue.
+    // Hue alone passed the grey, whose nominal 255 sits 7 degrees from the
+    // fill's 248 while being colourless.
+    expect(chromaOf(day['--said-border'])).toBeGreaterThan(chromaOf(day['--said']) * 0.5)
+    expect(Math.abs(hueOf(day['--said-border']) - hueOf(day['--said']))).toBeLessThan(20)
   })
 })

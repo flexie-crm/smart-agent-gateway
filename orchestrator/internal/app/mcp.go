@@ -12,6 +12,7 @@ import (
 
 	"flexie.io/sag/internal/mcpclient"
 	"flexie.io/sag/internal/model"
+	"flexie.io/sag/internal/oauthclient"
 	"flexie.io/sag/internal/tool"
 )
 
@@ -19,6 +20,24 @@ import (
 // the wire client, and the tool projection. Secrets are opened here and only
 // here; everything below the store holds sealed bytes, everything above holds
 // a bearer for the length of one errand.
+
+// mcpClientAuth is how we prove ourselves at an MCP server's token endpoint.
+//
+// Read from what the server ADVERTISED, which is the difference from a custom
+// tool: an MCP server publishes token_endpoint_auth_methods_supported and we
+// walked its metadata to get here, so there is nothing for anybody to choose.
+// Basic when it says nothing, which is what the specification says to assume.
+func mcpClientAuth(d *oauthclient.Discovery) oauthclient.ClientAuth {
+	for _, m := range d.TokenEndpointAuthMethods {
+		if m == string(oauthclient.ClientSecretPost) {
+			return oauthclient.ClientSecretPost
+		}
+		if m == string(oauthclient.ClientSecretBasic) {
+			return oauthclient.ClientSecretBasic
+		}
+	}
+	return oauthclient.ClientSecretBasic
+}
 
 // mcpCallbackPath is where the remote authorization server sends the person
 // back. It is registered unauthenticated: a browser mid-redirect carries no
@@ -107,7 +126,8 @@ func (a *App) mcpOAuthBearer(ctx context.Context, m *model.MCPServer) (string, e
 		return "", err
 	}
 
-	tokens, err := mcpclient.Refresh(ctx, discovery, current.OAuthClientID, clientSecret, string(refreshToken))
+	tokens, err := oauthclient.Refresh(ctx, discovery, current.OAuthClientID, clientSecret, string(refreshToken),
+		mcpClientAuth(discovery))
 	if err != nil {
 		return "", fmt.Errorf("the service refused to renew the connection: %w", err)
 	}
@@ -121,7 +141,7 @@ func (a *App) mcpOAuthBearer(ctx context.Context, m *model.MCPServer) (string, e
 	return tokens.AccessToken, nil
 }
 
-func (a *App) storeMCPTokens(ctx context.Context, serverID int64, tokens *mcpclient.Tokens) error {
+func (a *App) storeMCPTokens(ctx context.Context, serverID int64, tokens *oauthclient.Tokens) error {
 	access, err := a.Keyring.Seal([]byte(tokens.AccessToken))
 	if err != nil {
 		return fmt.Errorf("seal access token: %w", err)
@@ -144,11 +164,11 @@ func (a *App) openOptional(sealed []byte) (string, error) {
 	return string(value), nil
 }
 
-func (a *App) mcpDiscovery(m *model.MCPServer) (*mcpclient.Discovery, error) {
+func (a *App) mcpDiscovery(m *model.MCPServer) (*oauthclient.Discovery, error) {
 	if len(m.OAuthMetadata) == 0 {
 		return nil, fmt.Errorf("the connection has no cached authorization metadata; connect it again")
 	}
-	d := &mcpclient.Discovery{}
+	d := &oauthclient.Discovery{}
 	if err := json.Unmarshal(m.OAuthMetadata, d); err != nil {
 		return nil, fmt.Errorf("read cached authorization metadata: %w", err)
 	}
@@ -179,7 +199,7 @@ func (a *App) BeginMCPConnect(ctx context.Context, workspaceID, userID, serverID
 		return "", fmt.Errorf("the connection does not use OAuth")
 	}
 
-	discovery, err := mcpclient.Discover(ctx, m.URL)
+	discovery, err := oauthclient.Discover(ctx, m.URL)
 	if err != nil {
 		return "", err
 	}
@@ -223,16 +243,16 @@ func (a *App) BeginMCPConnect(ctx context.Context, workspaceID, userID, serverID
 		// there is no secret. A deployment publishes its own document; a working
 		// copy or the personal edition borrows the published one, because
 		// nothing outside can fetch a laptop.
-		clientID = mcpclient.ClientMetadataURL(
+		clientID = oauthclient.ClientMetadataURL(
 			a.Config.BaseURL, a.Config.Local(), a.Config.MCPClientMetadataURL)
 	case discovery.RegistrationEndpoint != "":
 		needsRegistration = true
 	default:
 		// Nothing left but to ask, which is the specification's last resort too.
-		return "", mcpclient.ErrNoClientRegistration
+		return "", oauthclient.ErrNoClientRegistration
 	}
 	if needsRegistration {
-		issued, secret, granted, err := mcpclient.Register(ctx, discovery, a.MCPRedirectURI())
+		issued, secret, granted, err := oauthclient.Register(ctx, discovery, a.MCPRedirectURI())
 		if err != nil {
 			return "", err
 		}
@@ -280,7 +300,7 @@ func (a *App) BeginMCPConnect(ctx context.Context, workspaceID, userID, serverID
 		}
 	}
 
-	verifier, err := mcpclient.NewVerifier()
+	verifier, err := oauthclient.NewVerifier()
 	if err != nil {
 		return "", err
 	}
@@ -294,7 +314,9 @@ func (a *App) BeginMCPConnect(ctx context.Context, workspaceID, userID, serverID
 	if err != nil {
 		return "", err
 	}
-	return mcpclient.AuthorizeURL(discovery, clientID, a.MCPRedirectURI(), state, verifier), nil
+	// No extra parameters: an MCP server's requirements come out of its own
+	// metadata document, so there is nothing for an administrator to add.
+	return oauthclient.AuthorizeURL(discovery, clientID, a.MCPRedirectURI(), state, verifier, nil), nil
 }
 
 // CompleteMCPConnect finishes the dance: it redeems the code, seals the
@@ -332,8 +354,8 @@ func (a *App) completeMCPConnect(ctx context.Context, claim mcpConnectState, cod
 		return nil, model.MCPSyncResult{}, err
 	}
 
-	tokens, err := mcpclient.Exchange(ctx, discovery, m.OAuthClientID, clientSecret,
-		a.MCPRedirectURI(), code, claim.Verifier)
+	tokens, err := oauthclient.Exchange(ctx, discovery, m.OAuthClientID, clientSecret,
+		a.MCPRedirectURI(), code, claim.Verifier, mcpClientAuth(discovery))
 	if err != nil {
 		return nil, model.MCPSyncResult{}, err
 	}
@@ -379,7 +401,7 @@ func mcpConnectNotice(claim mcpConnectState, m *model.MCPServer, result model.MC
 // access"), that reason IS the answer and a generic "try again" printed over it
 // is a step backwards. Otherwise there is nothing to add but what to do next.
 func MCPConnectReason(err error) string {
-	var remote *mcpclient.RemoteOAuthError
+	var remote *oauthclient.RemoteOAuthError
 	if errors.As(err, &remote) && remote.Reason != "" {
 		return remote.Reason
 	}

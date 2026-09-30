@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"flexie.io/sag/internal/model"
 	"flexie.io/sag/internal/tool"
 	"flexie.io/sag/internal/tools/template"
 )
@@ -65,7 +66,7 @@ func TestCreateAndLoadACustomSSHTool(t *testing.T) {
 
 	created, err := e.app.CreateCustomTool(ctx, e.ws.ID, "ssh", template.Input{
 		Alias: "production", Variant: "ssh", Settings: settings,
-	})
+	}, nil, model.Nobody())
 	if err != nil {
 		t.Fatalf("create custom tool: %v", err)
 	}
@@ -104,7 +105,7 @@ func TestCreateAndLoadACustomSSHTool(t *testing.T) {
 
 	// It resolves into a loadout with its handler, its guide, the system-owned
 	// note naming the machine, and topics namespaced to this tool.
-	loadout, err := e.app.Loadout(ctx, e.ws.ID, user.ID, "", []string{"ssh_production"}, nil, nil, tool.OwnerOfAgent())
+	loadout, err := e.app.Loadout(ctx, e.ws.ID, user.ID, "", []string{"ssh_production"}, nil, nil, tool.OwnerOfAgent(), model.Nobody())
 	if err != nil {
 		t.Fatalf("loadout: %v", err)
 	}
@@ -171,7 +172,7 @@ func TestUpdateCustomSSHToolKeepsItsCredential(t *testing.T) {
 	srv := startSSHServer(t)
 	created, err := e.app.CreateCustomTool(ctx, e.ws.ID, "ssh", template.Input{
 		Alias: "staging", Variant: "ssh", Settings: sshSettings(srv),
-	})
+	}, nil, model.Nobody())
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -201,7 +202,7 @@ func TestUpdateCustomSSHToolKeepsItsCredential(t *testing.T) {
 	if _, err := e.app.UpdateCustomTool(ctx, e.ws.ID, created.ID, template.Input{
 		Settings:    edited,
 		Description: "The staging box.",
-	}); err != nil {
+	}, nil, model.Nobody()); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 
@@ -229,7 +230,7 @@ func TestUpdateCustomSSHToolKeepsItsCredential(t *testing.T) {
 
 	// The edited tool binds, and the carried key is still usable: the command it
 	// no longer permits is refused, and the one it does reaches the connection.
-	loadout, err := e.app.Loadout(ctx, e.ws.ID, user.ID, "", []string{"ssh_staging"}, nil, nil, tool.OwnerOfAgent())
+	loadout, err := e.app.Loadout(ctx, e.ws.ID, user.ID, "", []string{"ssh_staging"}, nil, nil, tool.OwnerOfAgent(), model.Nobody())
 	if err != nil {
 		t.Fatalf("loadout: %v", err)
 	}
@@ -276,7 +277,7 @@ func TestCreateCustomSSHToolRefusesBrokenSettings(t *testing.T) {
 			tc.change(settings)
 			_, err := e.app.CreateCustomTool(ctx, e.ws.ID, "ssh", template.Input{
 				Alias: "broken", Variant: "ssh", Settings: settings,
-			})
+			}, nil, model.Nobody())
 			if err == nil {
 				t.Fatal("a broken configuration was stored")
 			}
@@ -304,7 +305,7 @@ func TestACustomSSHToolWithNoCredentialIsRefused(t *testing.T) {
 
 	_, err := e.app.CreateCustomTool(ctx, e.ws.ID, "ssh", template.Input{
 		Alias: "nocredential", Variant: "ssh", Settings: settings,
-	})
+	}, nil, model.Nobody())
 	if err == nil {
 		t.Fatal("a tool with nothing to sign in with was stored")
 	}
@@ -337,7 +338,7 @@ func TestCreateCustomSSHToolRefusesAServerItCannotReach(t *testing.T) {
 
 			_, err := e.app.CreateCustomTool(ctx, e.ws.ID, "ssh", template.Input{
 				Alias: "unreachable", Variant: "ssh", Settings: settings,
-			})
+			}, nil, model.Nobody())
 			if err == nil {
 				t.Fatal("a tool was created for a server it cannot connect to")
 			}
@@ -361,7 +362,7 @@ func TestEditPrefillFillsParametersAddedSinceTheToolWasMade(t *testing.T) {
 
 	created, err := e.app.CreateCustomTool(ctx, e.ws.ID, "ssh", template.Input{
 		Alias: "prefill", Variant: "ssh", Settings: sshSettings(startSSHServer(t)),
-	})
+	}, nil, model.Nobody())
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -369,7 +370,7 @@ func TestEditPrefillFillsParametersAddedSinceTheToolWasMade(t *testing.T) {
 	// A tool stored by an older build: its schema knows only one parameter.
 	created.InputSchema = json.RawMessage(
 		`{"type":"object","properties":{"command":{"type":"string","description":"Commands for the release box."}}}`)
-	if err := e.app.Store.Tools().UpdateCustom(ctx, created); err != nil {
+	if err := e.app.Store.Tools().UpdateCustom(ctx, created, model.Nobody()); err != nil {
 		t.Fatalf("store an older schema: %v", err)
 	}
 

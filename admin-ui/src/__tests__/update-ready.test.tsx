@@ -12,9 +12,10 @@ import { UpdateReady } from '@/components/UpdateReady'
 type Handler = (event: { payload?: { version?: string } }) => void
 
 /** A shell that records what was listened for, and can send an event. */
-function shell() {
+function shell(running = '0.1.0') {
   const listeners = new Map<string, Handler>()
   ;(window as unknown as { __TAURI__: unknown }).__TAURI__ = {
+    app: { getVersion: () => Promise.resolve(running) },
     event: {
       listen: (name: string, handler: Handler) => {
         listeners.set(name, handler)
@@ -79,6 +80,26 @@ describe('the update chip', () => {
     expect(screen.queryByText(/installed/i)).not.toBeInTheDocument()
   })
 
+  it('shows nothing in a browser even when its storage holds a version', () => {
+    // The test above cannot tell whether the shell is what is being checked,
+    // because there is nothing in storage for it to find either way. This one
+    // puts a version there first, so the only thing that can keep the chip away
+    // is asking whether there is an application at all.
+    //
+    // It matters because the console is ONE build served in two places: inside
+    // the application, where an update really can be waiting, and in a browser
+    // against a server, where nothing installs anything and a chip telling
+    // somebody to reopen would be advice about a thing that does not exist.
+    window.localStorage.setItem('sag.update-ready', '0.9.9')
+    delete (window as unknown as { __TAURI__?: unknown }).__TAURI__
+    render(
+      <StrictMode>
+        <UpdateReady />
+      </StrictMode>,
+    )
+    expect(screen.queryByText(/installed/i)).not.toBeInTheDocument()
+  })
+
   it('is still there after a reload, because the update still is', async () => {
     // The update stays pending until somebody reopens, so a refresh that
     // forgets it is a refresh that tells them nothing is waiting. The first
@@ -103,17 +124,32 @@ describe('the update chip', () => {
     expect(await screen.findByText(/Version 0\.1\.4 is installed/)).toBeInTheDocument()
   })
 
-  it('says nothing on a fresh launch, which is a new origin with an empty store', () => {
-    // Not a detail of the test: the gateway takes a free port every launch
-    // (gateway.rs:513), so a reopened application cannot see what the previous
-    // one wrote. That is what clears the chip, rather than any code here.
-    window.localStorage.clear()
-    shell()
+  it('forgets the saved version once it is the one running', async () => {
+    // 0.1.19 on 25 September: the old process saved the notice, the application
+    // was reopened on the same port and so the same storage, and the new one
+    // read it back and said to reopen into the version it already was. A test
+    // with an empty store stood in for "a fresh launch" and could not fail.
+    window.localStorage.setItem('sag.update-ready', '0.1.19')
+    shell('0.1.19')
     render(
       <StrictMode>
         <UpdateReady />
       </StrictMode>,
     )
+    await waitFor(() => expect(window.localStorage.getItem('sag.update-ready')).toBeNull())
     expect(screen.queryByText(/installed/i)).not.toBeInTheDocument()
+  })
+
+  it('reads versions as numbers, so 0.1.10 is later than 0.1.9', async () => {
+    // As text, "0.1.10" sorts before "0.1.9", and a waiting update would be
+    // thrown away on the next reload.
+    window.localStorage.setItem('sag.update-ready', '0.1.10')
+    shell('0.1.9')
+    render(
+      <StrictMode>
+        <UpdateReady />
+      </StrictMode>,
+    )
+    expect(await screen.findByText(/Version 0\.1\.10 is installed/)).toBeInTheDocument()
   })
 })

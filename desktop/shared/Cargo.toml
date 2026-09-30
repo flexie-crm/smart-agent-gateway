@@ -45,7 +45,25 @@ grep-searcher = "0.1"
 # against. Already in this workspace's tree (tauri depends on it), so it costs
 # nothing to build and nothing to trust that is not already trusted.
 sha2 = "0.10"
+# The network list's `filter` is a regular expression in Playwright's schema,
+# and it is theirs to define. Already in this workspace's tree (grep-regex
+# depends on it), so it costs nothing new to build and nothing new to trust.
+regex = "1"
+# A skill's assets reach this half encoded, because raw bytes cannot travel in
+# JSON. Already in this workspace's tree, so it costs nothing new to build.
+base64 = "0.22"
 dark-light = "3.0.0"
+# Fetching the browser the assistant drives, on first use. reqwest rather than
+# anything new because it is ALREADY in this crate's tree (tauri-plugin-updater
+# pulls it), on the same rustls the link uses, so it costs nothing to build and
+# nothing to trust that is not already trusted. Streamed to disk rather than
+# read into memory: the archive is a hundred megabytes.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
+# Unpacking it. The archives are mirrored from upstream UNCHANGED, so that the
+# digest we pin can be checked against the one its authors published; that
+# means taking the format they ship, which is a zip. Deflate only, which is what
+# those archives use, rather than the whole default set of codecs.
+zip = { version = "4", default-features = false, features = ["deflate"] }
 # Fetching the next version. Here rather than in each shell because the
 # behaviour is one behaviour: check quietly, install quietly, say so once.
 tauri-plugin-updater = "2"
@@ -68,7 +86,31 @@ objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView", "NSResponde
 # `unsafe { libc::killpg(..) }`. One call, and the last unsafe block in this
 # crate's production code: the syscall cannot corrupt memory, so what the block
 # bought was nothing and what it cost was a reader having to decide that.
-nix = { version = "0.29", features = ["signal"] }
+#
+# `resource` is setrlimit, which is what bounds a skill's script: a memory
+# ceiling and a processor ceiling, set in the child between fork and exec so
+# the child cannot lift its own hard limit. POSIX and current, rather than a
+# deprecated sandbox.
+nix = { version = "0.29", features = ["signal", "resource"] }
+
+[target.'cfg(windows)'.dependencies]
+# What Unix does with setrlimit and a process group, Windows does with one
+# object: a JOB. A child assigned to one cannot leave it and everything it
+# starts joins it, so a processor ceiling, a memory ceiling and "end everything
+# it started" are the same handle rather than three mechanisms that race each
+# other (tools/skill.rs).
+#
+# Already in this tree through Tauri, so it costs nothing new to build. The
+# features are the smallest set that compiles: CreateJobObjectW takes a
+# SECURITY_ATTRIBUTES pointer, which is why Win32_Security is here, and the
+# extended limit struct embeds IO_COUNTERS, which is why Win32_System_Threading
+# is.
+windows-sys = { version = "0.61", features = [
+	"Win32_Foundation",
+	"Win32_Security",
+	"Win32_System_JobObjects",
+	"Win32_System_Threading",
+] }
 
 [dev-dependencies]
 # The example that runs the real client on its own, so the Go side can drive

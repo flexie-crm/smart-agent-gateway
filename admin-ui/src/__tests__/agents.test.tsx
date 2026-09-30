@@ -63,7 +63,7 @@ function serve(
       if (url.includes('/form')) {
         return new Response(
           JSON.stringify(
-            agentForm ?? { agent: null, models: [], tools: [], brains: [] },
+            agentForm ?? { agent: null, models: [], tools: [], brains: [], skills: [] },
           ),
           { status: 200 },
         )
@@ -281,6 +281,7 @@ describe('what the gateway dialogs save', () => {
         tools: ['current_time'],
         confirm_tools: [],
         brains: [],
+        skills: [],
         file_rules: [],
         audio_model_id: null,
         memory_brain_id: null,
@@ -291,6 +292,7 @@ describe('what the gateway dialogs save', () => {
       models: [{ id: 4, label: 'Anthropic / claude-opus-4-8' }],
       tools: [{ id: 1, name: 'current_time', friendly_name: 'Current time', approval_locked: false }],
       brains: [],
+      skills: [],
     })
     render(
       <StrictMode>
@@ -335,6 +337,7 @@ describe('what the gateway dialogs save', () => {
         tools: ['nli_update_entity'],
         confirm_tools: [],
         brains: [],
+        skills: [],
         file_rules: [],
         audio_model_id: null,
         memory_brain_id: null,
@@ -354,6 +357,7 @@ describe('what the gateway dialogs save', () => {
         },
       ],
       brains: [],
+      skills: [],
     })
     render(
       <StrictMode>
@@ -375,5 +379,78 @@ describe('what the gateway dialogs save', () => {
     // Neither form of the identifier reaches the dialog.
     expect(screen.queryByText('nli_update_entity')).not.toBeInTheDocument()
     expect(screen.queryByText('update_entity')).not.toBeInTheDocument()
+  })
+
+  // A skill is available to an agent because somebody assigned it, not because
+  // it is in the workspace. So the dialog is where that happens, and it prefills
+  // from the same one answer everything else on it comes from.
+  it('assigns a skill from the agent dialog, and can take it away', async () => {
+    const wrote: { url: string; body: unknown }[] = []
+    serve(AGENTS[0], [AGENTS[1]], wrote, {
+      agent: {
+        id: 2,
+        key: 'finance',
+        name: 'Finance',
+        instructions: 'answer in euros',
+        model_id: 4,
+        reasoning: false,
+        status: 'active',
+        delegation_mode: 'auto',
+        tools: [],
+        confirm_tools: [],
+        brains: [],
+        skills: [7],
+        file_rules: [],
+        audio_model_id: null,
+        memory_brain_id: null,
+        approval_ttl_seconds: null,
+        max_iterations: null,
+        background_timeout_seconds: null,
+      },
+      models: [{ id: 4, label: 'Anthropic / claude-opus-4-8' }],
+      tools: [],
+      brains: [],
+      skills: [
+        { id: 7, name: 'PDF Toolkit', status: 'active' },
+        // A package that carried no title: `Label()` falls back to the handle,
+        // so what arrives as its name IS the handle and it stays identifiable.
+        { id: 8, name: 'payroll-checks', status: 'disabled' },
+        // Unchosen, active, and its title differs from the handle it would have
+        // ('invoice-tooling'). That combination is what makes the assertion
+        // below able to fail: a hint renders only on an UNCHOSEN option, so
+        // checking the chosen one for a handle checks a place a handle could
+        // never appear, and the test passed with the handle put back.
+        { id: 9, name: 'Invoice Tooling', status: 'active' },
+      ],
+    })
+    render(
+      <StrictMode>
+        <Agents />
+      </StrictMode>,
+    )
+    await screen.findByText('Finance')
+    fireEvent.click(screen.getByLabelText('Edit'))
+
+    // The one it holds is shown as held, by its name.
+    expect(await screen.findByText('PDF Toolkit')).toBeInTheDocument()
+
+    // The unchosen ones live in the picker's list, so it has to be opened: that
+    // is what somebody adding a skill does.
+    fireEvent.focus(screen.getByPlaceholderText('Add a skill…'))
+    expect(await screen.findByText('Invoice Tooling')).toBeInTheDocument()
+
+    // ONE name, and only the name. The handle is an identifier, so printing it
+    // under a perfectly good title says the same thing twice in two shapes.
+    expect(screen.queryByText(/invoice-tooling/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/pdf-processing/)).not.toBeInTheDocument()
+
+    // A skill that is switched off is still assignable and says which it is,
+    // rather than disappearing from a list somebody is looking for it in. That
+    // is a state, not an identifier, which is why it survives the rule above.
+    expect(screen.getByText('disabled')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(wrote).toHaveLength(1))
+    expect((wrote[0].body as Record<string, unknown>).skills).toEqual([7])
   })
 })

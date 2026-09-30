@@ -562,7 +562,13 @@ func (Analyzer) BodyKeepsPolicy(g *sqlguard.Guard, body string) (bool, string) {
 			sub.rewrite()
 		}
 		if sub.reason != "" {
-			return false, "has a body that is not permitted: " + sub.reason
+			// Composed the way the other two dialects compose it, which is what
+			// lowerFirst is for: without it the sentence reads "... is not
+			// permitted: You cannot ...", with a capital and a full stop in the
+			// middle of a clause. The three dialects have to refuse in the same
+			// words, or a rule explained to somebody on one engine reads as a
+			// different rule on another.
+			return false, "has a body that is not permitted: " + strings.TrimSuffix(lowerFirst(sub.reason), ".")
 		}
 		if sub.changed {
 			what := "a hidden field"

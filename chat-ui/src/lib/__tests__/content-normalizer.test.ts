@@ -298,3 +298,57 @@ describe('normalizeMarkdown (pipeline)', () => {
     expect(result).not.toMatch(/\[click/);
   });
 });
+
+describe('an underscore that is not emphasis', () => {
+  // The bug this exists for: a finished reply ended with a visible "_".
+  //
+  // The rule counted every single underscore and appended one when the total
+  // was odd, on the reasoning that an odd number means somebody opened italics
+  // and the stream has not closed them yet. Two kinds of underscore are not
+  // emphasis at all, and counting them made the total odd on ordinary text.
+
+  it('leaves snake_case alone, because CommonMark does', () => {
+    // An underscore flanked by word characters cannot open or close emphasis.
+    // That rule exists precisely so identifiers render as themselves, so a
+    // count that includes them is counting things markdown will not act on.
+    expect(normalizeMarkdown('The remedy is wait_for with text.')).toBe(
+      'The remedy is wait_for with text.',
+    )
+    // Three of them: odd, which is what made this visible.
+    expect(normalizeMarkdown('Use wait_for and exec_js_dom here.')).toBe(
+      'Use wait_for and exec_js_dom here.',
+    )
+    expect(normalizeMarkdown('save_session')).toBe('save_session')
+  })
+
+  it('leaves an underscore inside a code span alone', () => {
+    expect(normalizeMarkdown('The remedy is `wait_for` with `text`.')).toBe(
+      'The remedy is `wait_for` with `text`.',
+    )
+    expect(normalizeMarkdown('```\nwait_for\n```')).toBe('```\nwait_for\n```')
+    // And bold's double underscore, same reasoning: a name, not unclosed bold.
+    expect(normalizeMarkdown('`__init__` is a method')).toBe('`__init__` is a method')
+  })
+
+  it('still closes an italic the stream really did leave open', () => {
+    // The other side of the line. Removing the rule would fix the stray
+    // underscore and lose this, which is what the rule is for.
+    expect(normalizeMarkdown('This is _really important')).toBe('This is _really important_')
+    expect(normalizeMarkdown('a word and _another')).toBe('a word and _another_')
+  })
+
+  it('leaves a closed italic closed', () => {
+    expect(normalizeMarkdown('This is _really_ important')).toBe('This is _really_ important')
+  })
+
+  it('tells the two apart in one message', () => {
+    // The shape that actually appears: identifiers AND an italic still open.
+    expect(normalizeMarkdown('wait_for and exec_js_dom, and now _this')).toBe(
+      'wait_for and exec_js_dom, and now _this_',
+    )
+    // And identifiers with the italic already closed, which must stay as is.
+    expect(normalizeMarkdown('wait_for and _this_ and save_session')).toBe(
+      'wait_for and _this_ and save_session',
+    )
+  })
+})

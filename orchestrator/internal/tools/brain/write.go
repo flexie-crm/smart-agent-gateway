@@ -30,8 +30,8 @@ const (
 type WriteStore interface {
 	ReadStore
 	DocumentByTitle(ctx context.Context, workspaceID, categoryID int64, title string) (*model.BrainDocument, error)
-	CreateCategory(ctx context.Context, workspaceID int64, c *model.BrainCategory) error
-	SaveDocument(ctx context.Context, workspaceID int64, d *model.BrainDocument, related []int64) error
+	CreateCategory(ctx context.Context, workspaceID int64, c *model.BrainCategory, by model.Actor) error
+	SaveDocument(ctx context.Context, workspaceID int64, d *model.BrainDocument, related []int64, by model.Actor) error
 	DeleteDocument(ctx context.Context, workspaceID, id int64) error
 	DeleteCategory(ctx context.Context, workspaceID, id int64) error
 }
@@ -78,7 +78,7 @@ type writePlan struct {
 func NewWrite(st WriteStore) tool.Tool {
 	return tool.Tool{
 		Schema:   writeSchema(),
-		Handle:   WriteHandler(st, nil),
+		Handle:   WriteHandler(st, nil, model.Nobody()),
 		Validate: WriteValidator(st, nil),
 	}
 }
@@ -113,7 +113,11 @@ func WriteValidator(st WriteStore, allowed []int64) tool.Validator {
 // WriteHandler runs the write. It re-plans (so the resume checks the world as it
 // is now) and, if the plan still holds, executes it. Because Validate already
 // planned the same call, an approved write lands.
-func WriteHandler(st WriteStore, allowed []int64) tool.Handler {
+// `by` is who the writes are recorded as: the agent running this turn, bound
+// with its brains (tools.BindBrains) because both are facts about the turn. The
+// registration binds Nobody, exactly as it binds an empty allow-list: on its
+// own this tool reaches nothing, so there is nothing to attribute.
+func WriteHandler(st WriteStore, allowed []int64, by model.Actor) tool.Handler {
 	return func(ctx context.Context, call tool.Call) (tool.Result, error) {
 		var args writeArgs
 		if err := json.Unmarshal(call.Args, &args); err != nil {
@@ -126,7 +130,7 @@ func WriteHandler(st WriteStore, allowed []int64) tool.Handler {
 		if refusal != nil {
 			return *refusal, nil
 		}
-		return execute(ctx, st, call.WorkspaceID, p)
+		return execute(ctx, st, call.WorkspaceID, p, by)
 	}
 }
 
@@ -302,17 +306,17 @@ func planDeleteCategory(ctx context.Context, st WriteStore, ws int64, allowed []
 
 // execute performs a planned write. The plan is already validated, so the only
 // errors here are the store's own.
-func execute(ctx context.Context, st WriteStore, ws int64, p *writePlan) (tool.Result, error) {
+func execute(ctx context.Context, st WriteStore, ws int64, p *writePlan, by model.Actor) (tool.Result, error) {
 	switch p.op {
 	case opSaveCategory:
 		c := &model.BrainCategory{BrainID: p.brain.ID, Name: p.name, Description: p.description}
-		if err := st.CreateCategory(ctx, ws, c); err != nil {
+		if err := st.CreateCategory(ctx, ws, c, by); err != nil {
 			return tool.Result{}, err
 		}
 		return toolkit.Success(map[string]any{"saved": "category", "name": c.Name, "brain": p.brain.Name})
 	case opSaveDocument:
 		d := &model.BrainDocument{ID: p.docID, CategoryID: p.category.ID, Title: p.title, Content: p.content}
-		if err := st.SaveDocument(ctx, ws, d, p.related); err != nil {
+		if err := st.SaveDocument(ctx, ws, d, p.related, by); err != nil {
 			return tool.Result{}, err
 		}
 		return toolkit.Success(map[string]any{"saved": "document", "id": d.ID, "title": d.Title, "brain": p.brain.Name, "category": p.category.Name})
@@ -329,7 +333,7 @@ func execute(ctx context.Context, st WriteStore, ws int64, p *writePlan) (tool.R
 				return tool.Result{}, err
 			}
 			d := &model.BrainDocument{ID: id, CategoryID: p.category.ID, Title: pd.title, Content: pd.content}
-			if err := st.SaveDocument(ctx, ws, d, nil); err != nil {
+			if err := st.SaveDocument(ctx, ws, d, nil, by); err != nil {
 				return tool.Result{}, err
 			}
 			if id == 0 {

@@ -24,24 +24,32 @@ type vendorStore struct{ db *sqldb.DB }
 const vendorColumns = `v.id, v.workspace_id, v.vendor_key, v.name,
 	COALESCE(n.base_url, v.base_url), v.node_id,
 	COALESCE(n.key_enc, v.credentials_enc),
-	v.status, v.settings, v.created_at, v.updated_at`
+	v.status, v.settings,
+	COALESCE(v.created_by, 0), v.created_by_name,
+	COALESCE(v.updated_by, 0), v.updated_by_name,
+	v.created_at, v.updated_at`
 
 const vendorFrom = ` FROM ai_vendors v LEFT JOIN inference_nodes n ON n.id = v.node_id `
 
 // The store persists credentials exactly as handed to it: sealing happens in
 // the app layer, so no plaintext secret ever reaches SQL.
-func (s *vendorStore) Create(ctx context.Context, v *model.AIVendor) error {
+func (s *vendorStore) Create(ctx context.Context, v *model.AIVendor, by model.Actor) error {
 	now := time.Now().UTC()
 	v.CreatedAt, v.UpdatedAt = now, now
 	if v.Status == "" {
 		v.Status = model.StatusActive
 	}
+	v.Made(by)
+	v.Changed(by)
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO ai_vendors
-		 (workspace_id, vendor_key, name, base_url, node_id, credentials_enc, status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 (workspace_id, vendor_key, name, base_url, node_id, credentials_enc, status,
+		  created_by, created_by_name, updated_by, updated_by_name, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		v.WorkspaceID, v.VendorKey, v.Name, nullString(v.BaseURL), nullID(v.NodeID),
-		nullBytes(v.Credentials), v.Status, v.CreatedAt, v.UpdatedAt)
+		nullBytes(v.Credentials), v.Status,
+		nullID(v.CreatedBy), v.CreatedByName, nullID(v.UpdatedBy), v.UpdatedByName,
+		v.CreatedAt, v.UpdatedAt)
 	if err != nil {
 		return wrapWriteErr("insert vendor", err)
 	}
@@ -87,30 +95,35 @@ func (s *vendorStore) List(ctx context.Context, workspaceID int64) ([]*model.AIV
 // Update writes credentials only when a new sealed value is supplied: a
 // caller editing a vendor's name must not have to resend the secret, and an
 // absent secret must never blank the stored one.
-func (s *vendorStore) Update(ctx context.Context, v *model.AIVendor) error {
+func (s *vendorStore) Update(ctx context.Context, v *model.AIVendor, by model.Actor) error {
 	if err := requireExists(ctx, s.db, "update vendor",
 		`SELECT 1 FROM ai_vendors WHERE id = ? AND workspace_id = ?`, v.ID, v.WorkspaceID); err != nil {
 		return err
 	}
 	v.UpdatedAt = time.Now().UTC()
+	v.Changed(by)
 
 	// Two statements rather than one assembled from pieces. Whether the secret
 	// is being replaced is a decision, and a decision belongs in Go, not in a
 	// string that grows a clause.
 	if v.Credentials == nil {
 		if _, err := s.db.ExecContext(ctx,
-			`UPDATE ai_vendors SET name = ?, base_url = ?, status = ?, updated_at = ?
+			`UPDATE ai_vendors SET name = ?, base_url = ?, status = ?,
+			        updated_by = ?, updated_by_name = ?, updated_at = ?
 			 WHERE id = ? AND workspace_id = ?`,
-			v.Name, nullString(v.BaseURL), v.Status, v.UpdatedAt, v.ID, v.WorkspaceID); err != nil {
+			v.Name, nullString(v.BaseURL), v.Status,
+			nullID(v.UpdatedBy), v.UpdatedByName, v.UpdatedAt, v.ID, v.WorkspaceID); err != nil {
 			return wrapWriteErr("update vendor", err)
 		}
 		return nil
 	}
 
 	if _, err := s.db.ExecContext(ctx,
-		`UPDATE ai_vendors SET name = ?, base_url = ?, status = ?, updated_at = ?, credentials_enc = ?
+		`UPDATE ai_vendors SET name = ?, base_url = ?, status = ?,
+		        updated_by = ?, updated_by_name = ?, updated_at = ?, credentials_enc = ?
 		 WHERE id = ? AND workspace_id = ?`,
-		v.Name, nullString(v.BaseURL), v.Status, v.UpdatedAt, v.Credentials,
+		v.Name, nullString(v.BaseURL), v.Status,
+		nullID(v.UpdatedBy), v.UpdatedByName, v.UpdatedAt, v.Credentials,
 		v.ID, v.WorkspaceID); err != nil {
 		return wrapWriteErr("update vendor", err)
 	}
@@ -118,10 +131,14 @@ func (s *vendorStore) Update(ctx context.Context, v *model.AIVendor) error {
 }
 
 // ClearCredentials removes the stored secret without deleting the vendor.
-func (s *vendorStore) ClearCredentials(ctx context.Context, workspaceID, id int64) error {
+func (s *vendorStore) ClearCredentials(ctx context.Context, workspaceID, id int64, by model.Actor) error {
+	// Taking a secret away is an edit somebody made, so it is recorded like any
+	// other.
 	res, err := s.db.ExecContext(ctx,
-		`UPDATE ai_vendors SET credentials_enc = NULL, updated_at = ?
+		`UPDATE ai_vendors SET credentials_enc = NULL,
+		        updated_by = ?, updated_by_name = ?, updated_at = ?
 		 WHERE id = ? AND workspace_id = ? AND credentials_enc IS NOT NULL`,
+		nullID(by.UserID), by.Name,
 		time.Now().UTC(), id, workspaceID)
 	if err != nil {
 		return fmt.Errorf("clear vendor credentials: %w", err)
@@ -161,7 +178,9 @@ func scanVendor(row *sql.Row) (*model.AIVendor, error) {
 	var nodeID sql.NullInt64
 	var settings []byte
 	err := row.Scan(&v.ID, &v.WorkspaceID, &v.VendorKey, &v.Name, &baseURL, &nodeID, &v.Credentials,
-		&v.Status, &settings, &v.CreatedAt, &v.UpdatedAt)
+		&v.Status, &settings,
+		&v.CreatedBy, &v.CreatedByName, &v.UpdatedBy, &v.UpdatedByName,
+		&v.CreatedAt, &v.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -178,7 +197,9 @@ func scanVendorRow(rows *sql.Rows) (*model.AIVendor, error) {
 	var nodeID sql.NullInt64
 	var settings []byte
 	if err := rows.Scan(&v.ID, &v.WorkspaceID, &v.VendorKey, &v.Name, &baseURL, &nodeID, &v.Credentials,
-		&v.Status, &settings, &v.CreatedAt, &v.UpdatedAt); err != nil {
+		&v.Status, &settings,
+		&v.CreatedBy, &v.CreatedByName, &v.UpdatedBy, &v.UpdatedByName,
+		&v.CreatedAt, &v.UpdatedAt); err != nil {
 		return nil, fmt.Errorf("scan vendor: %w", err)
 	}
 	v.BaseURL, v.NodeID = baseURL.String, nodeID.Int64
@@ -189,7 +210,9 @@ func scanVendorRow(rows *sql.Rows) (*model.AIVendor, error) {
 type aiModelStore struct{ db *sqldb.DB }
 
 const aiModelColumns = `id, workspace_id, vendor_id, model_key, type, context_window,
-	description, input_price_per_1m, output_price_per_1m, status, settings, created_at, updated_at`
+	description, input_price_per_1m, output_price_per_1m, status, settings,
+	measured_chars, measured_tokens,
+	` + authoredColumns + `, created_at, updated_at`
 
 // Create writes a model, filling in the defaults its enums declare.
 //
@@ -199,7 +222,7 @@ const aiModelColumns = `id, workspace_id, vendor_id, model_key, type, context_wi
 // until something reads it back and finds a model with no type. The defaults
 // belong here, next to the write, because that is the last place they can still
 // be applied.
-func (s *aiModelStore) Create(ctx context.Context, m *model.AIModel) error {
+func (s *aiModelStore) Create(ctx context.Context, m *model.AIModel, by model.Actor) error {
 	now := time.Now().UTC()
 	m.CreatedAt, m.UpdatedAt = now, now
 	if m.Status == "" {
@@ -212,13 +235,17 @@ func (s *aiModelStore) Create(ctx context.Context, m *model.AIModel) error {
 	if err != nil {
 		return fmt.Errorf("insert model: %w", err)
 	}
+	m.Made(by)
+	m.Changed(by)
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO ai_models
 		 (workspace_id, vendor_id, model_key, type, context_window, description,
-		  input_price_per_1m, output_price_per_1m, status, settings, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		  input_price_per_1m, output_price_per_1m, status, settings,
+		  created_by, created_by_name, updated_by, updated_by_name, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.WorkspaceID, m.VendorID, m.ModelKey, m.Type, m.ContextWindow, m.Description,
 		m.InputPricePer1M, m.OutputPricePer1M, m.Status, nullBytes(settings),
+		nullID(m.CreatedBy), m.CreatedByName, nullID(m.UpdatedBy), m.UpdatedByName,
 		m.CreatedAt, m.UpdatedAt)
 	if err != nil {
 		return wrapWriteErr("insert model", err)
@@ -247,7 +274,9 @@ func (s *aiModelStore) List(ctx context.Context, workspaceID int64) ([]*model.AI
 		var settings []byte
 		if err := rows.Scan(&m.ID, &m.WorkspaceID, &m.VendorID, &m.ModelKey, &m.Type,
 			&m.ContextWindow, &description, &m.InputPricePer1M, &m.OutputPricePer1M, &m.Status,
-			&settings, &m.CreatedAt, &m.UpdatedAt); err != nil {
+			&settings, &m.MeasuredChars, &m.MeasuredTokens,
+			&m.CreatedBy, &m.CreatedByName, &m.UpdatedBy, &m.UpdatedByName,
+			&m.CreatedAt, &m.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan model: %w", err)
 		}
 		m.Description = description.String
@@ -257,7 +286,7 @@ func (s *aiModelStore) List(ctx context.Context, workspaceID int64) ([]*model.AI
 	return models, rows.Err()
 }
 
-func (s *aiModelStore) Update(ctx context.Context, m *model.AIModel) error {
+func (s *aiModelStore) Update(ctx context.Context, m *model.AIModel, by model.Actor) error {
 	if err := requireExists(ctx, s.db, "update model",
 		`SELECT 1 FROM ai_models WHERE id = ? AND workspace_id = ?`, m.ID, m.WorkspaceID); err != nil {
 		return err
@@ -267,14 +296,15 @@ func (s *aiModelStore) Update(ctx context.Context, m *model.AIModel) error {
 		return fmt.Errorf("update model: %w", err)
 	}
 	m.UpdatedAt = time.Now().UTC()
+	m.Changed(by)
 	_, err = s.db.ExecContext(ctx,
 		`UPDATE ai_models SET vendor_id = ?, model_key = ?, type = ?, context_window = ?,
 		 description = ?, input_price_per_1m = ?, output_price_per_1m = ?, status = ?,
-		 settings = ?, updated_at = ?
+		 settings = ?, updated_by = ?, updated_by_name = ?, updated_at = ?
 		 WHERE id = ? AND workspace_id = ?`,
 		m.VendorID, m.ModelKey, m.Type, m.ContextWindow, m.Description, m.InputPricePer1M,
 		m.OutputPricePer1M, m.Status, nullBytes(settings),
-		m.UpdatedAt, m.ID, m.WorkspaceID)
+		nullID(m.UpdatedBy), m.UpdatedByName, m.UpdatedAt, m.ID, m.WorkspaceID)
 	if err != nil {
 		return wrapWriteErr("update model", err)
 	}
@@ -290,13 +320,30 @@ func (s *aiModelStore) Delete(ctx context.Context, workspaceID, id int64) error 
 	return requireAffected(res, "delete model")
 }
 
+// MeasureTokens adds one call to a model's running totals: what was sent, and
+// what the vendor said that was in its tokens. Both decay by `keep` first, so
+// recent calls count for more than old ones. One statement, so two calls
+// finishing at once both land rather than one overwriting the other.
+func (s *aiModelStore) MeasureTokens(ctx context.Context, id int64, chars, tokens int64, keep float64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE ai_models SET measured_chars = measured_chars * ? + ?, measured_tokens = measured_tokens * ? + ?
+		 WHERE id = ?`,
+		keep, chars, keep, tokens, id)
+	if err != nil {
+		return fmt.Errorf("measure tokens: %w", err)
+	}
+	return nil
+}
+
 func scanAIModel(row *sql.Row) (*model.AIModel, error) {
 	m := &model.AIModel{}
 	var description sql.NullString
 	var settings []byte
 	err := row.Scan(&m.ID, &m.WorkspaceID, &m.VendorID, &m.ModelKey, &m.Type,
 		&m.ContextWindow, &description, &m.InputPricePer1M, &m.OutputPricePer1M, &m.Status,
-		&settings, &m.CreatedAt, &m.UpdatedAt)
+		&settings, &m.MeasuredChars, &m.MeasuredTokens,
+		&m.CreatedBy, &m.CreatedByName, &m.UpdatedBy, &m.UpdatedByName,
+		&m.CreatedAt, &m.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}

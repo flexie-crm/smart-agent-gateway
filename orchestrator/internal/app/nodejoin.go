@@ -302,6 +302,19 @@ func (a *App) JoinNode(ctx context.Context, source string, body []byte, signatur
 		}
 	}
 
+	// Who admitted this machine. An invitation belongs to one person (migration
+	// 54), so "who added this box" has a real answer even though nobody typed
+	// anything into a form. A re-enrolment presents no invitation, because the
+	// machine authenticated as ITSELF, and it is the machine that is writing.
+	by := model.Actor{Name: req.Name}
+	if invitation != nil {
+		if who, err := a.Acting(ctx, invitation.UserID); err == nil {
+			by = who
+		}
+		// A person since deleted leaves the machine's own name, which is still
+		// better than nothing and is what the row would have read anyway.
+	}
+
 	if known != nil {
 		// The same machine, back again. Its address may have changed and its key
 		// certainly has, so both are written; the row keeps its id, so every
@@ -312,7 +325,7 @@ func (a *App) JoinNode(ctx context.Context, source string, body []byte, signatur
 		known.Key = sealedKey
 		known.Version = req.Version
 		known.CertExpiresAt = &expires
-		if err := a.Store.Nodes().Update(ctx, known); err != nil {
+		if err := a.Store.Nodes().Update(ctx, known, by); err != nil {
 			return NodeJoinResponse{}, err
 		}
 		a.Log.Info().Str("node", req.NodeID).Str("name", req.Name).Str("at", baseURL).
@@ -329,7 +342,7 @@ func (a *App) JoinNode(ctx context.Context, source string, body []byte, signatur
 		Version:       req.Version,
 		CertExpiresAt: &expires,
 	}
-	if err := a.Store.Nodes().Create(ctx, node); err != nil {
+	if err := a.Store.Nodes().Create(ctx, node, by); err != nil {
 		return NodeJoinResponse{}, err
 	}
 	a.Log.Info().Str("node", req.NodeID).Str("name", req.Name).Str("at", baseURL).

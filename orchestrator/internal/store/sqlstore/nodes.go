@@ -18,7 +18,8 @@ import (
 
 type nodeStore struct{ db *sqldb.DB }
 
-const nodeColumns = `id, node_id, name, base_url, key_enc, version, cert_expires_at, pinned_cert, created_at, updated_at`
+const nodeColumns = `id, node_id, name, base_url, key_enc, version, cert_expires_at, pinned_cert,
+	` + authoredColumns + `, created_at, updated_at`
 
 func (s *nodeStore) List(ctx context.Context) ([]*model.InferenceNode, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+nodeColumns+` FROM inference_nodes ORDER BY name, id`)
@@ -31,7 +32,9 @@ func (s *nodeStore) List(ctx context.Context) ([]*model.InferenceNode, error) {
 	for rows.Next() {
 		n := &model.InferenceNode{}
 		if err := rows.Scan(&n.ID, &n.NodeID, &n.Name, &n.BaseURL, &n.Key, &n.Version,
-			&n.CertExpiresAt, &n.PinnedCert, &n.CreatedAt, &n.UpdatedAt); err != nil {
+			&n.CertExpiresAt, &n.PinnedCert,
+			&n.CreatedBy, &n.CreatedByName, &n.UpdatedBy, &n.UpdatedByName,
+			&n.CreatedAt, &n.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan machine: %w", err)
 		}
 		nodes = append(nodes, n)
@@ -54,13 +57,25 @@ func (s *nodeStore) ByNodeID(ctx context.Context, nodeID string) (*model.Inferen
 		`SELECT `+nodeColumns+` FROM inference_nodes WHERE node_id = ?`, nodeID))
 }
 
-func (s *nodeStore) Create(ctx context.Context, n *model.InferenceNode) error {
+// Create records a machine that has just joined.
+//
+// `by` is the person whose INVITATION it spent, not the machine: a join token
+// belongs to one person (migration 54), so "who added this box" has a real
+// answer even though nobody typed anything. The machine is what updates the row
+// afterwards, and says so.
+func (s *nodeStore) Create(ctx context.Context, n *model.InferenceNode, by model.Actor) error {
 	now := time.Now().UTC()
 	n.CreatedAt, n.UpdatedAt = now, now
+	n.Made(by)
+	n.Changed(by)
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO inference_nodes (node_id, name, base_url, key_enc, version, cert_expires_at, pinned_cert, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		n.NodeID, n.Name, n.BaseURL, n.Key, n.Version, n.CertExpiresAt, n.PinnedCert, n.CreatedAt, n.UpdatedAt)
+		`INSERT INTO inference_nodes
+		   (node_id, name, base_url, key_enc, version, cert_expires_at, pinned_cert,
+		    created_by, created_by_name, updated_by, updated_by_name, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		n.NodeID, n.Name, n.BaseURL, n.Key, n.Version, n.CertExpiresAt, n.PinnedCert,
+		nullID(n.CreatedBy), n.CreatedByName, nullID(n.UpdatedBy), n.UpdatedByName,
+		n.CreatedAt, n.UpdatedAt)
 	if err != nil {
 		return wrapWriteErr("insert machine", err)
 	}
@@ -71,13 +86,15 @@ func (s *nodeStore) Create(ctx context.Context, n *model.InferenceNode) error {
 // Update writes what a machine says about itself when it comes back: where it is
 // now, what it calls itself, and its current key. Its id and the rows pointing
 // at it are untouched, which is the point of matching on the node id at all.
-func (s *nodeStore) Update(ctx context.Context, n *model.InferenceNode) error {
+func (s *nodeStore) Update(ctx context.Context, n *model.InferenceNode, by model.Actor) error {
 	n.UpdatedAt = time.Now().UTC()
+	n.Changed(by)
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE inference_nodes SET name = ?, base_url = ?, key_enc = ?, version = ?,
-		 cert_expires_at = ?, pinned_cert = ?, updated_at = ?
+		 cert_expires_at = ?, pinned_cert = ?, updated_by = ?, updated_by_name = ?, updated_at = ?
 		 WHERE id = ?`,
-		n.Name, n.BaseURL, n.Key, n.Version, n.CertExpiresAt, n.PinnedCert, n.UpdatedAt, n.ID)
+		n.Name, n.BaseURL, n.Key, n.Version, n.CertExpiresAt, n.PinnedCert,
+		nullID(n.UpdatedBy), n.UpdatedByName, n.UpdatedAt, n.ID)
 	if err != nil {
 		return wrapWriteErr("update machine", err)
 	}
@@ -97,7 +114,9 @@ func (s *nodeStore) Delete(ctx context.Context, id int64) error {
 func scanNode(row *sql.Row) (*model.InferenceNode, error) {
 	n := &model.InferenceNode{}
 	err := row.Scan(&n.ID, &n.NodeID, &n.Name, &n.BaseURL, &n.Key, &n.Version,
-		&n.CertExpiresAt, &n.PinnedCert, &n.CreatedAt, &n.UpdatedAt)
+		&n.CertExpiresAt, &n.PinnedCert,
+		&n.CreatedBy, &n.CreatedByName, &n.UpdatedBy, &n.UpdatedByName,
+		&n.CreatedAt, &n.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}

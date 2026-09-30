@@ -85,7 +85,12 @@ func (h *workspaceHandlers) create(w http.ResponseWriter, r *http.Request) {
 		writeInvalidFields(w, problems)
 		return
 	}
-	if err := h.app.Store.Workspaces().Create(r.Context(), ws); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.Workspaces().Create(r.Context(), ws, by); err != nil {
 		writeSaveError(w, h.app, err, "slug", "another workspace already uses this slug")
 		return
 	}
@@ -135,7 +140,12 @@ func (h *workspaceHandlers) update(w http.ResponseWriter, r *http.Request) {
 		writeInvalidFields(w, problems)
 		return
 	}
-	if err := h.app.Store.Workspaces().Update(r.Context(), ws); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.Workspaces().Update(r.Context(), ws, by); err != nil {
 		writeSaveError(w, h.app, err, "slug", "another workspace already uses this slug")
 		return
 	}

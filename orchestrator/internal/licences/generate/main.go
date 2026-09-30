@@ -23,13 +23,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 // component mirrors licences.Component. It is declared again here rather than
@@ -44,19 +48,24 @@ type component struct {
 }
 
 func main() {
-	if err := run(); err != nil {
+	// Interruptible, because `go list` over every dependency is not instant and
+	// somebody who presses ctrl-c should get their shell back rather than
+	// waiting on a subprocess nothing is listening to any more.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := run(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "licences:", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(ctx context.Context) error {
 	root, err := repoRoot()
 	if err != nil {
 		return err
 	}
 
-	all, err := goModules(root)
+	all, err := goModules(ctx, root)
 	if err != nil {
 		return fmt.Errorf("the server's modules: %w", err)
 	}
@@ -130,8 +139,8 @@ func repoRoot() (string, error) {
 // carries the module it came from. That is much narrower than the module graph
 // and it is the right set: a module in go.mod that nothing imports is not in the
 // binary, so it is not distributed and nobody is owed attribution for it.
-func goModules(root string) ([]component, error) {
-	cmd := exec.Command("go", "list", "-deps", "-json", "./cmd/sag")
+func goModules(ctx context.Context, root string) ([]component, error) {
+	cmd := exec.CommandContext(ctx, "go", "list", "-deps", "-json", "./cmd/sag")
 	cmd.Dir = filepath.Join(root, "orchestrator")
 	out, err := cmd.Output()
 	if err != nil {
@@ -174,10 +183,26 @@ func goModules(root string) ([]component, error) {
 	return found, nil
 }
 
+// readIn reads one file out of one directory, and cannot read out of any other.
+//
+// Every read in this tool is of a directory somebody else laid out: the build
+// cache, and node_modules, which is a tree of symbolic links. A root makes the
+// directory a boundary the read cannot cross, rather than one this code is
+// trusted to have checked, and it is the whole reason these reads do not just
+// call os.ReadFile on a joined path.
+func readIn(dir, name string) ([]byte, error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	return root.ReadFile(name)
+}
+
 // npmPackages is one front end's runtime dependencies: what ends up in the
 // bundle a person downloads. devDependencies are build tools and stay here.
 func npmPackages(dir, part string) ([]component, error) {
-	manifest, err := os.ReadFile(filepath.Join(dir, "package.json"))
+	manifest, err := readIn(dir, "package.json")
 	if err != nil {
 		return nil, err
 	}
@@ -193,8 +218,9 @@ func npmPackages(dir, part string) ([]component, error) {
 		installed := filepath.Join(dir, "node_modules", filepath.FromSlash(name))
 		c := component{Name: name, Part: part, URL: "https://www.npmjs.com/package/" + name}
 		// The INSTALLED copy is the authority on the version: package.json's
-		// range says what was asked for, not what is here.
-		if body, err := os.ReadFile(filepath.Join(installed, "package.json")); err == nil {
+		// range says what was asked for, not what is here. Read through a root
+		// at that package's own directory, for the reason licenceIn gives.
+		if body, err := readIn(installed, "package.json"); err == nil {
 			var meta struct {
 				Version string `json:"version"`
 				License any    `json:"license"`
@@ -234,7 +260,17 @@ func licenceIn(dir string) (text, name string) {
 	if dir == "" {
 		return "", ""
 	}
-	entries, err := os.ReadDir(dir)
+	// A root at the package's own directory, so listing it and reading out of it
+	// cannot leave it. Both callers hand over a directory somebody else laid
+	// out: one is a module in the build cache, the other a package inside
+	// node_modules, which is a tree of symbolic links by design.
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return "", ""
+	}
+	defer func() { _ = root.Close() }()
+
+	entries, err := fs.ReadDir(root.FS(), ".")
 	if err != nil {
 		return "", ""
 	}
@@ -264,7 +300,7 @@ func licenceIn(dir string) (text, name string) {
 	if best == "" {
 		return "", ""
 	}
-	body, err := os.ReadFile(filepath.Join(dir, best))
+	body, err := root.ReadFile(best)
 	if err != nil {
 		return "", ""
 	}

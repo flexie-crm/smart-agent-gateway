@@ -71,7 +71,7 @@ describe('choosing light or night', () => {
 
   it('changes with the machine while the choice is to follow it', () => {
     const machine = machineSays(false)
-    let choice: 'system' | 'light' | 'dark' = 'system'
+    const choice: 'system' | 'light' | 'dark' = 'system'
     const stop = followTheMachine(() => choice)
     paint(choice)
     expect(document.documentElement.classList.contains('dark')).toBe(false)
@@ -85,7 +85,7 @@ describe('choosing light or night', () => {
 
   it('ignores the machine once somebody has chosen', () => {
     const machine = machineSays(false)
-    let choice: 'system' | 'light' | 'dark' = 'light'
+    const choice: 'system' | 'light' | 'dark' = 'light'
     const stop = followTheMachine(() => choice)
     paint(choice)
     machineSays(true)

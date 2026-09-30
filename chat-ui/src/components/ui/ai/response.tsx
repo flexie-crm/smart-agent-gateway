@@ -483,7 +483,28 @@ export const Response = memo(
     return (
       <div
         className={cn(
-          'size-full [&>p:not(:first-child)]:mt-[0.3rem] [&>p]:mb-[0.3rem] [&>p]:[margin-block:calc(.25rem*1)]',
+          // One clear line between paragraphs, set HERE because this is the
+          // only place that governs it. Markdown is styled by a component per
+          // element in `createComponents` below, and `p` is not one of them,
+          // so a paragraph falls through to these wrapper rules. There used to
+          // be three of them fighting and the last won at margin-block
+          // 0.25rem, which is 4px against a 24px line, so a paragraph break
+          // read as less than a line break.
+          //
+          // There was also a `src/css/markdown.css` with rules for all of this
+          // that applied to nothing, because its `.markdown` class was never
+          // put on any element. It is deleted: it was the first place anybody
+          // would look to change this, and an edit there did nothing.
+          //
+          // 1rem is measured rather than chosen. Normalised by each one's own
+          // line gap, because the screenshots were at different scales, a
+          // ChatGPT reply puts 32px of extra space between paragraphs against
+          // a 24px line gap where this had 4px against 16px. Theirs is about
+          // twice ours relative to the line, which lands on 16px.
+          //
+          // Adjacent margins collapse, so margin-block gives ONE 1rem gap
+          // between two paragraphs rather than two stacked.
+          'size-full [&>p]:[margin-block:1rem] [&>p:first-child]:mt-0 [&>p:last-child]:mb-0',
           className
         )}
         {...props}

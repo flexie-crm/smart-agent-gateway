@@ -7,6 +7,11 @@ interface ImportMetaEnv {
    * share an origin.
    */
   readonly VITE_SAG_API_URL?: string
+  /**
+   * Whether this build runs models on the computer it is installed on. "0" on a
+   * platform we ship no engine for, unset everywhere else. See LOCAL_ENGINE.
+   */
+  readonly VITE_SAG_LOCAL_ENGINE?: string
 }
 
 interface ImportMeta {

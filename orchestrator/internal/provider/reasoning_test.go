@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"flexie.io/sag/internal/model"
@@ -115,6 +116,32 @@ func TestPrepareTrimsToTheModelContextWindow(t *testing.T) {
 	}
 	if got.Messages[len(got.Messages)-1].Content != "live" {
 		t.Fatal("the active turn must survive trimming")
+	}
+}
+
+// The tools a turn is offered are sent with every call, so they take room in
+// the window too: the same conversation keeps fewer messages when the tools
+// are large, and what is sent, tools and messages together, fits.
+func TestPrepareCountsTheToolsAgainstTheWindow(t *testing.T) {
+	long := []Message{{Role: RoleSystem, Content: "sys"}}
+	for i := 0; i < 100; i++ {
+		long = append(long, Message{Role: RoleUser, Content: repeat("q", 200)})
+		long = append(long, Message{Role: RoleAssistant, Content: repeat("a", 200)})
+	}
+	tools := []ToolDef{{Name: "big", Description: repeat("d", 20_000), InputSchema: []byte(`{"type":"object"}`)}}
+	resolved := &Resolved{Model: &model.AIModel{ModelKey: "m", ContextWindow: 20_000}}
+
+	bare := resolved.Prepare(GenerateRequest{Messages: long})
+	withTools := resolved.Prepare(GenerateRequest{Messages: long, Tools: tools})
+	if len(withTools.Messages) >= len(bare.Messages) {
+		t.Fatalf("the tools took no room: %d messages kept with them, %d without", len(withTools.Messages), len(bare.Messages))
+	}
+	sentTools, _ := json.Marshal(withTools.Tools)
+	if total := size(withTools.Messages) + len(sentTools); total > BudgetFor(resolved.Model, reserveTokens) {
+		t.Fatalf("tools and messages together are %d characters, over the window's %d", total, BudgetFor(resolved.Model, reserveTokens))
+	}
+	if len(withTools.Tools) != 1 {
+		t.Fatal("the tools themselves must be sent untouched")
 	}
 }
 

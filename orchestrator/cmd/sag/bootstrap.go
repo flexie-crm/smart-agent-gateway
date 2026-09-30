@@ -41,7 +41,7 @@ func runBootstrap(ctx context.Context, cfg *config.Config, st store.Store, args 
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		ws = &model.Workspace{Slug: *slug, Name: *wsName}
-		if err := st.Workspaces().Create(ctx, ws); err != nil {
+		if err := st.Workspaces().Create(ctx, ws, model.Nobody()); err != nil {
 			return fmt.Errorf("create workspace: %w", err)
 		}
 		fmt.Printf("workspace %q created (id %d)\n", ws.Slug, ws.ID)
@@ -79,7 +79,7 @@ func runBootstrap(ctx context.Context, cfg *config.Config, st store.Store, args 
 		Name:         *userName,
 		PasswordHash: hash,
 	}
-	if err := st.Users().Create(ctx, user); err != nil {
+	if err := st.Users().Create(ctx, user, model.Nobody()); err != nil {
 		return fmt.Errorf("create user: %w", err)
 	}
 	// The person exists in the tenant; the membership is what lets them in.
@@ -124,7 +124,7 @@ func ensureAdminRole(ctx context.Context, st store.Store, workspaceID int64) (*m
 		Name:        model.BootstrapAdminRole,
 		Permissions: []string{model.PermSuperuser},
 	}
-	if err := st.Roles().Create(ctx, role); err != nil {
+	if err := st.Roles().Create(ctx, role, model.Nobody()); err != nil {
 		return nil, fmt.Errorf("create admin role: %w", err)
 	}
 	return role, nil
@@ -141,7 +141,7 @@ func ensureAdminGroup(ctx context.Context, st store.Store, workspaceID int64) (*
 		}
 	}
 	group := &model.Group{WorkspaceID: workspaceID, Name: model.BootstrapAdminGroup}
-	if err := st.Groups().Create(ctx, group); err != nil {
+	if err := st.Groups().Create(ctx, group, model.Nobody()); err != nil {
 		return nil, fmt.Errorf("create admin group: %w", err)
 	}
 	return group, nil

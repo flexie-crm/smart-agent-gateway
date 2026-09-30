@@ -19,7 +19,7 @@ func mustMCPServer(t *testing.T, st store.Store, wsID int64, name, prefix string
 		APIKey:      []byte("sealed-key"),
 		ToolPrefix:  prefix,
 	}
-	if err := st.MCPServers().Create(ctx(), m); err != nil {
+	if err := st.MCPServers().Create(ctx(), m, model.Nobody()); err != nil {
 		t.Fatalf("create mcp server: %v", err)
 	}
 	return m
@@ -48,7 +48,7 @@ func testMCPServers(t *testing.T, st store.Store) {
 
 	// A nil secret on update keeps the stored one; a new one replaces it.
 	got.Name, got.URL, got.APIKey = "CRM Prod", "https://crm.example.test/mcp", nil
-	if err := st.MCPServers().Update(ctx(), got); err != nil {
+	if err := st.MCPServers().Update(ctx(), got, model.Nobody()); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	kept, err := st.MCPServers().GetByID(ctx(), ws.ID, m.ID)
@@ -56,7 +56,7 @@ func testMCPServers(t *testing.T, st store.Store) {
 		t.Fatalf("a nil secret wiped the stored one: %v %+v", err, kept)
 	}
 	kept.APIKey = []byte("sealed-key-2")
-	if err := st.MCPServers().Update(ctx(), kept); err != nil {
+	if err := st.MCPServers().Update(ctx(), kept, model.Nobody()); err != nil {
 		t.Fatalf("rotate: %v", err)
 	}
 	if again, _ := st.MCPServers().GetByID(ctx(), ws.ID, m.ID); string(again.APIKey) != "sealed-key-2" {
@@ -101,7 +101,7 @@ func testMCPServers(t *testing.T, st store.Store) {
 
 	// The prefix is the namespace key: two connections cannot share one.
 	dup := &model.MCPServer{WorkspaceID: ws.ID, Name: "Other", URL: "https://o.test", AuthType: model.MCPAuthNone, ToolPrefix: "crm"}
-	if err := st.MCPServers().Create(ctx(), dup); !errors.Is(err, store.ErrConflict) {
+	if err := st.MCPServers().Create(ctx(), dup, model.Nobody()); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("expected ErrConflict on duplicate prefix, got %v", err)
 	}
 
@@ -149,7 +149,7 @@ func testMCPToolProjection(t *testing.T, st store.Store) {
 	}
 	group := mustGroup(t, st, ws.ID, "ops")
 	lead.Grants = []int64{group.ID}
-	if err := st.Tools().Update(ctx(), lead); err != nil {
+	if err := st.Tools().Update(ctx(), lead, model.Nobody()); err != nil {
 		t.Fatalf("grant the tool: %v", err)
 	}
 	if _, err := st.Tools().SyncMCPTools(ctx(), ws.ID, server.ID, []*model.Tool{

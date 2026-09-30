@@ -105,3 +105,41 @@ func TestWithTheBoxUntickedNoRoutineRuns(t *testing.T) {
 	}
 	allowed(t, g, "SELECT LOWER(email) FROM customers")
 }
+
+// A refused body becomes a CLAUSE, and has to be reworded to be one.
+//
+// When a body is refused for something the statement itself does (MERGE, the
+// system catalog, a linked server), the inner reason is spliced into an outer
+// sentence. Left as it was written it arrives with its own capital and its own
+// full stop, and the message reads "has a body that is not permitted: You are
+// not permitted to run MERGE." -- a sentence that ends in the middle.
+//
+// Driven straight at BodyKeepsPolicy, because that is the only way to reach
+// this branch: a body that reads a table the policy keeps back is caught
+// earlier by the coarse half, which is why every case in the table above takes
+// a different path and none of them exercises this line. It went unnoticed for
+// a day, worded one way on two engines and another way here, and the only
+// thing that ever complained was the helper sitting unused.
+func TestARefusedBodyIsWordedAsAClause(t *testing.T) {
+	g := withRoutines(t, true)
+	const body = "CREATE PROCEDURE dbo.p AS BEGIN MERGE dbo.orders USING dbo.orders AS s " +
+		"ON 1=1 WHEN MATCHED THEN UPDATE SET total = 1; END"
+
+	ok, reason := Analyzer{}.BodyKeepsPolicy(g, body)
+	if ok {
+		t.Fatalf("a body running MERGE was accepted")
+	}
+	t.Logf("  %s", reason)
+
+	if want := "has a body that is not permitted: you are not permitted to run MERGE"; reason != want {
+		t.Errorf("the clause is not spliced in as one sentence:\n  got  %s\n  want %s", reason, want)
+	}
+	// The control: this is the exact shape the helper exists to prevent, and
+	// what this engine produced while the other two did not.
+	if strings.Contains(reason, "permitted: You") {
+		t.Errorf("the clause kept its capital: %s", reason)
+	}
+	if strings.HasSuffix(reason, ".") {
+		t.Errorf("the clause kept its full stop, so the message ends mid-sentence: %s", reason)
+	}
+}

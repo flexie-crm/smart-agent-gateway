@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"sort"
+	"strings"
 	"sync"
 
 	"flexie.io/sag/internal/tool"
@@ -35,6 +36,8 @@ const (
 	FieldSelect   = tool.FieldSelect
 	FieldTextarea = tool.FieldTextarea
 	FieldCheckbox = tool.FieldCheckbox
+	FieldPairs    = tool.FieldPairs
+	FieldCallback = tool.FieldCallback
 )
 
 // Choice pairs a stored value with what it says to a person.
@@ -106,6 +109,19 @@ type Template interface {
 	// Params are the inputs the tool takes, with their default descriptions, so
 	// the form shows them prefilled (identity locked, description editable).
 	Params() []Param
+	// DefaultDescription is the model-facing description to prefill the form
+	// with: what the AGENT reads to understand what this tool is and how to
+	// call it.
+	//
+	// Not Description(), which is the paragraph a PERSON reads in the picker
+	// while deciding what to make. The two were briefly the same field and it
+	// showed: the form put the sales copy into the model's instructions.
+	//
+	// Static, because the form prefills it before any setting has been typed.
+	// Build still writes an instance-specific one (naming the address, the
+	// engine, the server) for anything created with this cleared out, so an
+	// emptied field is a sensible tool rather than a nameless one.
+	DefaultDescription() string
 	// DefaultGuide is the guide text to prefill the form with, so an administrator
 	// starts from the template's own and refines it.
 	DefaultGuide() string
@@ -146,6 +162,48 @@ type Displayed interface {
 	Display() tool.Display
 }
 
+// Grant is one tool's sign-in as a template sees it: a usable access token,
+// and nothing else.
+//
+// The split is deliberate and survives the tokens moving into the tool's own
+// config. A template knows how to ATTACH a token (which header, which scheme);
+// keeping one alive needs the store, the keyring and a conversation with an
+// authorization server, so that stays with the app. A template that had to do
+// the second would need all three, and every template after it would be free
+// to do it differently.
+type Grant interface {
+	// Token answers with an access token that is usable now, renewing a stale
+	// one on the way. It fails when nobody has signed in, which a handler must
+	// REPORT rather than paper over: a call with no credential is one the
+	// service refuses anyway, and saying why is the difference between
+	// reconnecting and guessing.
+	Token(ctx context.Context) (string, error)
+	// Renew answers with a token to use instead of one the service has just
+	// refused, renewing the sign-in unless somebody already has. Answering the
+	// refused token itself means there is nothing better to offer, and the
+	// refusal stands.
+	Renew(ctx context.Context, refused string) (string, error)
+}
+
+// GrantedTemplate is a template whose tool is CONNECTED as well as configured:
+// part of its credential was given by a person in a browser and rotates on its
+// own.
+//
+// Optional, like Displayed and ActionTemplate, so templates that need nothing
+// of the sort are untouched. One that implements it is bound through here
+// instead of through Bind, with a Grant for the tool being bound.
+type GrantedTemplate interface {
+	BindGranted(config json.RawMessage, owner tool.Owner, grant Grant) (tool.Handler, error)
+	// Connectable says this particular configuration needs a person to sign in,
+	// so the console should offer it.
+	//
+	// The TEMPLATE answers because only it knows: the same template makes tools
+	// with a key, with client credentials, and with a person's consent, and
+	// which was chosen is inside a config nothing above can read. What the app
+	// does with a true is mint the address, which only IT can.
+	Connectable(config json.RawMessage) bool
+}
+
 // ActionTemplate is a template that offers its own operations to the console,
 // beyond the fixed ones every template has. It is optional: a template without
 // it is unchanged, and its Test button goes through Test as before.
@@ -176,6 +234,15 @@ type ActionResult struct {
 	// Prompt asks the administrator for more. Its presence means the action is
 	// unfinished, not that it failed.
 	Prompt *ActionPrompt `json:"prompt,omitempty"`
+	// Visit is an address the administrator has to go to before this can
+	// finish, and Visiting is the words on the button that takes them there.
+	//
+	// The other half of Prompt: one asks for something they can type, this for
+	// something they can only do somewhere else. The console renders a link and
+	// learns nothing about why, exactly as it renders prompt fields without
+	// knowing what they are for.
+	Visit    string `json:"visit,omitempty"`
+	Visiting string `json:"visiting,omitempty"`
 }
 
 // ActionPrompt is a template asking the administrator a question mid-action. The
@@ -238,4 +305,85 @@ func (r *Registry) All() []Template {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name() < out[j].Name() })
 	return out
+}
+
+// AliasFrom turns the name somebody typed into the identifier the assistant
+// calls the tool by.
+//
+// There is ONE name on the form. "Production orders" becomes production_orders
+// and the tool is query_production_orders, so nobody has to invent a second
+// name, keep the two in step, or learn that an identifier has rules at all.
+//
+// The rule it produces to is the one every template already validates against
+// (a letter first, then lowercase letters, digits and underscores, 49 at most),
+// so what comes out of here is either something Build accepts or nothing, and
+// nothing is a far better error than a regular expression somebody has to
+// decode. Digits before the first letter are dropped rather than made legal by
+// force: a tool called "2024 invoices" is invoices, which is what it is.
+func AliasFrom(name string) string {
+	var b strings.Builder
+	gap := false
+	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
+		switch {
+		case r >= 'a' && r <= 'z':
+			if gap && b.Len() > 0 {
+				b.WriteByte('_')
+			}
+			gap = false
+			b.WriteRune(r)
+		case r >= '0' && r <= '9' && b.Len() > 0:
+			if gap {
+				b.WriteByte('_')
+			}
+			gap = false
+			b.WriteRune(r)
+		default:
+			// Anything else is a separator, however many of them there are in a
+			// row, and a run of them is one underscore rather than several.
+			gap = true
+		}
+	}
+	alias := b.String()
+	if len(alias) > 49 {
+		alias = strings.TrimRight(alias[:49], "_")
+	}
+	return alias
+}
+
+// InputSchema is the JSON Schema a template's parameters make, with an
+// administrator's own wording put over the template's where they gave any.
+//
+// ONE builder, because there were three near-identical ones and they had
+// already drifted: only the query tool's emitted `items` for an array, which
+// is not decoration (a schema saying "array" and nothing about its contents is
+// refused outright by some providers). A copy per template is a rule that holds
+// until somebody improves one of them.
+//
+// The SHAPE is the template's and is not an administrator's to change: the keys,
+// their types, and which are required are what the handler reads by name. The
+// DESCRIPTIONS are theirs, because explaining an API better is exactly the sort
+// of local knowledge a template cannot have.
+func InputSchema(params []Param, descriptions map[string]string) json.RawMessage {
+	properties := map[string]any{}
+	var required []string
+	for _, p := range params {
+		desc := p.Description
+		if override, ok := descriptions[p.Key]; ok && strings.TrimSpace(override) != "" {
+			desc = override
+		}
+		property := map[string]any{"type": p.Type, "description": desc}
+		if p.Type == "array" {
+			property["items"] = map[string]any{}
+		}
+		properties[p.Key] = property
+		if p.Required {
+			required = append(required, p.Key)
+		}
+	}
+	schema := map[string]any{"type": "object", "properties": properties}
+	if len(required) > 0 {
+		schema["required"] = required
+	}
+	raw, _ := json.Marshal(schema)
+	return raw
 }

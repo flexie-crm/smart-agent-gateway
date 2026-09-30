@@ -85,10 +85,11 @@ func newTestEnv(t *testing.T, opts ...func(*config.Config)) *testEnv {
 	go a.WS.Run(liveCtx)
 	go a.Bus.Run(liveCtx)
 	go a.RunLiveDashboard(liveCtx)
+	a.WatchAgents(liveCtx)
 
 	env := &testEnv{t: t, app: a, sql: st, router: newRouter(a)}
 	env.ws = &model.Workspace{Slug: "acme", Name: "Acme"}
-	if err := st.Workspaces().Create(context.Background(), env.ws); err != nil {
+	if err := st.Workspaces().Create(context.Background(), env.ws, model.Nobody()); err != nil {
 		t.Fatalf("create workspace: %v", err)
 	}
 	// The server offers the code's tools to every workspace at boot. The suite
@@ -111,7 +112,7 @@ func (e *testEnv) createUser(email, password string, perms ...string) *model.Use
 		e.t.Fatalf("hash password: %v", err)
 	}
 	user := &model.User{Email: email, Name: email, PasswordHash: hash}
-	if err := e.app.Store.Users().Create(ctx, user); err != nil {
+	if err := e.app.Store.Users().Create(ctx, user, model.Nobody()); err != nil {
 		e.t.Fatalf("create user: %v", err)
 	}
 	if err := e.app.Store.Workspaces().SetMembers(ctx, user.ID, []int64{e.ws.ID}); err != nil {
@@ -122,11 +123,11 @@ func (e *testEnv) createUser(email, password string, perms ...string) *model.Use
 	}
 
 	group := &model.Group{WorkspaceID: e.ws.ID, Name: "group-" + email}
-	if err := e.app.Store.Groups().Create(ctx, group); err != nil {
+	if err := e.app.Store.Groups().Create(ctx, group, model.Nobody()); err != nil {
 		e.t.Fatalf("create group: %v", err)
 	}
 	role := &model.Role{WorkspaceID: e.ws.ID, Name: "role-" + email, Permissions: perms}
-	if err := e.app.Store.Roles().Create(ctx, role); err != nil {
+	if err := e.app.Store.Roles().Create(ctx, role, model.Nobody()); err != nil {
 		e.t.Fatalf("create role: %v", err)
 	}
 	if err := e.app.Store.Groups().AssignRole(ctx, group.ID, role.ID); err != nil {
@@ -322,7 +323,7 @@ func TestLoginWithoutAnyWorkspaceIsRefusedPlainly(t *testing.T) {
 		t.Fatalf("hash: %v", err)
 	}
 	orphan := &model.User{Email: "nowhere@acme.test", Name: "Nowhere", PasswordHash: hash}
-	if err := env.app.Store.Users().Create(ctx, orphan); err != nil {
+	if err := env.app.Store.Users().Create(ctx, orphan, model.Nobody()); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 
@@ -345,11 +346,11 @@ func TestSwitchWorkspace(t *testing.T) {
 	user := env.createUser("admin@acme.test", "dev-Passw0rd!", model.PermSuperuser)
 
 	second := &model.Workspace{Slug: "second", Name: "Second"}
-	if err := env.app.Store.Workspaces().Create(ctx, second); err != nil {
+	if err := env.app.Store.Workspaces().Create(ctx, second, model.Nobody()); err != nil {
 		t.Fatalf("create workspace: %v", err)
 	}
 	stranger := &model.Workspace{Slug: "stranger", Name: "Stranger"}
-	if err := env.app.Store.Workspaces().Create(ctx, stranger); err != nil {
+	if err := env.app.Store.Workspaces().Create(ctx, stranger, model.Nobody()); err != nil {
 		t.Fatalf("create workspace: %v", err)
 	}
 	if err := env.app.Store.Workspaces().SetMembers(ctx, user.ID, []int64{env.ws.ID, second.ID}); err != nil {
@@ -417,7 +418,7 @@ func TestRefreshDiesWithTheMembership(t *testing.T) {
 	user := env.createUser("admin@acme.test", "dev-Passw0rd!", model.PermSuperuser)
 
 	other := &model.Workspace{Slug: "other", Name: "Other"}
-	if err := env.app.Store.Workspaces().Create(ctx, other); err != nil {
+	if err := env.app.Store.Workspaces().Create(ctx, other, model.Nobody()); err != nil {
 		t.Fatalf("create workspace: %v", err)
 	}
 	_, refresh := env.login("admin@acme.test", "dev-Passw0rd!")
@@ -470,7 +471,7 @@ func TestLoginRejectsDisabledUser(t *testing.T) {
 	env := newTestEnv(t)
 	user := env.createUser("user@acme.test", "dev-Passw0rd!")
 	user.Status = model.StatusDisabled
-	if err := env.app.Store.Users().Update(context.Background(), user); err != nil {
+	if err := env.app.Store.Users().Update(context.Background(), user, model.Nobody()); err != nil {
 		t.Fatalf("disable user: %v", err)
 	}
 	rec := env.do(http.MethodPost, "/v1/auth/login", "", map[string]string{
@@ -773,11 +774,11 @@ func TestWorkspaceIsolation(t *testing.T) {
 
 	ctx := context.Background()
 	other := &model.Workspace{Slug: "globex", Name: "Globex"}
-	if err := env.app.Store.Workspaces().Create(ctx, other); err != nil {
+	if err := env.app.Store.Workspaces().Create(ctx, other, model.Nobody()); err != nil {
 		t.Fatalf("create other workspace: %v", err)
 	}
 	foreignGroup := &model.Group{WorkspaceID: other.ID, Name: "Foreign Group"}
-	if err := env.app.Store.Groups().Create(ctx, foreignGroup); err != nil {
+	if err := env.app.Store.Groups().Create(ctx, foreignGroup, model.Nobody()); err != nil {
 		t.Fatalf("create foreign group: %v", err)
 	}
 

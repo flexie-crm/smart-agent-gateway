@@ -22,21 +22,27 @@ type mcpServerStore struct{ db *sqldb.DB }
 const mcpColumns = `id, workspace_id, name, url, auth_type,
 	api_key_enc, oauth_client_id, oauth_client_secret_enc,
 	oauth_access_token_enc, oauth_refresh_token_enc, oauth_token_expires_at, oauth_metadata,
-	status, tool_prefix, last_synced_at, last_error, created_at, updated_at`
+	status, tool_prefix, last_synced_at, last_error,
+	` + authoredColumns + `, created_at, updated_at`
 
-func (s *mcpServerStore) Create(ctx context.Context, m *model.MCPServer) error {
+func (s *mcpServerStore) Create(ctx context.Context, m *model.MCPServer, by model.Actor) error {
 	now := time.Now().UTC()
 	m.CreatedAt, m.UpdatedAt = now, now
 	if m.Status == "" {
 		m.Status = model.StatusActive
 	}
+	m.Made(by)
+	m.Changed(by)
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO mcp_servers
 			(workspace_id, name, url, auth_type, api_key_enc,
-			 oauth_client_id, oauth_client_secret_enc, status, tool_prefix, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 oauth_client_id, oauth_client_secret_enc, status, tool_prefix,
+			 created_by, created_by_name, updated_by, updated_by_name,
+			 created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.WorkspaceID, m.Name, m.URL, m.AuthType, nullBytes(m.APIKey),
 		m.OAuthClientID, nullBytes(m.OAuthClientSecret), m.Status, m.ToolPrefix,
+		nullID(m.CreatedBy), m.CreatedByName, nullID(m.UpdatedBy), m.UpdatedByName,
 		m.CreatedAt, m.UpdatedAt)
 	if err != nil {
 		return wrapWriteErr("insert mcp server", err)
@@ -75,22 +81,24 @@ func (s *mcpServerStore) List(ctx context.Context, workspaceID int64) ([]*model.
 // cleared, which is what lets somebody move a connection from a hand-registered
 // client back to one the service issues itself. The tool_prefix is absent on purpose: it is fixed at creation, and
 // the grants hanging off the projected tool names depend on that.
-func (s *mcpServerStore) Update(ctx context.Context, m *model.MCPServer) error {
+func (s *mcpServerStore) Update(ctx context.Context, m *model.MCPServer, by model.Actor) error {
 	if err := requireExists(ctx, s.db, "update mcp server",
 		`SELECT 1 FROM mcp_servers WHERE id = ? AND workspace_id = ?`, m.ID, m.WorkspaceID); err != nil {
 		return err
 	}
 	m.UpdatedAt = time.Now().UTC()
+	m.Changed(by)
 	if _, err := s.db.ExecContext(ctx,
 		`UPDATE mcp_servers SET
 			name = ?, url = ?, auth_type = ?, status = ?,
 			api_key_enc = COALESCE(?, api_key_enc),
 			oauth_client_id = ?,
 			oauth_client_secret_enc = COALESCE(?, oauth_client_secret_enc),
-			updated_at = ?
+			updated_by = ?, updated_by_name = ?, updated_at = ?
 		 WHERE id = ? AND workspace_id = ?`,
 		m.Name, m.URL, m.AuthType, m.Status,
-		nullBytes(m.APIKey), m.OAuthClientID, nullBytes(m.OAuthClientSecret), m.UpdatedAt,
+		nullBytes(m.APIKey), m.OAuthClientID, nullBytes(m.OAuthClientSecret),
+		nullID(m.UpdatedBy), m.UpdatedByName, m.UpdatedAt,
 		m.ID, m.WorkspaceID); err != nil {
 		return wrapWriteErr("update mcp server", err)
 	}
@@ -172,7 +180,9 @@ func scanMCPServerFields(scan func(dest ...any) error) (*model.MCPServer, error)
 	err := scan(&m.ID, &m.WorkspaceID, &m.Name, &m.URL, &m.AuthType,
 		&apiKey, &clientID, &clientSecret,
 		&access, &refresh, &expires, &metadata,
-		&m.Status, &m.ToolPrefix, &syncedAt, &lastError, &m.CreatedAt, &m.UpdatedAt)
+		&m.Status, &m.ToolPrefix, &syncedAt, &lastError,
+		&m.CreatedBy, &m.CreatedByName, &m.UpdatedBy, &m.UpdatedByName,
+		&m.CreatedAt, &m.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -203,8 +213,10 @@ func (s *mcpServerStore) GetSettings(ctx context.Context, workspaceID int64) (*m
 	m := &model.MCPSettings{WorkspaceID: workspaceID}
 	var toolConfig, brainConfig []byte
 	err := s.db.QueryRowContext(ctx,
-		`SELECT tool_config, brain_config, updated_at FROM mcp_settings WHERE workspace_id = ?`,
-		workspaceID).Scan(&toolConfig, &brainConfig, &m.UpdatedAt)
+		`SELECT tool_config, brain_config, `+authoredColumns+
+			`, updated_at FROM mcp_settings WHERE workspace_id = ?`,
+		workspaceID).Scan(&toolConfig, &brainConfig,
+		&m.CreatedBy, &m.CreatedByName, &m.UpdatedBy, &m.UpdatedByName, &m.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -217,16 +229,27 @@ func (s *mcpServerStore) GetSettings(ctx context.Context, workspaceID int64) (*m
 }
 
 // PutSettings writes the configuration wholesale.
-func (s *mcpServerStore) PutSettings(ctx context.Context, m *model.MCPSettings) error {
+func (s *mcpServerStore) PutSettings(ctx context.Context, m *model.MCPSettings, by model.Actor) error {
 	m.UpdatedAt = time.Now().UTC()
+	// One row per workspace, written by an upsert, so both halves go in the
+	// INSERT and only the second is touched on the update: whoever configured
+	// this first stays the creator however many times it is changed after.
+	m.Made(by)
+	m.Changed(by)
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO mcp_settings (workspace_id, tool_config, brain_config, updated_at)
-		 VALUES (?, ?, ?, ?)
+		`INSERT INTO mcp_settings
+		   (workspace_id, tool_config, brain_config, created_by, created_by_name,
+		    updated_by, updated_by_name, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		 ON DUPLICATE KEY UPDATE
 			tool_config = VALUES(tool_config),
 			brain_config = VALUES(brain_config),
+			updated_by = VALUES(updated_by),
+			updated_by_name = VALUES(updated_by_name),
 			updated_at = VALUES(updated_at)`,
-		m.WorkspaceID, string(m.ToolConfig), string(m.BrainConfig), m.UpdatedAt); err != nil {
+		m.WorkspaceID, string(m.ToolConfig), string(m.BrainConfig),
+		nullID(m.CreatedBy), m.CreatedByName, nullID(m.UpdatedBy), m.UpdatedByName,
+		m.UpdatedAt); err != nil {
 		return wrapWriteErr("put mcp settings", err)
 	}
 	return nil

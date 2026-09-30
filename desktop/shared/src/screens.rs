@@ -304,6 +304,66 @@ fn already_in_view(label: &str) -> bool {
     false
 }
 
+/// Puts a window exactly where another one already is.
+///
+/// These applications are two windows and ONE window, depending on who is
+/// asking. The code has a waiting screen and a chat, built separately because a
+/// single window navigating from one to the other goes white on the way. The
+/// person has an application that started. So the second one has to arrive in
+/// the place the first one occupies, at the same size, or the swap is the
+/// application jumping across the screen at the end of its own startup.
+///
+/// Built windows are placed by the system, one at a time, and it does not put
+/// two of them in the same spot: it offsets the second, which is the right
+/// behaviour for two documents and the wrong one for two halves of one startup.
+/// Nothing in the builder can express "where that one is", because that one does
+/// not exist yet when the builder for the first is written, so it is done here,
+/// after building and BEFORE anything is shown.
+///
+/// Physical units on both sides, deliberately. The position read back is the
+/// frame's, the size is the client area's, and each is handed to the setter that
+/// means the same thing; going through logical coordinates would divide and
+/// multiply by a scale factor for no reason and land a pixel out on a display
+/// that is not at 100%.
+///
+/// Failure is silent and costs nothing: a window that cannot be asked where it
+/// is leaves the new one wherever the system chose, which is what used to happen
+/// every time.
+///
+/// **Windows only, and deliberately.** The offset exists on macOS too, and this
+/// would improve it there as well, but that half of the product is built, shipped
+/// and tested, and a placement change is a change to how it opens. It is not
+/// being made on the strength of a Windows measurement and an argument. If it is
+/// wanted there, it is its own change, measured on a Mac.
+#[cfg(target_os = "windows")]
+pub fn opens_over(window: &tauri::WebviewWindow, previous: &tauri::WebviewWindow) {
+    // Except when the one being copied is minimised, which is the one state
+    // where its position is not a place on the screen: Windows parks a minimised
+    // window at -32000, -32000, and a new window put there is an application
+    // that started somewhere nobody can see. Somebody who minimises the waiting
+    // screen while the gateway comes up gets the system's own placement, which
+    // is the behaviour everything had before this function existed.
+    if previous.is_minimized().unwrap_or(false) {
+        return;
+    }
+    if let Ok(position) = previous.outer_position() {
+        let _ = window.set_position(position);
+    }
+    if let Ok(size) = previous.inner_size() {
+        let _ = window.set_size(size);
+    }
+}
+
+/// And nothing at all anywhere else, so a shell can ask for it unconditionally
+/// and the platforms that already work go on doing exactly what they did.
+///
+/// An empty function rather than a `cfg` at every call site: the call sites are
+/// where somebody reads what a window does, and one that appears and disappears
+/// by platform is harder to follow than one that is always there and is a no-op
+/// on the platforms that did not ask for it.
+#[cfg(not(target_os = "windows"))]
+pub fn opens_over(_window: &tauri::WebviewWindow, _previous: &tauri::WebviewWindow) {}
+
 /// Puts a window on the screen with its own colour showing and nothing else.
 ///
 /// Called for every window as it is built, and it is the reason a window is
@@ -311,6 +371,7 @@ fn already_in_view(label: &str) -> bool {
 /// inside it is already transparent by the time anybody sees the window. A
 /// window shown first and made transparent afterwards is a window that shows one
 /// white frame, which is the whole of what this file is about.
+#[cfg(target_os = "macos")]
 pub fn draws_unseen(window: &tauri::WebviewWindow) {
     let frame = window.as_ref().window().clone();
     let waiting = window.label() != CHAT;
@@ -329,14 +390,56 @@ pub fn draws_unseen(window: &tauri::WebviewWindow) {
     });
 }
 
+/// The same job where a window's own colour REACHES the page inside it, so
+/// there is nothing to hide and nothing to hide it with.
+///
+/// Everything above is written for WKWebView, which paints opaque white over a
+/// correctly coloured window and can only be stopped from doing so by private
+/// API. WebView2 has no such problem: wry passes the colour the window was built
+/// with straight to `SetDefaultBackgroundColor` (wry-0.55.1
+/// src/webview2/mod.rs:398 and :1810), so the ground is what shows until the
+/// page draws, which is the whole of what the alpha dance achieves elsewhere.
+/// There is also nothing to call: `ns_window()` and `inner()` are macOS-only
+/// methods on `PlatformWebview`, which is why this file did not compile here at
+/// all.
+///
+/// It is shown as it is built rather than held back for a paint, and that half
+/// is **not yet measured**. The reasoning is that a window nobody can see is not
+/// composited, so its page would record no first paint, `reports_when_painted`
+/// would wait for something that cannot happen, and the window would arrive
+/// three seconds later down the backstop, which this file rightly calls a bug
+/// rather than a mode. That is WKWebView's behaviour, which is where the comment
+/// above it came from; whether WebView2 does the same is a different question
+/// and wry hints that it might not (`webview2/mod.rs:544` sets the controller's
+/// own IsVisible from the WEBVIEW's attributes, not the window's, so a hidden
+/// window may still hold a webview that is drawing).
+///
+/// Until somebody measures it: the cost of being wrong this way is that the chat
+/// window appears in its ground colour rather than already drawn, for as long as
+/// a page served over loopback takes to paint. The cost of being wrong the other
+/// way is an application that takes three seconds longer to start. The
+/// experiment is one build: make this function do nothing for the chat window
+/// and watch when the window becomes visible.
+#[cfg(not(target_os = "macos"))]
+pub fn draws_unseen(window: &tauri::WebviewWindow) {
+    let _ = window.show();
+}
+
 /// And reveals one, once its page has something to show.
 fn into_view(window: &Window) {
+    #[cfg(target_os = "macos")]
     if let Some(webview_window) = window.app_handle().get_webview_window(window.label()) {
         let _ = webview_window.with_webview(|webview| {
             window_alpha(webview.ns_window(), 1.0);
             view_alpha(webview.inner(), 1.0);
         });
     }
+    // Everywhere else there is no alpha to raise: the window is already on the
+    // screen because that is how it was built (see draws_unseen below), so this
+    // is the idempotent second call, and the one that would matter if anything
+    // here ever built one hidden.
+    #[cfg(not(target_os = "macos"))]
+    let _ = window.show();
     let _ = window.set_focus();
 }
 

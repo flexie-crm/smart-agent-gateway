@@ -196,6 +196,84 @@ func TestTheArchiveAManifestNamesCanBeDownloaded(t *testing.T) {
 	}
 }
 
+// One host, two platforms, and each is offered its own release.
+//
+// This is the whole of what makes the manifest name load-bearing. `latestRelease`
+// builds the filename out of the target and the architecture the REQUEST carried,
+// so a Mac asks for personal-darwin-x86_64 and a Windows installation asks for
+// personal-windows-x86_64, and they are different files naming different
+// archives. Had the target been dropped anywhere along that path, the most
+// likely single answer is the one that exists today, and a Windows installation
+// would be handed a .app tarball it cannot install: a download, a signature
+// check, and a failure, every six hours, for ever.
+//
+// Both directions are asserted, because one of them would pass on its own. A
+// server that only ever answered the Mac manifest would satisfy the first half
+// of this test and fail the second.
+func TestEachPlatformIsOfferedItsOwnRelease(t *testing.T) {
+	dir := t.TempDir()
+	s := &Server{dir: dir}
+	writeManifest(t, dir, "personal-darwin-x86_64.json", release{
+		Version:   "0.2.0",
+		Signature: "the-mac-signature",
+		URL:       "/updates/personal/SAG-Personal-0.2.0.app.tar.gz",
+	})
+	writeManifest(t, dir, "personal-windows-x86_64.json", release{
+		Version:   "0.2.0",
+		Signature: "the-windows-signature",
+		URL:       "/updates/personal/SAG-Personal-0.2.0-x64-setup.exe",
+	})
+
+	for _, want := range []struct{ target, signature, url string }{
+		{"darwin", "the-mac-signature", "https://sag-repo.example/updates/personal/SAG-Personal-0.2.0.app.tar.gz"},
+		{"windows", "the-windows-signature", "https://sag-repo.example/updates/personal/SAG-Personal-0.2.0-x64-setup.exe"},
+	} {
+		got := ask(t, s, "/updates/personal/"+want.target+"/x86_64/0.1.0")
+		if got.Code != http.StatusOK {
+			t.Fatalf("%s was offered nothing: %d", want.target, got.Code)
+		}
+		var out release
+		if err := json.Unmarshal(got.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.Signature != want.signature {
+			t.Errorf("%s was offered the wrong platform's release: signature %q, want %q",
+				want.target, out.Signature, want.signature)
+		}
+		if out.URL != want.url {
+			t.Errorf("%s was pointed at %q, want %q", want.target, out.URL, want.url)
+		}
+	}
+}
+
+// And a platform with nothing published is told there is nothing, even while
+// another platform has a release sitting in the same directory.
+//
+// The failure this rules out is the one that looks like success: an arm64
+// Windows machine, or any target we have not built for, being handed the x86_64
+// release because something fell back to whatever manifest could be found. The
+// Apple Silicon freeze (KB/41) was the same shape from the other side, so the
+// answer here has to be an honest 204 rather than a nearby file.
+func TestAPlatformWithNothingPublishedIsToldSo(t *testing.T) {
+	dir := t.TempDir()
+	s := &Server{dir: dir}
+	writeManifest(t, dir, "personal-windows-x86_64.json", release{
+		Version:   "0.2.0",
+		Signature: "the-windows-signature",
+		URL:       "/updates/personal/SAG-Personal-0.2.0-x64-setup.exe",
+	})
+
+	for _, asked := range []string{
+		"/updates/personal/windows/aarch64/0.1.0", // right platform, wrong machine
+		"/updates/personal/darwin/x86_64/0.1.0",   // right machine, wrong platform
+		"/updates/enterprise/windows/x86_64/0.1.0",
+	} {
+		if got := ask(t, s, asked); got.Code != http.StatusNoContent {
+			t.Errorf("%s got %d, want 204: nothing is published for it", asked, got.Code)
+		}
+	}
+}
+
 func ask(t *testing.T, s *Server, path string) *httptest.ResponseRecorder {
 	t.Helper()
 	r := httptest.NewRequest(http.MethodGet, path, nil)

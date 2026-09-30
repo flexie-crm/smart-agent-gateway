@@ -49,6 +49,7 @@ export function Modal({
   submitDisabled,
   children,
   wide,
+  hideCancel,
   footerStart,
 }: {
   open: boolean
@@ -71,6 +72,16 @@ export function Modal({
   submitDisabled?: boolean
   children: ReactNode
   wide?: boolean
+  /**
+   * Drop the Cancel button.
+   *
+   * For a step that REPORTS something already done rather than asking for
+   * something. Offering to cancel there is offering to undo a write that has
+   * already happened, which the button cannot do: it closes the dialog, which
+   * is what the affirmative button does too, so the pair reads as a choice
+   * where there is none.
+   */
+  hideCancel?: boolean
   /**
    * An action pinned to the LEFT of the footer, opposite Cancel and the submit
    * button. This is where a destructive verb belongs (Delete), set apart from
@@ -132,9 +143,11 @@ export function Modal({
                 <footer className="flex items-center justify-between gap-2 border-t border-border px-5 py-3.5">
                   <div>{footerStart}</div>
                   <div className="flex gap-2">
-                    <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
-                      Cancel
-                    </Button>
+                    {!hideCancel && (
+                      <Button type="button" variant="ghost" onClick={() => onOpenChange(false)}>
+                        Cancel
+                      </Button>
+                    )}
                     <Button type="submit" disabled={submitting || loading || submitDisabled}>
                       {submitLabel}
                     </Button>

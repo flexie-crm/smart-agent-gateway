@@ -8,12 +8,14 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"flexie.io/sag/internal/cmdpolicy"
 	"flexie.io/sag/internal/model"
 	"flexie.io/sag/internal/store"
 	"flexie.io/sag/internal/tool"
 	"flexie.io/sag/internal/tools"
+	"flexie.io/sag/internal/tools/agentguide"
 	"flexie.io/sag/internal/tools/integrations"
 	"flexie.io/sag/internal/tools/machine"
 	"flexie.io/sag/internal/workflow"
@@ -82,6 +84,12 @@ func (a *App) ResolveTools(ctx context.Context, req ProfileRequest, profile *mod
 		ctx, req.WorkspaceID, req.UserID, req.DeviceID,
 		profile.Tools, profile.ConfirmTools, profile.Brains,
 		tool.OwnerOfSession(req.SessionID),
+		// What this turn's writes are attributed to. A knowledge base written
+		// during a conversation was written by the agent, on the person's
+		// behalf: which person it was for is in the transcript, and putting
+		// their name on the row instead would credit them for text they never
+		// wrote.
+		gatewayActing(profile),
 	)
 	if err != nil {
 		return tool.Loadout{}, err
@@ -97,7 +105,7 @@ func (a *App) ResolveTools(ctx context.Context, req ProfileRequest, profile *mod
 	// The Gateway gets its roster: the delegate tool that routes to an agent,
 	// and the agents themselves for the prompt. A workspace with no
 	// agents gets neither, and is exactly as simple as before.
-	subs, err := a.agentRoster(ctx, req.WorkspaceID, req.UserID)
+	subs, err := a.agentRoster(ctx, req.WorkspaceID, req.UserID, req.DeviceID)
 	if err != nil {
 		return tool.Loadout{}, err
 	}
@@ -117,11 +125,31 @@ func (a *App) ResolveTools(ctx context.Context, req ProfileRequest, profile *mod
 			loadout.Schemas = append(loadout.Schemas, t.schema)
 			loadout.Handlers[t.schema.Name] = t.handler
 		}
+		// And it can look one up. The prompt names its agents; this is how it
+		// finds out what one can actually reach before sending work there.
+		// Registered with the roster and not always, because a workspace with no
+		// agents would otherwise carry a tool whose only possible answer is
+		// "none".
+		guide := agentguide.New(func() []agentguide.Agent { return agentGuideRoster(subs) })
+		loadout.Schemas = append(loadout.Schemas, guide.Schema)
+		loadout.Handlers[guide.Schema.Name] = guide.Handle
+		// tool_guide was bound to this turn's own tools inside Loadout, before
+		// the agents were known. Rebind it over theirs as well, so a key that
+		// came out of agent_guide resolves instead of reading as a tool that
+		// does not exist; each one is labelled with the agent that holds it.
+		tools.BindToolGuide(loadout, agentToolGuides(subs)...)
 	}
+
+	// The skills it can reach: the ones it was assigned, plus the ones its own
+	// tools document. Present only where there are skills, for the same reason
+	// agent_guide is present only where there are agents.
+	tools.AppendSkills(&loadout, a.Store.Skills(), a.Machines, tools.Computer{
+		WorkspaceID: req.WorkspaceID, UserID: req.UserID, DeviceID: req.DeviceID,
+	}, reachableSkills(profile.Skills, loadout.Skills))
 
 	// The Gateway's own long-term memory, when it has one: an internal tool, no
 	// grant and no approval, present only because a memory brain is assigned.
-	tools.AppendMemory(&loadout, a.Store, profile.MemoryBrainID)
+	tools.AppendMemory(&loadout, a.Store, profile.MemoryBrainID, gatewayActing(profile))
 
 	// The prompt is assembled last, once everything it describes is known: the
 	// tools actually loaded, the agents on hand, the person, the memory.
@@ -159,6 +187,10 @@ func (a *App) buildGatewayPrompt(ctx context.Context, req ProfileRequest, profil
 	if err != nil {
 		return "", err
 	}
+	held, err := a.skillRosterFor(ctx, req.WorkspaceID, profile.Skills)
+	if err != nil {
+		return "", err
+	}
 
 	return renderGateway(gatewayPrompt{
 		now:             time.Now(),
@@ -172,10 +204,192 @@ func (a *App) buildGatewayPrompt(ctx context.Context, req ProfileRequest, profil
 		capabilities:    loadout.Schemas,
 		agents:          subs,
 		brains:          brains,
+		skills:          held,
 		folder:          req.WorkingFolder,
 		machine:         req.Machine,
 		instructions:    profile.Instructions,
 	}), nil
+}
+
+// agentGuideRoster is the roster as agent_guide answers it: each agent with the
+// abilities it can actually reach, grouped the way an administrator sees them
+// when they choose an agent's tools, plus the knowledge it holds.
+func agentGuideRoster(subs []agentInfo) []agentguide.Agent {
+	out := make([]agentguide.Agent, 0, len(subs))
+	for _, sub := range subs {
+		abilities := make([]agentguide.Ability, 0, len(sub.Abilities))
+		for _, schema := range sub.Abilities {
+			name := schema.FriendlyName
+			if name == "" {
+				name = schema.Name
+			}
+			abilities = append(abilities, agentguide.Ability{
+				// The callable key as well as the friendly name: it is what
+				// tool_guide takes, and the answer carrying it says in the same
+				// breath that it is not the Gateway's to call.
+				Key:         schema.Name,
+				Name:        name,
+				Description: schema.Description,
+				Group:       abilityGroup(schema),
+			})
+		}
+		knowledge := make([]agentguide.Knowledge, 0, len(sub.Brains.knowledge))
+		for _, kb := range sub.Brains.knowledge {
+			knowledge = append(knowledge, agentguide.Knowledge{Name: kb.name, ReadOnly: kb.readOnly})
+		}
+		out = append(out, agentguide.Agent{
+			Key:          sub.Key,
+			Name:         sub.Name,
+			Instructions: sub.Instructions,
+			Abilities:    abilities,
+			Knowledge:    knowledge,
+			Memory:       sub.Brains.memory,
+		})
+	}
+	return out
+}
+
+// abilityGroup is the heading one ability sits under. The same three answers the
+// admin console gives on the agent's own form (api.toolSource), because a
+// catalogue that disagrees with itself depending on who asked is worse than
+// either answer.
+func abilityGroup(schema tool.Schema) string {
+	switch schema.Kind {
+	case tool.KindMCP:
+		if service := serviceOfSchema(schema); service != "" {
+			return service
+		}
+		return "Connected service"
+	case tool.KindCustom:
+		return "Custom"
+	default:
+		return "Built-in"
+	}
+}
+
+// agentToolGuides is every tool this turn's agents hold, each tagged with the
+// agent that holds it, so tool_guide can answer for one without ever letting it
+// read as the Gateway's own.
+func agentToolGuides(subs []agentInfo) []tools.AgentTool {
+	var held []tools.AgentTool
+	for _, sub := range subs {
+		for _, schema := range sub.Abilities {
+			held = append(held, tools.AgentTool{Schema: schema, Agent: sub.Key})
+		}
+	}
+	return held
+}
+
+// skillRosterFor resolves an agent's skill assignments into the map its prompt
+// shows: the handle it addresses each by, and the name a person gave it.
+//
+// Only what RESOLVES is in it, which is the rule brainRosterFor follows and for
+// the same reason: a skill since deleted, or one an administrator switched off,
+// would otherwise produce a line naming something the agent cannot open. A
+// disabled skill is left out rather than marked, because the prompt is what the
+// agent may do and a skill it may not use is not a decision to put in front of
+// it every turn.
+//
+// The order is the store's (by handle), so the same assignment reads the same
+// way every turn: a prompt that reshuffles itself between turns is a prompt the
+// model cannot cache.
+// reachableSkills is what this turn may open: what the agent was ASSIGNED, plus
+// what its TOOLS document.
+//
+// The two are different in kind and both belong here. An assigned skill is in
+// the prompt's map, because it could bear on anything. A tool's skill is not
+// mentioned until the tool is, and it is reachable for a plainer reason: the
+// guide names it, so a guide whose named procedure could not be opened would be
+// a signpost to a locked door. Granting the tool granted the instructions.
+//
+// Deduplicated, because a skill can honestly be both, and the assignment is
+// kept first so the prompt's examples read in the order the person set.
+func reachableSkills(assigned, fromTools []int64) []int64 {
+	if len(fromTools) == 0 {
+		return assigned
+	}
+	seen := make(map[int64]bool, len(assigned)+len(fromTools))
+	all := make([]int64, 0, len(assigned)+len(fromTools))
+	for _, id := range append(append([]int64{}, assigned...), fromTools...) {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		all = append(all, id)
+	}
+	return all
+}
+
+// toolSkillIndex resolves every skill named by a custom tool in this turn, in
+// ONE query for the whole loadout.
+//
+// Nothing is read when no tool names one, which is the ordinary case: a
+// workspace that has never attached documentation to a tool pays nothing for
+// this. The same liveness rule as an agent's roster (active, with a version
+// that is actually live), because a guide naming a skill that cannot be opened
+// is worse than a guide naming none.
+func (a *App) toolSkillIndex(ctx context.Context, workspaceID int64, rows map[string]*model.Tool) (map[int64]skillOnHand, error) {
+	wanted := map[int64]bool{}
+	for _, row := range rows {
+		if row == nil || row.Kind != string(tool.KindCustom) {
+			continue
+		}
+		for _, id := range row.Skills {
+			wanted[id] = true
+		}
+	}
+	if len(wanted) == 0 {
+		return nil, nil
+	}
+	all, err := a.Store.Skills().Skills(ctx, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("load the skills a tool documents: %w", err)
+	}
+	index := make(map[int64]skillOnHand, len(wanted))
+	for _, s := range all {
+		if !wanted[s.ID] || s.Status != model.SkillActive || s.ActiveVersionID == 0 {
+			continue
+		}
+		index[s.ID] = skillOnHand{id: s.ID, handle: s.Name, name: s.Label()}
+	}
+	return index, nil
+}
+
+// heldSkills picks one tool's skills out of the index, keeping the order the
+// tool named them in and dropping the ones that did not resolve.
+func heldSkills(index map[int64]skillOnHand, ids []int64) []skillOnHand {
+	if len(index) == 0 || len(ids) == 0 {
+		return nil
+	}
+	held := make([]skillOnHand, 0, len(ids))
+	for _, id := range ids {
+		if s, ok := index[id]; ok {
+			held = append(held, s)
+		}
+	}
+	return held
+}
+
+func (a *App) skillRosterFor(ctx context.Context, workspaceID int64, skillIDs []int64) ([]skillOnHand, error) {
+	if len(skillIDs) == 0 {
+		return nil, nil
+	}
+	all, err := a.Store.Skills().Skills(ctx, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("load skills for prompt: %w", err)
+	}
+	held := make(map[int64]bool, len(skillIDs))
+	for _, id := range skillIDs {
+		held[id] = true
+	}
+	roster := make([]skillOnHand, 0, len(skillIDs))
+	for _, s := range all {
+		if !held[s.ID] || s.Status != model.SkillActive || s.ActiveVersionID == 0 {
+			continue
+		}
+		roster = append(roster, skillOnHand{id: s.ID, handle: s.Name, name: s.Label()})
+	}
+	return roster, nil
 }
 
 // brainRosterFor resolves an agent's brain assignments into the map its prompt
@@ -280,6 +494,7 @@ func (a *App) applyDefaultAgent(ctx context.Context, workspaceID int64, profile 
 	}
 
 	profile.AgentID = &agent.ID
+	profile.AgentName = agent.Name
 	// The house prompt is appended to the base, not a replacement for it: an
 	// administrator shapes the assistant, they do not get to drop the identity
 	// and the communication rules underneath.
@@ -309,6 +524,9 @@ func (a *App) applyDefaultAgent(ctx context.Context, workspaceID int64, profile 
 	// exactly this set when it binds their handlers (KB/26).
 	profile.Brains = agent.Brains
 	profile.MemoryBrainID = agent.MemoryBrainID
+	// And the skills it may use, which ride along for the same reason: the skill
+	// tools are scoped to exactly this set when their handlers are bound.
+	profile.Skills = agent.Skills
 	return nil
 }
 
@@ -414,6 +632,17 @@ func (a *App) subject(ctx context.Context, req ProfileRequest) (workflow.Subject
 // plus the projected MCP and custom tools. confirm names the tools this
 // assistant must stop and confirm; a tool listed there loads requiring
 // approval, on top of the code floor and any MCP drift lock.
+// gatewayActing is who the Gateway's own writes are recorded as: the name the
+// workspace gave it, or the product's own word when it has no row to be named
+// by. Never blank, because a write with no author is a write nobody can account
+// for.
+func gatewayActing(profile *model.Profile) model.Actor {
+	if profile.AgentName != "" {
+		return model.Actor{Name: profile.AgentName}
+	}
+	return model.Actor{Name: model.DefaultAgentName}
+}
+
 func (a *App) Loadout(
 	ctx context.Context,
 	workspaceID, userID int64,
@@ -421,6 +650,7 @@ func (a *App) Loadout(
 	names, confirm []string,
 	brains []int64,
 	owner tool.Owner,
+	by model.Actor,
 ) (tool.Loadout, error) {
 	loadout := a.Tools.Load(names)
 	if len(names) == 0 && len(loadout.Schemas) == 0 {
@@ -507,10 +737,12 @@ func (a *App) Loadout(
 		// through it; everything else about them is unchanged.
 		onDemand = append(onDemand, tool.Schema{
 			Name:             row.Name,
-			FriendlyName:     row.FriendlyName,
+			FriendlyName:     shownAs(service, row.FriendlyName),
 			Description:      row.Description,
 			InputSchema:      row.InputSchema,
 			Kind:             tool.KindMCP,
+			Service:          service,
+			RemoteName:       row.RemoteName,
 			Risk:             tool.RiskLevel(row.Risk),
 			RequiresApproval: row.RequiresApproval || confirmSet[row.Name],
 			DefinitionHash:   row.DefinitionHash,
@@ -530,6 +762,13 @@ func (a *App) Loadout(
 	// its handler is the template bound to its stored config, and its deep guide
 	// comes from the template's code. The same three agreements held before it
 	// reached here (the row exists, is active, is granted).
+	// The documentation the custom tools in this turn point at, resolved ONCE:
+	// a workspace has one list of skills, and asking per tool would be a query
+	// per tool on every turn.
+	docs, err := a.toolSkillIndex(ctx, workspaceID, byName)
+	if err != nil {
+		return tool.Loadout{}, err
+	}
 	for _, name := range names {
 		if _, taken := loadout.Handlers[name]; taken {
 			continue
@@ -538,9 +777,16 @@ func (a *App) Loadout(
 		if !ok || row.Kind != string(tool.KindCustom) || row.Template == "" {
 			continue
 		}
-		schema, handler, bound := a.bindCustom(row, owner)
+		held := heldSkills(docs, row.Skills)
+		schema, handler, bound := a.bindCustom(row, owner, held)
 		if !bound {
 			continue
+		}
+		// What this turn may open BECAUSE it holds this tool. Only the ones
+		// that resolved: a skill that was switched off is not named in the
+		// guide either, so the two cannot disagree.
+		for _, sk := range held {
+			loadout.Skills = append(loadout.Skills, sk.id)
 		}
 		schema.RequiresApproval = schema.RequiresApproval || row.RequiresApproval || confirmSet[schema.Name]
 		kept = append(kept, schema)
@@ -552,7 +798,7 @@ func (a *App) Loadout(
 	// Scope the brain tools to this agent's own brains. They loaded with an empty
 	// allow-list; this is where their handlers are bound to what the agent may
 	// reach, for the Gateway and every agent alike.
-	tools.BindBrains(loadout, a.Store, brains)
+	tools.BindBrains(loadout, a.Store, brains, by)
 	// Point tool_guide at THIS turn's abilities. Bound to the code's registry it
 	// cannot see a tool an administrator created or one projected from a remote
 	// server: their guides and topics exist and nothing could reach them.
@@ -581,7 +827,7 @@ func (a *App) Loadout(
 				"An administrator should open its settings and save them again. Report that rather than "+
 				"trying another command.")
 		} else {
-			machine.BindTerminal(loadout, a.Machines, policy)
+			machine.BindTerminal(loadout, a.Machines, policy, owner)
 		}
 	}
 	return loadout, nil
@@ -642,14 +888,50 @@ func connectedServices(ids map[string]int64, held []tool.Schema) []integrations.
 	return services
 }
 
-// serviceOfSchema reads the service out of the approval title written where the
-// tool was projected ("Search, on CRM"), which is the one place a projected
-// tool records whose it is.
+// serviceOfSchema is which connected service a tool came from, empty for one of
+// ours. It used to cut the name back out of the approval title ("Search, on
+// CRM"), which was prose written for a person to read on a card; the schema
+// carries the fact now.
 func serviceOfSchema(schema tool.Schema) string {
-	if _, after, found := strings.Cut(schema.ApprovalTitle, ", on "); found {
-		return strings.TrimSpace(after)
+	return schema.Service
+}
+
+// shownAs is what a PROJECTED tool is called on the screen and in the
+// transcript: the connection it came from, then the tool.
+//
+// "Flexie Search" on its own does not say whose search it is, and a workspace
+// can connect two services that both offer one, so a person reading what the
+// assistant just did had no way to tell them apart. The name a person sees is
+// now the pair, and because the frame and the stored row are the same string
+// (agent_tool_calls.friendly_name is written from this), the transcript reads
+// the same way afterwards as it did live.
+//
+// Only a projected tool gets a prefix. A built-in IS the product, and naming
+// the product inside its own interface says nothing.
+//
+// Bounded, because it is two columns joined into one. Both halves are
+// varchar(255) (tools.friendly_name, mcp_servers.name), so an unbounded join
+// reaches 513 characters against the varchar(255) it is stored in, and the
+// database runs in STRICT_TRANS_TABLES where that is error 1406: a failed
+// insert, not a quiet truncation, which would take the tool call down with it.
+// The service keeps its room and the tool's half gives way, since the prefix is
+// the half that tells two services apart. Same shape as truncateError in the
+// store, cutting back to a rune boundary rather than through one.
+func shownAs(service, friendly string) string {
+	if service == "" {
+		return friendly
 	}
-	return ""
+	const max = 255
+	const sep = " / "
+	name := service + sep + friendly
+	if len(name) <= max {
+		return name
+	}
+	cut := max - len("…")
+	for cut > 0 && !utf8.ValidString(name[:cut]) {
+		cut--
+	}
+	return name[:cut] + "…"
 }
 
 // aliasOf is the prefix a service's tools carry, which is what makes a name

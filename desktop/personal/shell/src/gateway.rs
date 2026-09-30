@@ -609,9 +609,15 @@ mod tests {
     fn a_port_somebody_is_serving_is_not_free() {
         let held = std::net::TcpListener::bind("127.0.0.1:0").expect("a port to hold");
         let port = held.local_addr().expect("its address").port();
-        assert!(!super::unoccupied(port), "port {port} is held and was called free");
+        assert!(
+            !super::unoccupied(port),
+            "port {port} is held and was called free"
+        );
         drop(held);
-        assert!(super::unoccupied(port), "port {port} was let go and is still called taken");
+        assert!(
+            super::unoccupied(port),
+            "port {port} was let go and is still called taken"
+        );
 
         let wildcard = std::net::TcpListener::bind("0.0.0.0:0").expect("a wildcard port to hold");
         let port = wildcard.local_addr().expect("its address").port();
@@ -637,8 +643,11 @@ mod tests {
         struct Contract {
             ports: Vec<u16>,
         }
-        let agreed: Contract = serde_json::from_str(include_str!("../../../loopback-ports.json"))
-            .expect("loopback-ports.json is not valid JSON");
+        let agreed: Contract = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../loopback-ports.json"
+        )))
+        .expect("loopback-ports.json is not valid JSON");
 
         let binds: Vec<u16> = (FIRST_PORT..FIRST_PORT + PORT_COUNT).collect();
         assert_eq!(

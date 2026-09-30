@@ -50,7 +50,10 @@ func (t queryTemplate) reachFor(call tool.Call) *datasource.Reach {
 func (queryTemplate) Name() string  { return TemplateName }
 func (queryTemplate) Title() string { return "Query Database" }
 func (queryTemplate) Description() string {
-	return "Run SQL against a database you connect to. Read, write, or both, within the access you choose."
+	return "Connect the assistant to one database so it can answer questions from real data. The " +
+		"connection details are stored encrypted on the tool and are never shown to the assistant. " +
+		"You choose whether it may read, write or both, and which tables and fields it is allowed " +
+		"to see."
 }
 
 // Variants are the database drivers, drawn from the shared datasource registry.
@@ -244,6 +247,11 @@ func (queryTemplate) Params() []template.Param {
 
 // DefaultGuide is the plain-text guide the form prefills, which an administrator
 // refines for their database.
+func (queryTemplate) DefaultDescription() string {
+	return "Run SQL against this database. The statement goes in sql and its parameter values in " +
+		"params. Read this tool's guide before writing a query."
+}
+
 func (queryTemplate) DefaultGuide() string {
 	return "Run exactly one SQL statement per call. Never build a query by pasting values into the SQL " +
 		"string: put a ? where each value goes and pass the values in params, in order. The access mode " +
@@ -302,41 +310,13 @@ func (queryTemplate) Build(in template.Input) (template.Instance, error) {
 			Name:         TemplateName + "_" + alias,
 			FriendlyName: display,
 			Description:  description,
-			InputSchema:  buildInputSchema(queryTemplate{}.Params(), in.ParamDescriptions),
+			InputSchema:  template.InputSchema(queryTemplate{}.Params(), in.ParamDescriptions),
 			Kind:         tool.KindCustom,
 			Risk:         risk,
 		},
 		Config: config,
 		Guide:  guide,
 	}, nil
-}
-
-// buildInputSchema assembles the tool's JSON Schema from its fixed params, using
-// the administrator's edited description for each where given. The param
-// identities (key, type, required) are always the template's.
-func buildInputSchema(params []template.Param, descriptions map[string]string) json.RawMessage {
-	properties := map[string]any{}
-	var required []string
-	for _, p := range params {
-		desc := p.Description
-		if override, ok := descriptions[p.Key]; ok && strings.TrimSpace(override) != "" {
-			desc = override
-		}
-		prop := map[string]any{"type": p.Type, "description": desc}
-		if p.Type == "array" {
-			prop["items"] = map[string]any{}
-		}
-		properties[p.Key] = prop
-		if p.Required {
-			required = append(required, p.Key)
-		}
-	}
-	schema := map[string]any{"type": "object", "properties": properties}
-	if len(required) > 0 {
-		schema["required"] = required
-	}
-	raw, _ := json.Marshal(schema)
-	return raw
 }
 
 // Config builds the nested connection config from the flat form settings: the

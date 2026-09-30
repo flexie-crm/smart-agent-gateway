@@ -64,7 +64,7 @@ teams, shared models and shared knowledge.
 
 ## Getting started
 
-You need Go 1.26, Node 22 and MariaDB 11.4. Rust as well if you are building the
+You need Go 1.27, Node 22 and MariaDB 11.4. Rust as well if you are building the
 desktop applications.
 
 ```sh

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"flexie.io/sag/internal/chat"
@@ -67,6 +68,13 @@ type BackgroundDelegation struct {
 	UserID       int64
 	SessionID    int64
 	ModelID      int64
+	// DeviceID is the computer this agent may act on, carried from the turn
+	// that started it and read back off its own row after a restart. Empty when
+	// there was none.
+	DeviceID string
+	// StepChanged is the turn's StepChanged, handed in by whoever runs the
+	// agent (Turn.StepChanged says why).
+	StepChanged func(stepID int64)
 }
 
 // derefID reads an optional row id, zero when there is none.
@@ -273,6 +281,10 @@ func (r *Runner) delegateBackground(
 		ParentToolCallID: call.ToolCallID,
 		AgentKey:         sub.Key,
 		Mode:             model.HandoffBackground,
+		// The computer this turn came from, so the agent reaches the same one
+		// an hour later (Turn.DeviceID says exactly this) and still holds its
+		// machine tools after a restart, where this row is all there is.
+		DeviceID: turn.DeviceID,
 		// The instruction, written down. It is the one thing a killed agent
 		// cannot be started again without: everything else it needs is already
 		// on this row, and the task used to live only in this goroutine's
@@ -337,8 +349,36 @@ func (r *Runner) delegateBackground(
 		UserID:       turn.UserID,
 		SessionID:    turn.SessionID,
 		ModelID:      turn.ModelID,
+		DeviceID:     turn.DeviceID,
 	})
 	return tool.Result{Content: payload}, "", false, nil
+}
+
+// detachedTurn is the turn a detached agent runs as, built in ONE place.
+//
+// It was three places, and two of them forgot a field. The device went into
+// RunBackgroundAgent and Resume and was missed in RunFleetMember, so a fleet
+// agent was offered the terminal (its loadout was resolved with the device)
+// and then refused when it called it (its turn was not), which is the same
+// drift tool.Call had and the same answer: one constructor, no second copy to
+// keep in step.
+// Pure, and autoApprove is a parameter rather than a lookup, so the field list
+// (the thing that actually drifted) can be checked without a database.
+func detachedTurn(bg BackgroundDelegation, autoApprove bool) Turn {
+	return Turn{
+		WorkspaceID: bg.WorkspaceID,
+		UserID:      bg.UserID,
+		SessionID:   bg.SessionID,
+		ModelID:     bg.ModelID,
+		// The computer it may act on. Without it a detached agent's machine
+		// tools are dropped from its loadout entirely (machine.Offers), and
+		// with it on the loadout but not here they are offered and then
+		// refused, which is worse.
+		DeviceID:     bg.DeviceID,
+		AutoApprove:  autoApprove,
+		DelegationID: bg.DelegationID,
+		StepChanged:  bg.StepChanged,
+	}
 }
 
 // RunBackgroundAgent runs a background delegation's agent to a
@@ -348,14 +388,7 @@ func (r *Runner) delegateBackground(
 // narrates at completion. A park unwinds to ErrBackgroundParked, so the app can
 // suspend the delegation rather than mistake it for a failure.
 func (r *Runner) RunBackgroundAgent(ctx context.Context, bg BackgroundDelegation, out *chat.Stream) (string, error) {
-	turn := Turn{
-		WorkspaceID:  bg.WorkspaceID,
-		UserID:       bg.UserID,
-		SessionID:    bg.SessionID,
-		ModelID:      bg.ModelID,
-		AutoApprove:  r.sessionAutoApproves(ctx, bg.WorkspaceID, bg.SessionID),
-		DelegationID: bg.DelegationID,
-	}
+	turn := detachedTurn(bg, r.sessionAutoApproves(ctx, bg.WorkspaceID, bg.SessionID))
 	answer, err := r.runAgent(ctx, turn, bg.Sub, bg.Task, model.HandoffBackground, bg.ParentCallID, out)
 	if errors.Is(err, errParked) {
 		return "", ErrBackgroundParked
@@ -373,6 +406,12 @@ type BackgroundResume struct {
 	UserID      int64
 	SessionID   int64
 	ModelID     int64
+	// DeviceID is the computer the agent may act on, the same one its first leg
+	// had: an approved call runs HERE, so losing it would mean approving an
+	// action that then cannot reach anything.
+	DeviceID string
+	// StepChanged is the turn's StepChanged, as on BackgroundDelegation.
+	StepChanged func(stepID int64)
 }
 
 // backgroundRejected is the result a background delegation ends with when the
@@ -389,11 +428,13 @@ const backgroundRejected = "The person declined the action this task needed, so 
 func (r *Runner) ResumeBackgroundAgent(ctx context.Context, br BackgroundResume, out *chat.Stream) (string, error) {
 	turn := Turn{
 		WorkspaceID: br.WorkspaceID, UserID: br.UserID, SessionID: br.SessionID, ModelID: br.ModelID,
+		DeviceID:    br.DeviceID,
 		AutoApprove: r.sessionAutoApproves(ctx, br.WorkspaceID, br.SessionID),
 		Resume:      &Resume{Snapshot: br.Snapshot, Approved: br.Approved},
 		// Carried through the resume, so a SECOND card this agent raises is
 		// stamped with the same member as the first.
 		DelegationID: derefID(br.Snapshot.DelegationID),
+		StepChanged:  br.StepChanged,
 	}
 	subByName := runnable(br.Sub.Tools)
 
@@ -487,7 +528,7 @@ func (r *Runner) resolveDelegationCall(ctx context.Context, turn Turn, del *mode
 		FriendlyName: agentFriendlyName, RequestedApproval: true,
 	}
 	if del.Status == model.DelegationDone {
-		result := delegationResult(del.AgentKey, resultText(del.Result), true)
+		result := delegationResult(del.AgentKey, ResultText(del.Result), true)
 		r.resolveCall(ctx, turn, parent, model.ToolCallCompleted, result, "", 0, true)
 		return
 	}
@@ -517,10 +558,10 @@ func completionWake(name string, id int64) string {
 		name, id)
 }
 
-// resultText pulls the agent's answer out of the delegation's stored
+// ResultText pulls the agent's answer out of the delegation's stored
 // result, which the app writes as {"result": "..."}. It falls back to the raw
 // JSON so a differently shaped result is still shown rather than dropped.
-func resultText(raw json.RawMessage) string {
+func ResultText(raw json.RawMessage) string {
 	var payload struct {
 		Result string `json:"result"`
 	}
@@ -747,7 +788,34 @@ func (r *Runner) agentLoop(
 			})
 		}
 	}
-	return "I was not able to finish this task.", nil
+	// The agent never stopped calling tools, so it ran out of steps. Say that,
+	// the way the Gateway already says it of itself (stoppedShort): "I was not
+	// able to finish this task" reads as something going wrong, and hides both
+	// that a limit was reached and that somebody can raise it.
+	//
+	// This sentence is what reaches the person. In terminal mode the agent's
+	// answer IS the turn's answer, so they read it as it is; in continue mode
+	// it is the whole of what the Gateway has to relay. It is not saved as an
+	// agent step, because a reloaded conversation deliberately does not replay
+	// an agent's own steps (api/chat.go), so saving it would show nobody
+	// anything.
+	r.log.Warn().Int64("session_id", turn.SessionID).Str("agent", sub.Key).
+		Int("limit", limit).Msg("an agent's tool loop hit its limit")
+
+	return fmt.Sprintf(
+		"I stopped before finishing: this task reached my limit of %d steps. "+
+			"Part of the work may already be done, so check before repeating it. Ask me to carry on, "+
+			"or raise the step limit for %s in the console.", limit, agentName(sub)), nil
+}
+
+// agentName is what to call an agent in something a person reads: its name, or
+// its key when it has none, which is not friendly but is better than a sentence
+// with a gap in it.
+func agentName(sub AgentProfile) string {
+	if name := strings.TrimSpace(sub.Name); name != "" {
+		return name
+	}
+	return sub.Key
 }
 
 // resumeDelegation continues a delegation whose agent stopped to ask a
@@ -858,6 +926,7 @@ func (r *Runner) resumeDelegation(
 
 	if snap.HandoffMode == model.HandoffTerminal {
 		// The agent's answer is the turn's answer; the Gateway adds nothing.
+		r.recordTerminalAnswer(ctx, turn, subAnswer)
 		return answer{Content: subAnswer}, nil
 	}
 	// Continue mode: the Gateway reads the delegation's result (now on its row)
@@ -934,9 +1003,11 @@ func (r *Runner) saveAgentStep(ctx context.Context, turn Turn, step *model.Agent
 	step.SessionID = turn.SessionID
 	step.AgentKey = key
 	step.ParentToolCallID = parent
+	step.DelegationID = turn.DelegationID
 	if err := r.store.Agent().SaveStep(ctx, step); err != nil {
 		return fmt.Errorf("save agent step: %w", err)
 	}
+	turn.stepChanged(step.ID)
 	return nil
 }
 
@@ -1012,7 +1083,7 @@ func (r *Runner) streamAgentStep(
 			}
 		case provider.EventUsage:
 			if event.Usage != nil {
-				r.recordModelCall(ctx, turn, resolved, started, *event.Usage)
+				r.recordModelCall(ctx, turn, resolved, started, *event.Usage, req)
 				// The exact, vendor-reported spend of this one model call. A
 				// background agent's chip accumulates it into a running
 				// total; on the Gateway's stream a client ignores it. Emitted
@@ -1063,13 +1134,8 @@ func (r *Runner) runAgentTool(
 
 	started := time.Now()
 	result, err := runWithHeartbeat(ctx, out, func() (tool.Result, error) {
-		return handler(ctx, tool.Call{
-			WorkspaceID: turn.WorkspaceID,
-			UserID:      turn.UserID,
-			SessionID:   turn.SessionID,
-			Name:        call.ToolName,
-			Args:        call.Args,
-		})
+		// The same call the Gateway's own tools get, device included (callFor).
+		return handler(ctx, callFor(turn, call))
 	})
 	if err != nil {
 		r.log.Error().Err(err).Str("tool", call.ToolName).Str("agent", sub.Key).

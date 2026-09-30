@@ -95,9 +95,29 @@ if [ "$BUILT" = 1 ]; then
 	export SAG_CHAT_DIR=$ROOT/chat-ui/dist/personal
 else
 	echo "==> starting the console and the chat"
-	(cd admin-ui && npm run dev -- --port "$CONSOLE_PORT" --strictPort >"$OUT/console-dev.log" 2>&1) &
+	# --mode personal, and it is load-bearing.
+	#
+	# Both front ends carry a .env.development that points them at
+	# http://localhost:8080, which is right for `make admin-dev` and `make
+	# ui-dev`, where the page runs on its own origin and calls a separate
+	# gateway with CORS allowing it. It is WRONG here: these pages are served
+	# THROUGH this edition's gateway, so they must call the origin they came
+	# from, exactly as the shipped application does.
+	#
+	# Vite loads .env.development whenever the mode is "development", so the
+	# override applied here too and every request left the gateway for a port
+	# with nothing on it: "blocked by CORS policy: No
+	# Access-Control-Allow-Origin header" on /v1/auth/refresh and /v1/meta, and
+	# a console that could not sign in or read its own posture.
+	#
+	# A mode with no .env file of its own is the deterministic fix: nothing is
+	# loaded, VITE_SAG_API_URL is unset, and API_BASE falls back to "" which is
+	# the same origin. Exporting an empty value instead would depend on vite's
+	# precedence between process.env and .env files, which is a version detail
+	# to look up rather than a property to rely on.
+	(cd admin-ui && npm run dev -- --mode personal --port "$CONSOLE_PORT" --strictPort >"$OUT/console-dev.log" 2>&1) &
 	PAGES+=($!)
-	(cd chat-ui && VITE_BASE_PATH=/chat/ npm run dev -- --port "$CHAT_PORT" --strictPort >"$OUT/chat-dev.log" 2>&1) &
+	(cd chat-ui && VITE_BASE_PATH=/chat/ npm run dev -- --mode personal --port "$CHAT_PORT" --strictPort >"$OUT/chat-dev.log" 2>&1) &
 	PAGES+=($!)
 	export SAG_CONSOLE_DIR=http://127.0.0.1:$CONSOLE_PORT
 	export SAG_CHAT_DIR=http://127.0.0.1:$CHAT_PORT

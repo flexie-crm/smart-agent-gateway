@@ -35,6 +35,7 @@ type SQLStore struct {
 	settings    *settingStore
 	stats       *statsStore
 	brains      *brainStore
+	skills      *skillStore
 	tools       *toolStore
 	jobs        *jobStore
 	mcpServers  *mcpServerStore
@@ -97,6 +98,7 @@ func Open(ctx context.Context, dsn string) (*SQLStore, error) {
 		runs:        &runStore{db: wrapped},
 		stats:       &statsStore{db: wrapped},
 		brains:      &brainStore{db: wrapped},
+		skills:      &skillStore{db: wrapped},
 		tools:       &toolStore{db: wrapped},
 		jobs:        &jobStore{db: wrapped},
 		mcpServers:  &mcpServerStore{db: wrapped},
@@ -130,6 +132,7 @@ func (s *SQLStore) OAuth() store.OAuthStore                 { return s.oauth }
 func (s *SQLStore) Runs() store.RunStore                    { return s.runs }
 func (s *SQLStore) Stats() store.StatsStore                 { return s.stats }
 func (s *SQLStore) Brains() store.BrainStore                { return s.brains }
+func (s *SQLStore) Skills() store.SkillStore                { return s.skills }
 func (s *SQLStore) Tools() store.ToolStore                  { return s.tools }
 func (s *SQLStore) Jobs() store.JobStore                    { return s.jobs }
 func (s *SQLStore) MCPServers() store.MCPServerStore        { return s.mcpServers }

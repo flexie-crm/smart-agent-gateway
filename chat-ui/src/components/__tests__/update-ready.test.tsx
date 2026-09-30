@@ -22,10 +22,11 @@ type Handler = (event: { payload?: { version?: string } }) => void
  * that something is listening and that test firing the event. Keeping the
  * handler makes the test measure the component rather than that race.
  */
-function shell() {
+function shell(running = '0.1.0') {
   const live = new Set<string>()
   let last: Handler | undefined
   ;(window as unknown as { __TAURI__: unknown }).__TAURI__ = {
+    app: { getVersion: () => Promise.resolve(running) },
     event: {
       listen: (name: string, handler: Handler) => {
         live.add(name)
@@ -89,17 +90,33 @@ describe('the update chip in the chat', () => {
     expect(await screen.findByText(/Version 0\.1\.5 is installed/)).toBeTruthy()
   })
 
-  it('says nothing on a fresh launch, which is a new origin with an empty store', () => {
-    // The gateway takes a free port every launch (gateway.rs:513), so a
-    // reopened application cannot see what the previous one wrote. That is what
-    // clears the chip, rather than any code here.
-    shell()
+  it('forgets the saved version once it is the one running', async () => {
+    // 0.1.19 on 25 September: the old process saved the notice, the application
+    // was reopened on the same port and so the same storage, and the new one
+    // read it back and said to reopen into the version it already was. A test
+    // with an empty store stood in for "a fresh launch" and could not fail.
+    window.localStorage.setItem('sag.update-ready', '0.1.19')
+    shell('0.1.19')
     render(
       <StrictMode>
         <UpdateReady />
       </StrictMode>,
     )
+    await waitFor(() => expect(window.localStorage.getItem('sag.update-ready')).toBeNull())
     expect(screen.queryByText(/installed/i)).toBeNull()
+  })
+
+  it('reads versions as numbers, so 0.1.10 is later than 0.1.9', async () => {
+    // As text, "0.1.10" sorts before "0.1.9", and a waiting update would be
+    // thrown away on the next reload.
+    window.localStorage.setItem('sag.update-ready', '0.1.10')
+    shell('0.1.9')
+    render(
+      <StrictMode>
+        <UpdateReady />
+      </StrictMode>,
+    )
+    expect(await screen.findByText(/Version 0\.1\.10 is installed/)).toBeTruthy()
   })
 
   it('shows nothing in a browser, where there is no shell to hear', () => {

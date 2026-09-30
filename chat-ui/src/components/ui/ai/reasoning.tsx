@@ -6,6 +6,7 @@ import {
 } from '@/components/ui/collapsible';
 import { cn } from '@/lib/utils';
 import { ChevronDownIcon, Lightbulb } from 'lucide-react';
+import { TIMELINE_CHEVRON } from './timeline-chevron';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { normalizeMarkdown } from '@/lib/content-normalizer';
@@ -166,9 +167,9 @@ export const ReasoningTrigger = memo(
             </span>
             {hasReasoning && (
               <ChevronDownIcon
-                style={{height: '20px', width: '20px', marginTop: '4px'}}
                 className={cn(
-                  'size-3 text-muted-foreground/60 transition-transform',
+                  TIMELINE_CHEVRON,
+                  'text-muted-foreground/60 transition-transform',
                   isOpen ? 'rotate-180' : 'rotate-0'
                 )}
               />

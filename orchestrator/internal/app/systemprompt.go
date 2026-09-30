@@ -7,9 +7,11 @@ import (
 
 	"flexie.io/sag/internal/model"
 	"flexie.io/sag/internal/tool"
+	"flexie.io/sag/internal/tools/agentguide"
 	"flexie.io/sag/internal/tools/brain"
 	"flexie.io/sag/internal/tools/integrations"
 	"flexie.io/sag/internal/tools/recall"
+	"flexie.io/sag/internal/tools/skills"
 )
 
 // The system prompt, assembled. A prompt is not a stored string an
@@ -35,10 +37,11 @@ type gatewayPrompt struct {
 	services        []connectedService // what this turn can reach, by name and by the prefix its tools wear
 	capabilities    []tool.Schema
 	agents          []agentInfo
-	brains          brainRoster // the knowledge bases it can consult, and its memory brain
-	folder          string      // the folder on the person's computer this turn may work in
-	machine         *MachineEnv // what kind of computer that is; nil when there is none to act on
-	instructions    string      // the administrator's own prompt, appended
+	brains          brainRoster   // the knowledge bases it can consult, and its memory brain
+	skills          []skillOnHand // the procedures it holds, by handle and name only
+	folder          string        // the folder on the person's computer this turn may work in
+	machine         *MachineEnv   // what kind of computer that is; nil when there is none to act on
+	instructions    string        // the administrator's own prompt, appended
 }
 
 // brainRoster is the MAP of an agent's brains for the prompt: the knowledge bases
@@ -55,6 +58,26 @@ type knowledgeBrain struct {
 	name       string
 	readOnly   bool
 	categories []string
+}
+
+// skillOnHand is one skill in the prompt's map of them: the handle the agent
+// addresses it by, and the name a person gave it.
+//
+// NOT the description, which is the field the Agent Skills format designed to be
+// selected on and which runs to several hundred characters. Twenty skills would
+// be kilobytes of every turn, spent on skills most turns never touch. The agent
+// roster already learned this: it wrote out every tool of every agent with a
+// sentence each to inform a decision taken in a handful of turns, and it was cut
+// back to a map. search_skill is what reaches the descriptions, and it is the
+// only thing that does.
+type skillOnHand struct {
+	// id is not printed. It is here because a tool's skills have to be added to
+	// what the turn may OPEN as well as named in its guide, and those two go
+	// through the same resolution so they cannot disagree about which skills
+	// are live.
+	id     int64
+	handle string
+	name   string
 }
 
 // renderGateway writes the Gateway assistant's system prompt.
@@ -76,13 +99,16 @@ func renderGateway(p gatewayPrompt) string {
 	b.section("How to write your answers", formatting)
 	b.section("How you communicate", communication)
 	if len(p.agents) > 0 {
-		b.section("Agents you can draw on", agentsBody(p.agents))
+		b.section("Agents you can draw on, explore with "+agentguide.Name, agentsBody(p.agents))
 	}
 	if svc := servicesSection(p.services); svc != "" {
 		b.section("MCP Servers integrations connected to this workspace", svc)
 	}
 	if k := knowledgeSection(p.brains.knowledge); k != "" {
 		b.section("Knowledge you can consult, explore with "+brain.ReadName, k)
+	}
+	if sk := skillsSection(p.skills); sk != "" {
+		b.section("Skills you hold, opened with "+skills.LoadName, sk)
 	}
 	if notes := strings.TrimSpace(p.workspaceMemory); notes != "" {
 		// That they exist, and how to read them. Same reason as the person's:
@@ -111,6 +137,7 @@ type agentPrompt struct {
 	role         string // the agent's own instructions: its whole identity
 	capabilities []tool.Schema
 	brains       brainRoster
+	skills       []skillOnHand
 	folder       string      // the folder on the person's computer this turn may work in
 	machine      *MachineEnv // what kind of computer that is; nil when there is none to act on
 }
@@ -132,6 +159,9 @@ func renderAgent(p agentPrompt) string {
 	b.section("How you communicate", communication)
 	if k := knowledgeSection(p.brains.knowledge); k != "" {
 		b.section("Knowledge you can consult, explore with "+brain.ReadName, k)
+	}
+	if sk := skillsSection(p.skills); sk != "" {
+		b.section("Skills you hold, opened with "+skills.LoadName, sk)
 	}
 	if m := memorySection(p.brains.memory); m != "" {
 		b.section("Your long-term memory, used with "+brain.MemoryName, m)
@@ -334,10 +364,28 @@ func personSection(name, memory string) string {
 		if name != "" {
 			b.WriteString("\n\n")
 		}
-
+		b.WriteString(personMemoryPreamble)
 	}
 	return b.String()
 }
+
+// personMemoryPreamble says that there ARE notes about this person, without
+// carrying them.
+//
+// It was MISSING, and its absence is why this function had a stray blank line
+// in it. The two lines that used to paste the notes into the prompt were taken
+// out when the prompt stopped carrying them, and nothing was put in their
+// place: the heading named the ability that reads them, the body said only who
+// the person was, and an assistant with notes about somebody was never told
+// they existed. Nothing failed, because the section still had a name in it.
+//
+// The notes stay out of the prompt for the reason the comment above gives: they
+// are written in the background whenever a conversation teaches something, so
+// they only grow, and a prompt that carried them would grow with them on every
+// turn of every conversation. This is the other half of that decision, which is
+// the half that makes it work.
+const personMemoryPreamble = "You have notes about this person from earlier conversations. " +
+	"Read them with " + recall.Name + " when the answer turns on what you already know about them."
 
 // dateTime grounds the assistant in the present so it never guesses what day it
 // is.
@@ -421,10 +469,19 @@ func capabilities(schemas []tool.Schema, hasAgents bool) string {
 	return b.String()
 }
 
-// agentsBody is the roster the Gateway routes on: who each agent is
-// and what it is for. What it can reach is deliberately not spelled out to the
-// model as a tool list here; the Gateway routes on the role, and the runtime
-// decides what the agent may touch.
+// agentsBody is the roster the Gateway routes on: who each agent is, how it
+// runs, and what its administrator said it is for.
+//
+// What it can REACH is not here, and that is the same decision the ability list
+// itself rests on. An agent's tools, knowledge and connected services written
+// out as prose are sent on every turn of every conversation and multiply by the
+// number of agents, while the decision they inform (where does this task go) is
+// taken in a handful of turns and usually not at all. So the roster is the map
+// and agent_guide is the territory, fetched one agent at a time.
+//
+// The instructions STAY. They are what the Gateway routes on, and a Gateway
+// that had to fetch them before it could choose would pay a round trip on every
+// delegation to save text it needs every time it delegates.
 // pinnedModeLine tells the Gateway, in the roster, that an agent's run mode is
 // fixed and it does not get to choose it (KB/27). Empty for an auto agent.
 func pinnedModeLine(mode string) string {
@@ -458,8 +515,12 @@ func agentsBody(subs []agentInfo) string {
 	var b strings.Builder
 	b.WriteString("Hand a task to one of these when it fits their role better than answering " +
 		"it yourself. Prefer doing the work yourself; delegate when the task is genuinely theirs. " +
-		"Each is described by the instructions its administrator gave it and the tools it can use; " +
-		"route on that.\n")
+		"Each is described below by the instructions its administrator gave it: route on that.\n\n" +
+		"What an agent can actually reach (its tools, the knowledge it holds, the connected services " +
+		"it can use) is NOT listed here. Look one up with " + agentguide.Name + " when you need to know " +
+		"whether an agent can really do a thing, and read one of its abilities in depth with " +
+		"tool_guide. Their abilities are theirs: you cannot call any of them yourself, you delegate " +
+		"the task and the agent uses them.\n")
 	for _, s := range subs {
 		b.WriteString("\n### ")
 		b.WriteString(s.Key)
@@ -476,21 +537,19 @@ func agentsBody(subs []agentInfo) string {
 		if s.Instructions != "" {
 			b.WriteString(s.Instructions)
 			b.WriteString("\n")
+			continue
 		}
-		if len(s.Tools) > 0 {
-			// These are the AGENT's own abilities, not yours: you route the
-			// task to it, you never call these yourself.
-			b.WriteString("It can (through its own tools, which you cannot call, only delegate to it):\n")
-			for _, t := range s.Tools {
-				b.WriteString("- ")
-				b.WriteString(t.Name)
-				if t.Description != "" {
-					b.WriteString(": ")
-					b.WriteString(t.Description)
-				}
-				b.WriteString("\n")
-			}
-		}
+		// Nobody wrote down what this one is for, and the roster is the only
+		// thing the Gateway routes on, so saying nothing leaves a heading and a
+		// name. Real installations have such agents (an administrator names one
+		// "Terminal Agent", gives it the terminal, and considers it described),
+		// and before the abilities moved behind a lookup the tool list was
+		// accidentally carrying the whole explanation for them. Say the one
+		// thing that is true instead: there is nothing written here, so find
+		// out rather than guessing.
+		b.WriteString("No instructions were written for this agent, so its name and what it " +
+			"can reach are all there is to go on: look it up with " + agentguide.Name +
+			" before deciding it does or does not fit a task.\n")
 	}
 	return b.String()
 }
@@ -532,6 +591,28 @@ func servicesSection(services []connectedService) string {
 	b.WriteString("\n\nWhat each one of these integration tools can do is NOT listed with your other " +
 		"abilities. Look it up with the " + integrations.Name + " ability when a task needs one: it " +
 		"lists a service's tools, describes one in full, and runs it.")
+	// The distinction, stated once and only where there is a service to
+	// confuse ours with.
+	//
+	// tool_guide documents the abilities WE ship. An integration's tools are a
+	// third party's, and there is no standard for documenting them beyond the
+	// description the service sends, so some services add a tool of their own
+	// for depth and most do not. Without this the model reaches for the guide
+	// it knows: it asked tool_guide about a CRM's query tool, was told there
+	// was no deeper documentation (which we cannot know, and which was wrong,
+	// because that service ships its own guide), and then invented a topic id.
+	//
+	// And the prefix is the other half. It is OURS, minted so two services can
+	// both offer a "search"; the service has never heard of it. A model that
+	// knows a tool only by our name will ask the service about a tool it does
+	// not have.
+	b.WriteString("\n\ntool_guide is for your own abilities and does NOT document these. An " +
+		"integration's tools belong to the service: what one does comes from the service, which " +
+		integrations.Name + " describes in full, and anything deeper is the service's to give, " +
+		"including a documentation tool of its own if it offers one, which you will see listed " +
+		"among its tools. The prefix above is ours, not theirs, so call a tool by its full " +
+		"prefixed name, but when one of a service's own tools asks you to name a tool, give it " +
+		"the name that service uses, without the prefix.")
 	return b.String()
 }
 
@@ -539,6 +620,46 @@ func servicesSection(services []connectedService) string {
 // reach, which are read-only, and nothing else. Deliberately only the map, so
 // the prompt stays the same size no matter how large the bases grow; the agent
 // drills down with its knowledge tools for the categories and the documents.
+// skillsSection is the MAP of the skills this turn holds: what each is called,
+// and nothing else.
+//
+// A skill is a procedure somebody wrote down for a job this business actually
+// does, so the instruction that matters is to go and look before improvising one
+// of your own. What each skill is FOR is deliberately not here (skillOnHand):
+// search_skill answers that, and load_skill hands over the procedure itself.
+func skillsSection(held []skillOnHand) string {
+	if len(held) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	// The examples are written out with the FIRST handle in the list, because a
+	// call shape costs a dozen words and a model that has to infer one from an
+	// input schema sometimes infers it wrongly. The search example is the same
+	// one the tool's own description uses, so the two cannot drift into showing
+	// a model two different shapes for one call.
+	b.WriteString("These are the written procedures you hold, and the only ones you can reach. " +
+		"Each is a package somebody wrote for a job this business does: instructions, reference " +
+		"material, and sometimes scripts. Open one with " + skills.LoadName + ", for example " +
+		skills.LoadName + "(skill: \"" + held[0].handle + "\"), and follow what it says. What a " +
+		"skill is FOR is not listed here, so when a name looks close to the job in front of you, " +
+		"or when none of them does, use " + skills.SearchName + ", for example " +
+		skills.SearchName + "(query: \"extract totals from a supplier invoice\"), to find out " +
+		"before working it out from first principles.\n")
+	for _, s := range held {
+		b.WriteString("\n- ")
+		b.WriteString(s.handle)
+		// The name only when it says something the handle does not. A package
+		// that carried no title is called by its handle, and printing
+		// "pdf-processing (pdf-processing)" is a line that teaches nothing.
+		if s.name != "" && s.name != s.handle {
+			b.WriteString(" (")
+			b.WriteString(s.name)
+			b.WriteString(")")
+		}
+	}
+	return b.String()
+}
+
 func knowledgeSection(brains []knowledgeBrain) string {
 	if len(brains) == 0 {
 		return ""

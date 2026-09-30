@@ -54,16 +54,34 @@ type backgroundManager struct {
 	quiescing bool
 }
 
-// noComputer is what a run with nobody in front of it carries where a computer
-// would be.
+// onComputer is the computer a detached agent may act on: the machine the turn
+// that started it came from, read off the delegation's own row.
 //
-// A background agent starts from a record and may run an hour after the person
-// closed their laptop, so it has no computer to reach and is offered no tool
-// that needs one. Reaching whichever machine happens to be awake would be the
-// guess the device identity exists to remove; carrying the asking computer on
-// the delegation is a column and a decision, and belongs with the first tool
-// that actually needs it.
-func noComputer() Computer { return Computer{} }
+// This used to be noComputer(), and the reasoning there was that a background
+// agent "may run an hour after the person closed their laptop, so it has no
+// computer to reach". Half of that is true and it was the wrong half to build
+// on. What it produced was not an agent whose calls fail when the laptop is
+// away, it was an agent with no machine tools AT ALL: machine.Offers answers
+// nil for an empty device and the loadout then drops every one of them, so the
+// agent was never told they existed. Measured, not reasoned: three fleet agents
+// asked to run one command each came back with "no shell reachable in that run"
+// and no terminal tool call between them, while the same agent on the
+// synchronous route ran it and returned output.
+//
+// A laptop that is away is a call that fails, and the link already has an
+// answer for that: a call is bounded by PRESENCE, survives its socket, and
+// resumes for three minutes (KB/39). That is a worse outcome than succeeding
+// and a much better one than a capability that is silently absent.
+//
+// It is read off the row rather than passed along because the run outlives the
+// process: recovery restarts a killed delegation from that row with no request
+// to ask. The row's own note said the task was "the one thing a killed agent
+// cannot be started again without"; the device was the second thing.
+//
+// Only the device. The folder and the kind of machine shape an agent's PROMPT,
+// and they reach a detached agent no more than they did before: a smaller
+// question than whether its tools exist, and a separate decision.
+func onComputer(deviceID string) Computer { return Computer{DeviceID: deviceID} }
 
 func newBackgroundManager(a *App, log zerolog.Logger) *backgroundManager {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -79,6 +97,7 @@ func newBackgroundManager(a *App, log zerolog.Logger) *backgroundManager {
 
 // launch runs a fresh background delegation: the agent's first leg.
 func (b *backgroundManager) launch(bg agent.BackgroundDelegation) {
+	bg.StepChanged = b.app.tellSteps(bg.WorkspaceID, bg.UserID, bg.SessionID, bg.DelegationID, 0)
 	b.notify(bg.DelegationID, model.DelegationRunning)
 	b.spawn(bg.DelegationID, bg.Sub.BackgroundTimeout, func(ctx context.Context) {
 		out := chat.NewStream(b.newProgressSink(bg.DelegationID))
@@ -106,8 +125,9 @@ func (b *backgroundManager) resume(snapshot *model.ParkSnapshot, approved bool) 
 		UserID:       snapshot.UserID,
 		SessionID:    snapshot.SessionID,
 		ModelID:      snapshot.ModelID,
+		DeviceID:     del.DeviceID,
 	}
-	sub, err := b.app.ResolveAgent(sc, snapshot.WorkspaceID, snapshot.UserID, noComputer(), snapshot.AgentKey)
+	sub, err := b.app.ResolveAgent(sc, snapshot.WorkspaceID, snapshot.UserID, onComputer(del.DeviceID), snapshot.AgentKey)
 	if err != nil {
 		// The agent was removed while the card waited. Fail the delegation and
 		// let the completion turn say so, rather than leave the chip spinning.
@@ -136,6 +156,11 @@ func (b *backgroundManager) resume(snapshot *model.ParkSnapshot, approved bool) 
 	br := agent.BackgroundResume{
 		Snapshot: snapshot, Approved: approved, Sub: sub,
 		WorkspaceID: bg.WorkspaceID, UserID: bg.UserID, SessionID: bg.SessionID, ModelID: bg.ModelID,
+		// The same computer its first leg had. The approved call runs on this
+		// leg, so losing the device here would mean approving an action that
+		// then cannot reach anything: approval must equal success.
+		DeviceID:    del.DeviceID,
+		StepChanged: b.app.tellSteps(bg.WorkspaceID, bg.UserID, bg.SessionID, del.ID, 0),
 	}
 	b.spawn(del.ID, sub.BackgroundTimeout, func(ctx context.Context) {
 		out := chat.NewStream(b.newProgressSink(del.ID))
@@ -333,9 +358,13 @@ func (b *backgroundManager) scheduleCompletion(ctx context.Context, bg agent.Bac
 		return
 	}
 	profile, loadout, err := b.app.Resolve(ctx, ProfileRequest{
-		WorkspaceID:      bg.WorkspaceID,
-		UserID:           bg.UserID,
-		Channel:          model.ChannelChat,
+		WorkspaceID: bg.WorkspaceID,
+		UserID:      bg.UserID,
+		Channel:     model.ChannelChat,
+		// The computer the agent was working on, carried into the turn that
+		// narrates its result: without it this is the Gateway with no machine
+		// tools, and its roster would report that its agents have none either.
+		DeviceID:         bg.DeviceID,
 		PreferredModelID: bg.ModelID,
 		SessionID:        bg.SessionID,
 	})
@@ -361,7 +390,8 @@ func (b *backgroundManager) scheduleCompletion(ctx context.Context, bg agent.Bac
 		MaxIterations:         profile.MaxIterations,
 		MaxFleetAgents:        profile.MaxFleetAgents,
 		AutoApprove:           session.ApprovalMode == model.ApprovalAuto,
-		Agent:                 b.app.AgentResolver(bg.WorkspaceID, bg.UserID, noComputer()),
+		DeviceID:              bg.DeviceID,
+		Agent:                 b.app.AgentResolver(bg.WorkspaceID, bg.UserID, onComputer(bg.DeviceID)),
 		StartBackground:       b.app.StartBackground,
 		StartFleet:            b.app.StartFleet,
 		CompletedDelegationID: bg.DelegationID,
@@ -429,7 +459,7 @@ func (b *backgroundManager) notify(delegationID int64, status string) {
 		// thirteen cards at once became a hundred and forty database round
 		// trips before the last agent was even told to carry on.
 		if progress, ok := b.app.fleetTracker.snapshot(*del.FleetID); ok {
-			b.app.pushChip(progress.chip(model.DelegationRunning), progress.WorkspaceID, progress.UserID)
+			b.app.pushFleetChip(progress.FleetID, progress.chip(model.DelegationRunning), progress.WorkspaceID, progress.UserID)
 			return
 		}
 		// Not dispatched by this process (a restart). Slow and always right.
@@ -493,7 +523,15 @@ func (b *backgroundManager) surfaceCardFor(ctx context.Context, park *model.Park
 	}
 	// A detached park is always an agent's; its tool is resolved live, so a tool
 	// revoked while it waited yields no card, matching the resume's re-check.
-	sub, err := b.app.ResolveAgent(ctx, park.WorkspaceID, session.UserID, noComputer(), park.AgentKey)
+	// The computer the agent was working on. Not decoration: the parked tool's
+	// schema is resolved from this loadout, and a tool that runs on somebody's
+	// machine is not in a loadout that has no machine, so a terminal waiting for
+	// approval would have no card to draw.
+	device := ""
+	if del, derr := b.delegationOfPark(ctx, park); derr == nil {
+		device = del.DeviceID
+	}
+	sub, err := b.app.ResolveAgent(ctx, park.WorkspaceID, session.UserID, onComputer(device), park.AgentKey)
 	if err != nil {
 		b.log.Error().Err(err).Int64("park", park.ID).Str("agent", park.AgentKey).
 			Msg("card not shown: the agent could not be resolved")
@@ -505,15 +543,18 @@ func (b *backgroundManager) surfaceCardFor(ctx context.Context, park *model.Park
 			Msg("card not shown: the agent no longer has that ability")
 		return
 	}
-	token, tokenHash, err := agent.NewToken()
-	if err != nil {
-		b.log.Error().Err(err).Int64("park", park.ID).Msg("card not shown: no token")
+	// DERIVED from the park, never minted here. Pushing a card used to rebind
+	// the park to a fresh token, which killed whatever token an earlier
+	// delivery had handed out; now every delivery of one card carries the same
+	// one and none of them can invalidate another.
+	if park.TokenSeed == "" {
+		// Written before tokens were derived. It keeps the token it was minted
+		// with, which cannot be reproduced here, so the card is left to the
+		// conversation's own reload rather than rebound to something nobody has.
+		b.log.Warn().Int64("park", park.ID).Msg("card not pushed: it predates derived tokens")
 		return
 	}
-	if err := b.app.Store.Agent().RotateParkToken(ctx, park.ID, tokenHash); err != nil {
-		b.log.Error().Err(err).Int64("park", park.ID).Msg("card not shown: token could not be bound")
-		return
-	}
+	token := agent.TokenFromSeed(b.app.Config.SessionSecret, park.TokenSeed)
 	b.app.WS.Notify(park.WorkspaceID, session.UserID, map[string]any{
 		"type": "card",
 		"payload": map[string]any{
@@ -674,10 +715,13 @@ type progressSink struct {
 	bg           *backgroundManager
 	delegationID int64
 	prog         *delegationProgress
+	// chip says whether this delegation has a chip of its own to push. A
+	// background agent does; a fleet member does not (newSpendSink).
+	chip bool
 }
 
 func (b *backgroundManager) newProgressSink(delegationID int64) *progressSink {
-	return &progressSink{bg: b, delegationID: delegationID, prog: b.progressFor(delegationID)}
+	return &progressSink{bg: b, delegationID: delegationID, prog: b.progressFor(delegationID), chip: true}
 }
 
 func (s *progressSink) Write(f chat.Frame) error {
@@ -685,24 +729,77 @@ func (s *progressSink) Write(f chat.Frame) error {
 		return nil
 	}
 	s.bg.setProgress(s.delegationID, s.prog.snapshot())
-	s.bg.notify(s.delegationID, model.DelegationRunning)
+	if s.chip {
+		s.bg.notify(s.delegationID, model.DelegationRunning)
+	}
 	return nil
+}
+
+// newSpendSink is the progressSink for a fleet member: what it spends and
+// what it is doing, folded and written to its own delegation row exactly as a
+// background agent's are, with no chip pushed. A batch has ONE chip, which
+// counts members, and the member may be running on a worker, which holds
+// nobody's socket. Whoever has the batch open reads the spend off the rows.
+func (b *backgroundManager) newSpendSink(delegationID int64) *progressSink {
+	return &progressSink{bg: b, delegationID: delegationID, prog: b.progressFor(delegationID)}
 }
 
 // progressFor returns a delegation's progress accumulator, creating it on first
 // use. The same object lives across a park and resume, so the running token
-// total survives an agent stopping for approval and starting again. (A
-// process restart loses it, but boot recovery settles a mid-flight delegation as
-// failed rather than resuming it, KB/27, so there is nothing to continue.)
+// total survives an agent stopping for approval and starting again.
+//
+// Created from what the row already says, not from zero. The record is replaced
+// whole on every write, and more than one process writes it: a fleet member's
+// worker adds up its spend, and the server marks it waiting when it stops to
+// ask. An accumulator that started empty in the second process would write the
+// member's spend back to nothing. The same is true after a restart, where a
+// relaunched agent carries on counting from what it had already spent.
 func (b *backgroundManager) progressFor(delegationID int64) *delegationProgress {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	p := b.progress[delegationID]
-	if p == nil {
-		p = &delegationProgress{}
-		b.progress[delegationID] = p
+	b.mu.Unlock()
+	if p != nil {
+		return p
 	}
-	return p
+	seeded := progressFrom(b.storedProgress(delegationID))
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if p := b.progress[delegationID]; p != nil {
+		return p // another caller created it while the row was read
+	}
+	b.progress[delegationID] = seeded
+	return seeded
+}
+
+// storedProgress is the progress record a delegation's row holds, or nothing.
+func (b *backgroundManager) storedProgress(delegationID int64) json.RawMessage {
+	ctx, cancel := context.WithTimeout(context.Background(), backgroundTerminalTimeout)
+	defer cancel()
+	del, err := b.app.Store.Agent().GetDelegation(ctx, delegationID)
+	if err != nil {
+		return nil
+	}
+	return del.Progress
+}
+
+// progressFrom is an accumulator carrying on from a stored progress record,
+// the inverse of snapshot. An empty or unreadable record is a fresh start.
+func progressFrom(raw json.RawMessage) *delegationProgress {
+	var stored struct {
+		Activity  string  `json:"activity"`
+		Step      int     `json:"step"`
+		Waiting   bool    `json:"waiting"`
+		TokensIn  int64   `json:"tokens_in"`
+		TokensOut int64   `json:"tokens_out"`
+		Cost      float64 `json:"cost"`
+	}
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &stored)
+	}
+	return &delegationProgress{
+		activity: stored.Activity, step: stored.Step, waiting: stored.Waiting,
+		inTok: stored.TokensIn, outTok: stored.TokensOut, cost: stored.Cost,
+	}
 }
 
 // dropProgress forgets a finished delegation's accumulator: a terminal
@@ -764,6 +861,7 @@ func (b *backgroundManager) recoverInterrupted(ctx context.Context) (int, error)
 			WorkspaceID:  d.WorkspaceID,
 			UserID:       session.UserID,
 			SessionID:    d.SessionID,
+			DeviceID:     d.DeviceID,
 			// The delegation stores no model; the completion turn resolves the
 			// profile's default, which is the Gateway's model in the ordinary case.
 		}
@@ -811,7 +909,7 @@ func (b *backgroundManager) recoverInterrupted(ctx context.Context) (int, error)
 // does, so one an administrator removed or revoked while we were down is not
 // quietly brought back: that is a refusal, and the caller settles it instead.
 func (b *backgroundManager) relaunch(ctx context.Context, d *model.AgentDelegation, userID int64) bool {
-	sub, err := b.app.ResolveAgent(ctx, d.WorkspaceID, userID, noComputer(), d.AgentKey)
+	sub, err := b.app.ResolveAgent(ctx, d.WorkspaceID, userID, onComputer(d.DeviceID), d.AgentKey)
 	if err != nil {
 		b.log.Warn().Err(err).Str("agent", d.AgentKey).Msg("recover: agent no longer available")
 		return false
@@ -831,6 +929,9 @@ func (b *backgroundManager) relaunch(ctx context.Context, d *model.AgentDelegati
 		WorkspaceID:  d.WorkspaceID,
 		UserID:       userID,
 		SessionID:    d.SessionID,
+		// Read back off the row, which after a kill is the only thing that
+		// still knows which computer this was working on.
+		DeviceID: d.DeviceID,
 	})
 	return true
 }

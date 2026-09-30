@@ -85,6 +85,11 @@ func testConversationCascade(t *testing.T, st store.Store) {
 	}); err != nil {
 		t.Fatalf("record model call: %v", err)
 	}
+	compaction := &model.Compaction{SessionID: chat.ID, ThroughSeq: 0, Summary: "doomed too"}
+	compaction.Made(model.Actor{UserID: user.ID, Name: "u"})
+	if err := st.Agent().SaveCompaction(ctx(), compaction); err != nil {
+		t.Fatalf("save compaction: %v", err)
+	}
 	if err := st.Agent().CreatePark(ctx(), &model.ParkSnapshot{
 		TokenHash: "hash-cascade", WorkspaceID: ws.ID, SessionID: chat.ID, UserID: user.ID,
 		ModelID: 1, ToolName: "t", ToolCallID: "c1", ToolArgs: json.RawMessage(`{}`),
@@ -105,6 +110,7 @@ func testConversationCascade(t *testing.T, st store.Store) {
 	assertGone(t, st, "agent_tool_calls", chat.ID)
 	assertGone(t, st, "model_calls", chat.ID)
 	assertGone(t, st, "agent_park_snapshots", chat.ID)
+	assertGone(t, st, "agent_compactions", chat.ID)
 	assertGoneByStep(t, st, "agent_reasoning", step.ID)
 }
 
@@ -120,11 +126,11 @@ func testWorkspaceCascade(t *testing.T, st store.Store) {
 	}
 	if err := st.Agents().Create(ctx(), &model.Agent{
 		WorkspaceID: ws.ID, Key: model.DefaultAgentKey, Name: "House",
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
-	wf := &model.Workflow{WorkspaceID: ws.ID, Name: "Flow", CreatedBy: user.ID}
-	if err := st.Workflows().Create(ctx(), wf); err != nil {
+	wf := &model.Workflow{WorkspaceID: ws.ID, Name: "Flow"}
+	if err := st.Workflows().Create(ctx(), wf, model.Actor{UserID: user.ID, Name: user.Name}); err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
 
@@ -190,7 +196,7 @@ func testDeletingAnAgentDoesNotDeleteItsConversations(t *testing.T, st store.Sto
 	user := mustUser(t, st, ws.ID, "u@acme.test")
 
 	agent := &model.Agent{WorkspaceID: ws.ID, Key: model.DefaultAgentKey, Name: "House"}
-	if err := st.Agents().Create(ctx(), agent); err != nil {
+	if err := st.Agents().Create(ctx(), agent, model.Nobody()); err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
 
@@ -246,7 +252,7 @@ func testAnOrphanCannotBeCreated(t *testing.T, st store.Store) {
 	missing := int64(999999)
 	if err := st.Agents().Create(ctx(), &model.Agent{
 		WorkspaceID: ws.ID, Key: "ghost", Name: "Ghost", ModelID: &missing,
-	}); err == nil {
+	}, model.Nobody()); err == nil {
 		t.Fatal("an agent was pinned to a model that does not exist")
 	}
 }

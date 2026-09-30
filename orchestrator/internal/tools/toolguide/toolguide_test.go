@@ -13,6 +13,8 @@ import (
 // guide lookup can be tested without the whole registry.
 type fakeRegistry struct {
 	tools map[string]tool.Schema
+	// owners names the agent holding a tool the caller does not itself hold.
+	owners map[string]string
 }
 
 func (f fakeRegistry) Lookup(name string) (tool.Schema, bool) {
@@ -30,6 +32,8 @@ func (f fakeRegistry) LookupTopic(id string) (tool.Topic, string, bool) {
 	}
 	return tool.Topic{}, "", false
 }
+
+func (f fakeRegistry) Owner(name string) string { return f.owners[name] }
 
 func (f fakeRegistry) Guided() []string {
 	var out []string
@@ -81,18 +85,28 @@ func TestToolWithoutGuide(t *testing.T) {
 	}
 }
 
-// An unknown name is a plain failure that lists what does have a guide, so the
-// model can correct itself.
+// An unknown name is an ANSWER that lists what does have a guide, so the model
+// can correct itself.
+//
+// Not a failure: this is an internal lookup, and "there is no ability by that
+// name, here are the ones there are" is the question answered, not a fault. It
+// used to fail, which put a red row in somebody's conversation for a
+// documentation lookup that behaved exactly as designed.
 func TestUnknownTool(t *testing.T) {
 	reg := fakeRegistry{tools: map[string]tool.Schema{
 		"http_request": {Name: "http_request", Guide: json.RawMessage(`{}`)},
 	}}
 	res := call(t, reg, map[string]any{"tool_name": "does_not_exist"})
-	if !res.Failed() {
-		t.Fatal("an unknown tool name should fail")
+	if res.Failed() {
+		t.Fatalf("an internal lookup that found nothing should not fail: %s", res.Content)
+	}
+	// It has to be unmistakable that nothing was found, or a short message
+	// reads as short documentation.
+	if !strings.Contains(string(res.Content), `"found":false`) {
+		t.Fatalf("the answer did not say it found nothing: %s", res.Content)
 	}
 	if !strings.Contains(string(res.Content), "http_request") {
-		t.Fatalf("the failure did not list the guided tools: %s", res.Content)
+		t.Fatalf("the answer did not list the guided tools: %s", res.Content)
 	}
 }
 
@@ -157,14 +171,26 @@ func TestOpensTopicWithEdges(t *testing.T) {
 }
 
 // A topic id is global: the model can follow an edge without naming the tool
-// again, so an unknown id is a plain failure that points back at the tool list.
+// again, so an unknown id answers by pointing back at the tool list.
+//
+// This is the call that was seen failing in a real conversation: the model
+// followed a topic id it had inferred rather than read, and a documentation
+// miss was drawn as a broken tool.
 func TestUnknownTopic(t *testing.T) {
 	reg := fakeRegistry{tools: map[string]tool.Schema{
 		"http_request": {Name: "http_request", Topics: []tool.Topic{{ID: "http_request/auth", Title: "x", Body: "y"}}},
 	}}
 	res := call(t, reg, map[string]any{"topic_id": "http_request/does-not-exist"})
-	if !res.Failed() {
-		t.Fatal("an unknown topic id should fail")
+	if res.Failed() {
+		t.Fatalf("an internal lookup that found nothing should not fail: %s", res.Content)
+	}
+	if !strings.Contains(string(res.Content), `"found":false`) {
+		t.Fatalf("the answer did not say it found nothing: %s", res.Content)
+	}
+	// And it names what CAN be looked up, which is the whole reason this is an
+	// answer rather than an error.
+	if !strings.Contains(string(res.Content), "http_request") {
+		t.Fatalf("the answer did not point back at the tool list: %s", res.Content)
 	}
 }
 
@@ -180,5 +206,136 @@ func TestListsWhatIsAvailable(t *testing.T) {
 	}
 	if !strings.Contains(string(res.Content), "http_request") {
 		t.Fatalf("the listing did not name the documented tool: %s", res.Content)
+	}
+}
+
+// A tool one of the Gateway's agents holds resolves, and the answer says whose
+// it is.
+//
+// Both halves matter and they pull against each other. It must resolve, because
+// the Gateway chooses where to send a task and agent_guide hands it the keys of
+// what each agent holds; refusing them would mean choosing blind. It must be
+// labelled, because a guide that reads exactly like the guide of a tool you hold
+// is an invitation to call it, which is the one thing the Gateway cannot do with
+// somebody else's tool.
+func TestAnAgentsToolIsReadableAndSaysWhoseItIs(t *testing.T) {
+	reg := fakeRegistry{
+		tools: map[string]tool.Schema{
+			"http_request": {Name: "http_request", Guide: json.RawMessage(`{"summary":"ours"}`)},
+			"nli_query":    {Name: "nli_query", Guide: json.RawMessage(`{"summary":"searches records"}`)},
+		},
+		owners: map[string]string{"nli_query": "researcher"},
+	}
+
+	got := string(call(t, reg, map[string]any{"tool_name": "nli_query"}).Content)
+	// The guide itself came back.
+	if !strings.Contains(got, "searches records") {
+		t.Fatalf("an agent's tool could not be read at all:\n%s", got)
+	}
+	// And it is marked as the agent's, with what to do instead of calling it.
+	for _, want := range []string{"researcher", "not yours", "cannot call", "Delegate"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the answer does not say the tool is the agent's (%q missing):\n%s", want, got)
+		}
+	}
+
+	// The caller's OWN tool is not labelled: the note exists to mark the
+	// exception, and on every answer it would be noise the model learns to skip.
+	own := string(call(t, reg, map[string]any{"tool_name": "http_request"}).Content)
+	if strings.Contains(own, "belongs_to") || strings.Contains(own, "cannot call") {
+		t.Errorf("the caller's own tool was reported as somebody else's:\n%s", own)
+	}
+}
+
+// A topic of an agent's tool is labelled too. A drilldown is where the Gateway
+// ends up after reading a guide, so a label that stopped at the first page
+// would be a label it reads once and then loses.
+func TestATopicOfAnAgentsToolSaysWhoseItIs(t *testing.T) {
+	reg := fakeRegistry{
+		tools: map[string]tool.Schema{
+			"nli_query": {Name: "nli_query", Topics: []tool.Topic{
+				{ID: "nli_query/limits", Title: "Limits", Body: "one statement at a time"},
+			}},
+		},
+		owners: map[string]string{"nli_query": "researcher"},
+	}
+	got := string(call(t, reg, map[string]any{"topic_id": "nli_query/limits"}).Content)
+	if !strings.Contains(got, "one statement at a time") {
+		t.Fatalf("the topic body did not come back:\n%s", got)
+	}
+	for _, want := range []string{"researcher", "cannot call"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the topic does not say it is the agent's (%q missing):\n%s", want, got)
+		}
+	}
+}
+
+// A connected service's tool is not ours to document.
+//
+// This is the call that produced the defect. The model asked this guide about
+// nli_query and was told "this ability has no deep documentation; its short
+// description is all there is", which we cannot know: MCP carries no standard
+// for documentation past the description, Flexie projects a guide tool of its
+// own for exactly that, and the answer was therefore false. Told there was
+// nothing deeper, the model went looking for a topic anyway and invented
+// query/leads-and-contacts.
+func TestAServicesToolIsRoutedToTheServiceNotDeclaredUndocumented(t *testing.T) {
+	reg := fakeRegistry{tools: map[string]tool.Schema{
+		"nli_query": {
+			Name:        "nli_query",
+			Kind:        tool.KindMCP,
+			Service:     "NLI",
+			RemoteName:  "query",
+			Description: "Execute a read-only SQL SELECT.",
+		},
+	}}
+
+	res := call(t, reg, map[string]any{"tool_name": "nli_query"})
+	if res.Failed() {
+		t.Fatalf("reading a projected tool failed: %s", res.Content)
+	}
+	got := string(res.Content)
+
+	// The false claim is gone.
+	if strings.Contains(got, "no deep documentation") {
+		t.Fatalf("we told the model a third party's tool has no documentation: %s", got)
+	}
+	// It says whose it is, and routes to where the answer actually lives.
+	for _, want := range []string{"NLI", "integrations"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("the answer does not mention %q: %s", want, got)
+		}
+	}
+	// And hands over the name the SERVICE uses, which is what its own tools
+	// expect: our prefix is ours.
+	var payload struct {
+		Ours          *bool  `json:"ours"`
+		NameOnService string `json:"name_on_service"`
+		Does          string `json:"does"`
+	}
+	if err := json.Unmarshal(res.Content, &payload); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if payload.NameOnService != "query" {
+		t.Fatalf("name_on_service = %q, want the service's own name %q", payload.NameOnService, "query")
+	}
+	if payload.Ours == nil || *payload.Ours {
+		t.Fatalf("a projected tool was not marked as not ours: %s", got)
+	}
+	if payload.Does != "Execute a read-only SQL SELECT." {
+		t.Fatalf("the service's own description was dropped: %s", got)
+	}
+}
+
+// And OUR tool with nothing deeper still says so plainly, which is the control
+// for the branch above: the claim is not gone everywhere, only where we are not
+// entitled to make it.
+func TestOurOwnUndocumentedToolStillSaysSo(t *testing.T) {
+	reg := fakeRegistry{tools: map[string]tool.Schema{
+		"current_time": {Name: "current_time", Description: "The time where you are."},
+	}}
+	res := call(t, reg, map[string]any{"tool_name": "current_time"})
+	if !strings.Contains(string(res.Content), "no deep documentation") {
+		t.Fatalf("our own undocumented tool stopped saying so: %s", res.Content)
 	}
 }

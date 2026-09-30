@@ -7,7 +7,6 @@ import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Field, Modal } from '@/components/ui/modal'
 import { NativeSelect } from '@/components/ui/native-select'
-import { POSTURE } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 import { useFormErrors } from '@/lib/form'
 import { useNotify } from '@/lib/notify'
@@ -49,10 +48,12 @@ export function Models() {
   const [addingLocal, setAddingLocal] = useState(false)
   const { can } = useAuth()
   // Two conditions, and they answer different questions: whether this
-  // installation runs models on its own hardware at all, and whether this person
-  // may see them. Neither implies the other, and an installation with no engine
-  // must not offer the button to an administrator who holds every permission.
-  const localModels = POSTURE.local_models && can('machines:view')
+  // installation has machines of its own to pick from, and whether this person
+  // may see them. The first is no longer a question: every installation can have
+  // one, including a personal one with no engine inside it, which adds a machine
+  // by exchanging certificates with it (Nodes.tsx). So what is left is the
+  // permission.
+  const localModels = can('machines:view')
 
   // A local model's source is the machine on its own row; a hosted one's is the
   // vendor account. The vendor list here is accounts only, because that is what

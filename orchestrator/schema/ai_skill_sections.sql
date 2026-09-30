@@ -1,0 +1,22 @@
+CREATE TABLE `ai_skill_sections` (
+  `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
+  `skill_id` bigint(20) unsigned NOT NULL,
+  `version_id` bigint(20) unsigned NOT NULL,
+  `file_id` bigint(20) unsigned NOT NULL,
+  `heading` varchar(500) DEFAULT NULL,
+  `section_path` varchar(1500) DEFAULT NULL,
+  `body` longtext NOT NULL,
+  `line_start` int(10) unsigned DEFAULT NULL,
+  `line_end` int(10) unsigned DEFAULT NULL,
+  `sequence_no` int(10) unsigned NOT NULL,
+  `sha256` char(64) NOT NULL,
+  `created_at` datetime(3) NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_version_sequence` (`version_id`,`sequence_no`),
+  KEY `fk_section_skill` (`skill_id`),
+  KEY `fk_section_file` (`file_id`),
+  FULLTEXT KEY `ft_skill_section` (`heading`,`section_path`,`body`),
+  CONSTRAINT `fk_section_skill` FOREIGN KEY (`skill_id`) REFERENCES `ai_skills` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_section_version` FOREIGN KEY (`version_id`) REFERENCES `ai_skill_versions` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `fk_section_file` FOREIGN KEY (`file_id`) REFERENCES `ai_skill_files` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

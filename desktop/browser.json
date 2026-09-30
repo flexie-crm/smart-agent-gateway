@@ -1,0 +1,27 @@
+{
+  "comment": "The browser the assistant drives, and the automation JavaScript that runs inside it. ONE file, because they are ONE decision: Playwright's injected script is written against the Chromium it ships with, and bumping either alone is a drift nothing would report. Every half that cares reads this file and a test asserts it, the way desktop/link-tools.json is read by both halves of the link.",
+
+  "chrome": "149.0.7827.55",
+  "playwright": "1.61.1",
+
+  "archives_comment": "One entry per platform we publish, read by desktop/shared/src/browser/binary.rs. The digest is pinned HERE, inside the signed application, and deliberately NOT taken from the .sha256 published beside the download: a hash fetched from the same place as the bytes proves only that the two agree, so a repository that had been tampered with would serve a different browser and a matching hash for it. These were computed from the bytes actually mirrored, by the machine that mirrored them. A platform with no entry is one nothing has been published for, and the install says so by name rather than fetching something unverified.",
+  "archives": {
+    "mac-arm64": {
+      "name": "chrome-headless-shell-mac-arm64.zip",
+      "bytes": 98043456,
+      "sha256": "302f82603be06683947594ecd60f849e362a8fe3dd82a89bd4408477c97e75a6"
+    },
+    "mac-x64": {
+      "name": "chrome-headless-shell-mac-x64.zip",
+      "bytes": 103452247,
+      "sha256": "a32029e1861329a431b712d5b864e213d9cf8ef51a82ce4c24b27e25f6605434"
+    },
+    "win64": {
+      "name": "chrome-headless-shell-win64.zip",
+      "bytes": 119099822,
+      "sha256": "5cfda0c763aa6a867ce2efad0c467e3220e9c5c01c4cba02fd57afe49ede5457"
+    }
+  },
+
+  "licence_comment": "Chromium is BSD-3-Clause, which asks that a binary redistribution reproduce its notice in the materials shipped with it. The notice that build ships is copied verbatim to orchestrator/internal/licences/chrome-headless-shell.txt and published on the console's open source screen. It belongs to the version above: changing the pin without recopying the notice publishes the notices of a build nobody is running."
+}

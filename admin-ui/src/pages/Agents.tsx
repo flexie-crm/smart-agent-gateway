@@ -1,21 +1,25 @@
-import { useState } from 'react'
-import { Loader2, Plus } from 'lucide-react'
-import { Page } from '@/components/AppShell'
-import { Badge, DataTable } from '@/components/DataTable'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Textarea } from '@/components/ui/textarea'
-import { CheckboxField } from '@/components/ui/checkbox'
-import { Field, Modal } from '@/components/ui/modal'
-import { NativeSelect } from '@/components/ui/native-select'
-import { TokenMultiSelect } from '@/components/ui/token-multiselect'
-import type { TokenOption } from '@/components/ui/token-multiselect'
-import { useFormErrors } from '@/lib/form'
-import { useNotify } from '@/lib/notify'
-import { bySource, toolLabel } from '@/lib/tool-display'
-import { cn } from '@/lib/utils'
-import { api, useResource } from '@/lib/resources'
-import type { AgentFormBody, AudioFormBody, FilesFormBody } from '@/lib/resources'
+import { useState } from "react";
+import { Loader2, Plus } from "lucide-react";
+import { Page } from "@/components/AppShell";
+import { Badge, DataTable } from "@/components/DataTable";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { CheckboxField } from "@/components/ui/checkbox";
+import { Field, Modal } from "@/components/ui/modal";
+import { NativeSelect } from "@/components/ui/native-select";
+import { TokenMultiSelect } from "@/components/ui/token-multiselect";
+import type { TokenOption } from "@/components/ui/token-multiselect";
+import { useFormErrors } from "@/lib/form";
+import { useNotify } from "@/lib/notify";
+import { bySource, toolLabel } from "@/lib/tool-display";
+import { cn } from "@/lib/utils";
+import { api, useResource, configuredBy } from "@/lib/resources";
+import type {
+  AgentFormBody,
+  AudioFormBody,
+  FilesFormBody,
+} from "@/lib/resources";
 
 /**
  * The Gateway, and the agents it can hand work to.
@@ -30,7 +34,7 @@ import type { AgentFormBody, AudioFormBody, FilesFormBody } from '@/lib/resource
  * Nothing here is compulsory. A workspace with no Gateway still works: the
  * code's own defaults answer. Everything on this screen is an override.
  */
-const GATEWAY = 'default'
+const GATEWAY = "default";
 
 /**
  * The file types a rule can name, offered as a list rather than typed.
@@ -40,34 +44,36 @@ const GATEWAY = 'default'
  * a model can actually be handed, grouped the way somebody thinks about them.
  */
 const FILE_TYPES: { value: string; label: string; hint: string }[] = [
-  { value: 'png', label: 'PNG', hint: 'Image' },
-  { value: 'jpg', label: 'JPEG', hint: 'Image' },
-  { value: 'gif', label: 'GIF', hint: 'Image' },
-  { value: 'webp', label: 'WebP', hint: 'Image' },
-  { value: 'heic', label: 'HEIC', hint: 'Image' },
-  { value: 'pdf', label: 'PDF', hint: 'Document' },
-  { value: 'docx', label: 'Word', hint: 'Document' },
-  { value: 'txt', label: 'Plain text', hint: 'Document' },
-  { value: 'md', label: 'Markdown', hint: 'Document' },
-  { value: 'rtf', label: 'Rich text', hint: 'Document' },
-  { value: 'xlsx', label: 'Excel', hint: 'Spreadsheet' },
-  { value: 'csv', label: 'CSV', hint: 'Spreadsheet' },
-  { value: 'pptx', label: 'PowerPoint', hint: 'Slides' },
-  { value: 'json', label: 'JSON', hint: 'Data' },
-  { value: 'xml', label: 'XML', hint: 'Data' },
-]
+  { value: "png", label: "PNG", hint: "Image" },
+  { value: "jpg", label: "JPEG", hint: "Image" },
+  { value: "gif", label: "GIF", hint: "Image" },
+  { value: "webp", label: "WebP", hint: "Image" },
+  { value: "heic", label: "HEIC", hint: "Image" },
+  { value: "pdf", label: "PDF", hint: "Document" },
+  { value: "docx", label: "Word", hint: "Document" },
+  { value: "txt", label: "Plain text", hint: "Document" },
+  { value: "md", label: "Markdown", hint: "Document" },
+  { value: "rtf", label: "Rich text", hint: "Document" },
+  { value: "xlsx", label: "Excel", hint: "Spreadsheet" },
+  { value: "csv", label: "CSV", hint: "Spreadsheet" },
+  { value: "pptx", label: "PowerPoint", hint: "Slides" },
+  { value: "json", label: "JSON", hint: "Data" },
+  { value: "xml", label: "XML", hint: "Data" },
+];
 
-const FILE_TYPE_LABEL = new Map(FILE_TYPES.map((t) => [t.value, t.label]))
-
+const FILE_TYPE_LABEL = new Map(FILE_TYPES.map((t) => [t.value, t.label]));
 
 export function Agents() {
   // The row that was clicked, not the agent: the screen holds rows, and the
   // form fetches the agent it is going to edit.
-  const [editing, setEditing] = useState<{ id?: number; gateway?: boolean } | null>(null)
+  const [editing, setEditing] = useState<{
+    id?: number;
+    gateway?: boolean;
+  } | null>(null);
   // Files and audio are configured on their own, not inside the Gateway's form:
   // they are a step BEFORE it rather than a property of it.
-  const [files, setFiles] = useState(false)
-  const [audio, setAudio] = useState(false)
+  const [files, setFiles] = useState(false);
+  const [audio, setAudio] = useState(false);
 
   // The screen, in one answer, already in the screen's own shape: files, audio,
   // the Gateway, the agents. Nothing here picks a list apart to find out which
@@ -78,20 +84,19 @@ export function Agents() {
   // the models, the vendors that only labelled them, the tools, the brains and
   // the agent, all fetched the moment ANY of the three dialogs opened, so the
   // one that sets an audio model waited on the tool catalogue.
-  const { data: screen, reload } = useResource(() => api.agents.screen())
+  const { data: screen, reload } = useResource(() => api.agents.screen());
 
   // What the Gateway can be handed, in the order somebody would say it. Nothing
   // configured reads as "text only", which is the honest description of a
   // Gateway that cannot be sent a file.
-  const loading = screen === null
+  const loading = screen === null;
   // There is exactly one Gateway and it cannot be deleted: a workspace without
   // one has no way to answer anybody. It is set up once and edited thereafter,
   // which is why nothing on this screen offers to remove it.
-  const gateway = screen?.gateway ?? null
-  const agents = screen?.agents ?? null
-  const fileRules = screen?.files.rules ?? []
-  const audioSlot = screen?.audio ?? null
-
+  const gateway = screen?.gateway ?? null;
+  const agents = screen?.agents ?? null;
+  const fileRules = screen?.files.rules ?? [];
+  const audioSlot = screen?.audio ?? null;
 
   return (
     <Page
@@ -117,7 +122,7 @@ export function Agents() {
             onEdit={gateway ? () => setFiles(true) : undefined}
             empty={
               fileRules.length === 0
-                ? 'Nothing can be attached yet. Choose what reads each kind of file.'
+                ? "Nothing can be attached yet. Choose what reads each kind of file."
                 : null
             }
           >
@@ -126,14 +131,19 @@ export function Agents() {
                 will happen to the next file that arrives, which is the thing
                 anybody actually wanted to know. */}
             {fileRules.map((rule, i) => (
-              <div key={i} className="flex items-baseline justify-between gap-3 py-1.5">
+              <div
+                key={i}
+                className="flex items-baseline justify-between gap-3 py-1.5"
+              >
                 <span className="text-sm">
                   {rule.types.length === 0
-                    ? 'Anything else'
-                    : rule.types.map((t) => FILE_TYPE_LABEL.get(t) ?? t).join(', ')}
+                    ? "Anything else"
+                    : rule.types
+                        .map((t) => FILE_TYPE_LABEL.get(t) ?? t)
+                        .join(", ")}
                 </span>
                 <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                  {rule.model_name || 'a model that is gone'}
+                  {rule.model_name || "a model that is gone"}
                 </span>
               </div>
             ))}
@@ -144,14 +154,14 @@ export function Agents() {
             onEdit={gateway ? () => setAudio(true) : undefined}
             empty={
               !audioSlot?.model_name
-                ? 'Nobody can talk instead of typing until a model is chosen.'
+                ? "Nobody can talk instead of typing until a model is chosen."
                 : null
             }
           >
             <div className="flex items-baseline justify-between gap-3 py-1.5">
               <span className="text-sm">Anything spoken</span>
               <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                {audioSlot?.model_name ?? ''}
+                {audioSlot?.model_name ?? ""}
               </span>
             </div>
           </SlotBlock>
@@ -165,7 +175,11 @@ export function Agents() {
         carries="the job, whenever the Gateway decides an agent should take it"
         action={
           gateway ? (
-            <Button variant="outline" size="sm" onClick={() => setEditing({ id: gateway.id })}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setEditing({ id: gateway.id })}
+            >
               Edit Gateway
             </Button>
           ) : (
@@ -186,16 +200,23 @@ export function Agents() {
               <div className="text-xs text-muted-foreground">Name</div>
               <div className="text-sm font-medium">{gateway.name}</div>
             </div>
-            <Fact label="Model" value={gateway.model_name || 'no model'} mono />
-            <Fact label="Tools" value={gateway.tools === 0 ? 'none' : String(gateway.tools)} />
-            <Fact label="Thinks" value={gateway.reasoning ? 'yes' : 'no'} />
-            <Fact label="Status" value={gateway.status === 'active' ? 'active' : 'off'} />
+            <Fact label="Model" value={gateway.model_name || "no model"} mono />
+            <Fact
+              label="Tools"
+              value={gateway.tools === 0 ? "none" : String(gateway.tools)}
+            />
+            <Fact label="Thinks" value={gateway.reasoning ? "yes" : "no"} />
+            <Fact
+              label="Status"
+              value={gateway.status === "active" ? "active" : "off"}
+            />
           </div>
         ) : (
           <div className="rounded-md border border-primary/30 bg-primary/5 px-4 py-3">
             <p className="text-sm text-muted-foreground">
-              No Gateway is set up yet, so nobody can be answered: the chat tells people to ask
-              an administrator. Everything else on this page waits on this one being set up.
+              No Gateway is set up yet, so nobody can be answered: the chat
+              tells people to ask an administrator. Everything else on this page
+              waits on this one being set up.
             </p>
           </div>
         )}
@@ -219,32 +240,35 @@ export function Agents() {
           onEdit={(agent) => setEditing({ id: agent.id })}
           remove={{
             run: async (agent) => {
-              await api.agents.remove(agent.id)
-              await reload()
+              await api.agents.remove(agent.id);
+              await reload();
             },
-            confirm: (a) => `Delete "${a.name}"? The Gateway stops handing work to it.`,
+            confirm: (a) =>
+              `Delete "${a.name}"? The Gateway stops handing work to it.`,
             done: (a) => `${a.name} was deleted.`,
           }}
           columns={[
             {
-              header: 'Agent',
+              header: "Agent",
               // Only the name: the key is an internal alias, not something the
               // person needs to see.
               cell: (a) => <div className="font-medium">{a.name}</div>,
             },
             {
-              header: 'Model',
+              header: "Model",
               cell: (a) => {
-                const name = a.model_name
+                const name = a.model_name;
                 return name ? (
                   <span className="font-mono text-xs">{name}</span>
                 ) : (
-                  <span className="text-xs text-muted-foreground">no model</span>
-                )
+                  <span className="text-xs text-muted-foreground">
+                    no model
+                  </span>
+                );
               },
             },
             {
-              header: 'Tools',
+              header: "Tools",
               cell: (a) => (
                 <span className="text-xs">
                   {a.tools === 0 ? (
@@ -256,13 +280,22 @@ export function Agents() {
               ),
             },
             {
-              header: 'Thinks',
-              cell: (a) => (a.reasoning ? <Badge tone="good">yes</Badge> : <Badge>no</Badge>),
+              header: "Thinks",
+              cell: (a) =>
+                a.reasoning ? (
+                  <Badge tone="good">yes</Badge>
+                ) : (
+                  <Badge>no</Badge>
+                ),
             },
             {
-              header: 'Status',
+              header: "Status",
               cell: (a) =>
-                a.status === 'active' ? <Badge tone="good">active</Badge> : <Badge>off</Badge>,
+                a.status === "active" ? (
+                  <Badge tone="good">active</Badge>
+                ) : (
+                  <Badge>off</Badge>
+                ),
             },
           ]}
         />
@@ -273,7 +306,11 @@ export function Agents() {
       {files && gateway && (
         <WithForm load={() => api.agents.filesForm()}>
           {(form) => (
-            <FilesForm form={form} onClose={() => setFiles(false)} onSaved={reload} />
+            <FilesForm
+              form={form}
+              onClose={() => setFiles(false)}
+              onSaved={reload}
+            />
           )}
         </WithForm>
       )}
@@ -281,28 +318,39 @@ export function Agents() {
       {audio && gateway && (
         <WithForm load={() => api.agents.audioForm()}>
           {(form) => (
-            <AudioForm form={form} onClose={() => setAudio(false)} onSaved={reload} />
+            <AudioForm
+              form={form}
+              onClose={() => setAudio(false)}
+              onSaved={reload}
+            />
           )}
         </WithForm>
       )}
 
       {editing != null && (
-        <WithForm key={editing.id ?? 'new'} load={() => api.agents.form(editing.id)}>
+        <WithForm
+          key={editing.id ?? "new"}
+          load={() => api.agents.form(editing.id)}
+        >
           {(form) => (
             <AgentForm
               form={form}
-              gateway={form.agent ? form.agent.key === GATEWAY : Boolean(editing.gateway)}
+              gateway={
+                form.agent
+                  ? form.agent.key === GATEWAY
+                  : Boolean(editing.gateway)
+              }
               onClose={() => setEditing(null)}
               onSaved={async () => {
-                setEditing(null)
-                await reload()
+                setEditing(null);
+                await reload();
               }}
             />
           )}
         </WithForm>
       )}
     </Page>
-  )
+  );
 }
 
 /**
@@ -324,35 +372,39 @@ function FilesForm({
   // instructions, brains, a confirm list or timestamps. And not the model
   // catalogue plus the vendor catalogue: `label` is already the string the
   // control prints, so there is nothing here to join.
-  form: FilesFormBody
-  onClose: () => void
-  onSaved: () => Promise<void>
+  form: FilesFormBody;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
 }) {
-  const notify = useNotify()
-  const stored = form.rules
-  const readable = form.models
-  const [rules, setRules] = useState<{ types: string[]; model_id: number | null }[]>(() =>
-    stored.filter((r) => r.types.length > 0).map((r) => ({ types: [...r.types], model_id: r.model_id })),
-  )
+  const notify = useNotify();
+  const stored = form.rules;
+  const readable = form.models;
+  const [rules, setRules] = useState<
+    { types: string[]; model_id: number | null }[]
+  >(() =>
+    stored
+      .filter((r) => r.types.length > 0)
+      .map((r) => ({ types: [...r.types], model_id: r.model_id })),
+  );
   // Everything the rules above did not claim. It is kept apart from them because
   // it is not a rule you write, it is the question "and everything else?", which
   // has exactly one answer and always comes last.
   const [catchAll, setCatchAll] = useState<string>(() => {
-    const rest = stored.find((r) => r.types.length === 0)
-    return rest ? String(rest.model_id) : ''
-  })
-  const [busy, setBusy] = useState(false)
-  const errors = useFormErrors()
+    const rest = stored.find((r) => r.types.length === 0);
+    return rest ? String(rest.model_id) : "";
+  });
+  const [busy, setBusy] = useState(false);
+  const errors = useFormErrors();
 
   // A rule already using a type does not offer it again: two rules claiming the
   // same type means the second can never match, and nobody writes that on
   // purpose.
   const claimed = (except: number) =>
-    new Set(rules.flatMap((r, j) => (j === except ? [] : r.types)))
+    new Set(rules.flatMap((r, j) => (j === except ? [] : r.types)));
 
   async function save() {
-    errors.clear()
-    setBusy(true)
+    errors.clear();
+    setBusy(true);
     try {
       // The catch-all is appended rather than positioned by hand, so the rule
       // that matches everything is last by construction and the server's
@@ -362,14 +414,14 @@ function FilesForm({
           .filter((r) => r.model_id != null && r.types.length > 0)
           .map((r) => ({ types: r.types, model_id: r.model_id as number })),
         ...(catchAll ? [{ types: [], model_id: Number(catchAll) }] : []),
-      ])
-      notify.success('What can be attached has changed.')
-      await onSaved()
-      onClose()
+      ]);
+      notify.success("What can be attached has changed.");
+      await onSaved();
+      onClose();
     } catch (failure) {
-      errors.fail(failure)
+      errors.fail(failure);
     } finally {
-      setBusy(false)
+      setBusy(false);
     }
   }
 
@@ -383,16 +435,16 @@ function FilesForm({
       submitting={busy}
     >
       <p className="text-xs text-muted-foreground">
-        What reads a file somebody attaches, before the Gateway ever sees it. Rules are tried
-        from the top and the first match wins, and whatever none of them claims is decided at
-        the bottom.
+        What reads a file somebody attaches, before the Gateway ever sees it.
+        Rules are tried from the top and the first match wins, and whatever none
+        of them claims is decided at the bottom.
       </p>
 
       {readable.length === 0 ? (
         <div className="mt-4 rounded-md border border-primary/30 bg-primary/5 px-4 py-3">
           <p className="text-sm text-muted-foreground">
-            No model that can read a file is set up yet. Add one first, and files can be
-            accepted here.
+            No model that can read a file is set up yet. Add one first, and
+            files can be accepted here.
           </p>
         </div>
       ) : (
@@ -400,23 +452,30 @@ function FilesForm({
           {rules.length === 0 && (
             <div className="rounded-md border border-dashed border-border px-4 py-6 text-center">
               <p className="text-sm text-muted-foreground">
-                No rules for particular types. Anything accepted will be read by whatever
-                &ldquo;everything else&rdquo; says below.
+                No rules for particular types. Anything accepted will be read by
+                whatever &ldquo;everything else&rdquo; says below.
               </p>
             </div>
           )}
 
           {rules.map((rule, i) => {
-            const taken = claimed(i)
+            const taken = claimed(i);
             return (
-              <div key={i} className="border-t border-border pt-4 first:border-t-0 first:pt-0">
+              <div
+                key={i}
+                className="border-t border-border pt-4 first:border-t-0 first:pt-0"
+              >
                 <div className="mb-2 flex items-center justify-between gap-3">
-                  <span className="text-xs font-medium text-muted-foreground">Rule {i + 1}</span>
+                  <span className="text-xs font-medium text-muted-foreground">
+                    Rule {i + 1}
+                  </span>
                   <Button
                     type="button"
                     variant="ghost"
                     size="sm"
-                    onClick={() => setRules((prev) => prev.filter((_, j) => j !== i))}
+                    onClick={() =>
+                      setRules((prev) => prev.filter((_, j) => j !== i))
+                    }
                   >
                     Remove
                   </Button>
@@ -424,16 +483,22 @@ function FilesForm({
 
                 <div className="grid gap-4 sm:grid-cols-2">
                   <label className="block">
-                    <span className="mb-1.5 block text-xs font-medium">File types</span>
+                    <span className="mb-1.5 block text-xs font-medium">
+                      File types
+                    </span>
                     <TokenMultiSelect
-                      options={FILE_TYPES.filter((t) => !taken.has(t.value)).map((t) => ({
+                      options={FILE_TYPES.filter(
+                        (t) => !taken.has(t.value),
+                      ).map((t) => ({
                         value: t.value,
                         label: t.label,
                         hint: t.hint,
                       }))}
                       value={rule.types}
                       onChange={(types) =>
-                        setRules((prev) => prev.map((r, j) => (j === i ? { ...r, types } : r)))
+                        setRules((prev) =>
+                          prev.map((r, j) => (j === i ? { ...r, types } : r)),
+                        )
                       }
                       placeholder="Add a file type…"
                       empty="Every type is spoken for by another rule."
@@ -444,14 +509,21 @@ function FilesForm({
                   </label>
 
                   <label className="block">
-                    <span className="mb-1.5 block text-xs font-medium">Read by</span>
+                    <span className="mb-1.5 block text-xs font-medium">
+                      Read by
+                    </span>
                     <NativeSelect
-                      value={rule.model_id ?? ''}
+                      value={rule.model_id ?? ""}
                       onChange={(e) =>
                         setRules((prev) =>
                           prev.map((r, j) =>
                             j === i
-                              ? { ...r, model_id: e.target.value ? Number(e.target.value) : null }
+                              ? {
+                                  ...r,
+                                  model_id: e.target.value
+                                    ? Number(e.target.value)
+                                    : null,
+                                }
                               : r,
                           ),
                         )
@@ -470,7 +542,7 @@ function FilesForm({
                   </label>
                 </div>
               </div>
-            )
+            );
           })}
 
           <Button
@@ -478,7 +550,10 @@ function FilesForm({
             variant="outline"
             size="sm"
             onClick={() =>
-              setRules((prev) => [...prev, { types: [], model_id: readable[0]?.id ?? null }])
+              setRules((prev) => [
+                ...prev,
+                { types: [], model_id: readable[0]?.id ?? null },
+              ])
             }
           >
             <Plus className="size-4" />
@@ -493,7 +568,10 @@ function FilesForm({
             <p className="mt-0.5 mb-2 text-xs text-muted-foreground">
               Any other file somebody tries to attach.
             </p>
-            <NativeSelect value={catchAll} onChange={(e) => setCatchAll(e.target.value)}>
+            <NativeSelect
+              value={catchAll}
+              onChange={(e) => setCatchAll(e.target.value)}
+            >
               <option value="">Refuse it</option>
               {readable.map((m) => (
                 <option key={m.id} value={m.id}>
@@ -503,14 +581,14 @@ function FilesForm({
             </NativeSelect>
             <p className="mt-1.5 text-xs text-muted-foreground">
               {catchAll
-                ? 'Any file can be attached; the rules above pick the model, and this one reads the rest.'
-                : 'Only the types named above can be attached. Anything else is turned away before it is uploaded.'}
+                ? "Any file can be attached; the rules above pick the model, and this one reads the rest."
+                : "Only the types named above can be attached. Anything else is turned away before it is uploaded."}
             </p>
           </div>
         </div>
       )}
     </Modal>
-  )
+  );
 }
 
 /**
@@ -527,30 +605,30 @@ function AudioForm({
 }: {
   // The one model id this form changes, and the models that can transcribe.
   // The rest of the agent is none of its business.
-  form: AudioFormBody
-  onClose: () => void
-  onSaved: () => Promise<void>
+  form: AudioFormBody;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
 }) {
-  const notify = useNotify()
-  const transcribers = form.models
+  const notify = useNotify();
+  const transcribers = form.models;
   const [modelID, setModelID] = useState<string>(
-    form.model_id != null ? String(form.model_id) : '',
-  )
-  const [busy, setBusy] = useState(false)
-  const errors = useFormErrors()
+    form.model_id != null ? String(form.model_id) : "",
+  );
+  const [busy, setBusy] = useState(false);
+  const errors = useFormErrors();
 
   async function save() {
-    errors.clear()
-    setBusy(true)
+    errors.clear();
+    setBusy(true);
     try {
-      await api.agents.putAudio(modelID ? Number(modelID) : null)
-      notify.success('How speech is read has changed.')
-      await onSaved()
-      onClose()
+      await api.agents.putAudio(modelID ? Number(modelID) : null);
+      notify.success("How speech is read has changed.");
+      await onSaved();
+      onClose();
     } catch (failure) {
-      errors.fail(failure)
+      errors.fail(failure);
     } finally {
-      setBusy(false)
+      setBusy(false);
     }
   }
 
@@ -563,12 +641,14 @@ function AudioForm({
       submitting={busy}
     >
       <p className="text-xs text-muted-foreground">
-        What turns a recording into words, so somebody can talk instead of typing.
+        What turns a recording into words, so somebody can talk instead of
+        typing.
       </p>
       {transcribers.length === 0 ? (
         <div className="rounded-md border border-primary/30 bg-primary/5 px-4 py-3">
           <p className="text-sm text-muted-foreground">
-            No model that transcribes is set up yet. Add one and it can be chosen here.
+            No model that transcribes is set up yet. Add one and it can be
+            chosen here.
           </p>
         </div>
       ) : (
@@ -577,7 +657,10 @@ function AudioForm({
           hint="Leave it unset and the chat offers no microphone: there would be nothing to turn speech into words."
           error={errors.fields.audio_model_id}
         >
-          <NativeSelect value={modelID} onChange={(e) => setModelID(e.target.value)}>
+          <NativeSelect
+            value={modelID}
+            onChange={(e) => setModelID(e.target.value)}
+          >
             <option value="">Not accepted</option>
             {transcribers.map((m) => (
               <option key={m.id} value={m.id}>
@@ -588,7 +671,7 @@ function AudioForm({
         </Field>
       )}
     </Modal>
-  )
+  );
 }
 
 /**
@@ -614,16 +697,16 @@ function Step({
   last,
   children,
 }: {
-  n: number
-  title: string
-  blurb: string
-  action?: React.ReactNode
+  n: number;
+  title: string;
+  blurb: string;
+  action?: React.ReactNode;
   /** What this step hands to the next one. Absent on the last. */
-  carries?: string
+  carries?: string;
   /** The first band has a flat top: there is nothing above it to nest into. */
-  first?: boolean
-  last?: boolean
-  children: React.ReactNode
+  first?: boolean;
+  last?: boolean;
+  children: React.ReactNode;
 }) {
   return (
     <section className="flex items-stretch gap-5">
@@ -651,9 +734,9 @@ function Step({
           rail and clips to it; the inner one carries the fill and the chevron. */}
       <div
         className={cn(
-          'w-11 shrink-0 overflow-hidden',
-          first && 'rounded-t-xl',
-          last && 'rounded-b-xl',
+          "w-11 shrink-0 overflow-hidden",
+          first && "rounded-t-xl",
+          last && "rounded-b-xl",
         )}
         style={{
           // Up by the notch depth less the seam, so the point above lands
@@ -663,17 +746,19 @@ function Step({
       >
         <div
           className={cn(
-            'flex h-full flex-col items-center bg-primary/10',
-            first ? 'pt-3' : 'pt-6',
-            !last && 'pb-5',
+            "flex h-full flex-col items-center bg-primary/10",
+            first ? "pt-3" : "pt-6",
+            !last && "pb-5",
           )}
           style={{
             clipPath: [
-              'polygon(',
-              first ? '0 0, 100% 0,' : '0 0, 50% 14px, 100% 0,',
-              last ? '100% 100%, 0 100%' : '100% calc(100% - 14px), 50% 100%, 0 calc(100% - 14px)',
-              ')',
-            ].join(' '),
+              "polygon(",
+              first ? "0 0, 100% 0," : "0 0, 50% 14px, 100% 0,",
+              last
+                ? "100% 100%, 0 100%"
+                : "100% calc(100% - 14px), 50% 100%, 0 calc(100% - 14px)",
+              ")",
+            ].join(" "),
           }}
         >
           <span className="flex size-7 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
@@ -682,23 +767,26 @@ function Step({
         </div>
       </div>
 
-      <div className={cn('min-w-0 flex-1', !last && 'pb-8')}>
+      <div className={cn("min-w-0 flex-1", !last && "pb-8")}>
         <div className="mb-4 flex min-h-7 items-start justify-between gap-4">
           <div>
             <h2 className="text-sm font-semibold leading-7">{title}</h2>
-            <p className="mt-1 max-w-2xl text-xs leading-relaxed text-muted-foreground">{blurb}</p>
+            <p className="mt-1 max-w-2xl text-xs leading-relaxed text-muted-foreground">
+              {blurb}
+            </p>
           </div>
           {action && <div className="shrink-0">{action}</div>}
         </div>
         {children}
         {carries && (
           <p className="mt-6 text-xs text-muted-foreground">
-            <span className="text-muted-foreground/70">Then passes along:</span> {carries}
+            <span className="text-muted-foreground/70">Then passes along:</span>{" "}
+            {carries}
           </p>
         )}
       </div>
     </section>
-  )
+  );
 }
 
 /**
@@ -717,10 +805,16 @@ function Step({
  * it offers are one question, asked when it opens. Keyed at the call site, so
  * opening a different agent is a different fetch rather than a stale one.
  */
-function WithForm<T>({ load, children }: { load: () => Promise<T>; children: (form: T) => React.ReactNode }) {
-  const { data } = useResource(load)
-  if (!data) return null
-  return <>{children(data)}</>
+function WithForm<T>({
+  load,
+  children,
+}: {
+  load: () => Promise<T>;
+  children: (form: T) => React.ReactNode;
+}) {
+  const { data } = useResource(load);
+  if (!data) return null;
+  return <>{children(data)}</>;
 }
 
 function SlotBlock({
@@ -730,13 +824,13 @@ function SlotBlock({
   onEdit,
   children,
 }: {
-  label: string
+  label: string;
   /** What to say when nothing is set up; null when something is. */
-  empty: string | null
+  empty: string | null;
   /** Nothing is known yet, which is NOT the same as nothing being set up. */
-  loading?: boolean
-  onEdit?: () => void
-  children: React.ReactNode
+  loading?: boolean;
+  onEdit?: () => void;
+  children: React.ReactNode;
 }) {
   return (
     <div>
@@ -757,19 +851,29 @@ function SlotBlock({
       ) : empty ? (
         <p className="text-sm text-muted-foreground">{empty}</p>
       ) : (
-        <div className="divide-y divide-border/60 border-y border-border/60">{children}</div>
+        <div className="divide-y divide-border/60 border-y border-border/60">
+          {children}
+        </div>
       )}
     </div>
-  )
+  );
 }
 
-function Fact({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+function Fact({
+  label,
+  value,
+  mono,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+}) {
   return (
     <div>
       <div className="text-xs text-muted-foreground">{label}</div>
-      <div className={cn('text-sm', mono && 'font-mono text-xs')}>{value}</div>
+      <div className={cn("text-sm", mono && "font-mono text-xs")}>{value}</div>
     </div>
-  )
+  );
 }
 
 function AgentForm({
@@ -781,57 +885,73 @@ function AgentForm({
   // The agent being edited and everything it can be given, in one answer.
   // `agent` is null when one is being created, which is the server saying there
   // is nothing to prefill rather than a form guessing at defaults.
-  form: AgentFormBody
-  gateway: boolean
-  onClose: () => void
-  onSaved: () => Promise<void>
+  form: AgentFormBody;
+  gateway: boolean;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
 }) {
-  const notify = useNotify()
-  const agent = form.agent
-  const models = form.models
-  const tools = form.tools
-  const brains = form.brains
-  const [name, setName] = useState(agent?.name ?? (gateway ? 'Gateway' : ''))
-  const [instructions, setInstructions] = useState(agent?.instructions ?? '')
+  const notify = useNotify();
+  const agent = form.agent;
+  const models = form.models;
+  const tools = form.tools;
+  const brains = form.brains;
+  const skills = form.skills;
+  const [name, setName] = useState(agent?.name ?? (gateway ? "Gateway" : ""));
+  const [instructions, setInstructions] = useState(agent?.instructions ?? "");
   // No agent runs on "whatever the caller picks": the person never chooses a
   // model, so every agent, main or sub, starts on the first real one.
   const [modelID, setModelID] = useState<number | null>(
-    agent?.model_id ?? (models[0]?.id ?? null),
-  )
-  const [reasoning, setReasoning] = useState(agent?.reasoning ?? false)
+    agent?.model_id ?? models[0]?.id ?? null,
+  );
+  const [reasoning, setReasoning] = useState(agent?.reasoning ?? false);
   // How hard it thinks, kept as a whole bag so a second setting of this kind
   // needs no state of its own here.
-  const [settings, setSettings] = useState<Record<string, string>>(agent?.settings ?? {})
-  const [selected, setSelected] = useState<string[]>(agent?.tools ?? [])
-  const [confirm, setConfirm] = useState<string[]>(agent?.confirm_tools ?? [])
-  const [selectedBrains, setSelectedBrains] = useState<string[]>((agent?.brains ?? []).map(String))
+  const [settings, setSettings] = useState<Record<string, string>>(
+    agent?.settings ?? {},
+  );
+  const [selected, setSelected] = useState<string[]>(agent?.tools ?? []);
+  const [confirm, setConfirm] = useState<string[]>(agent?.confirm_tools ?? []);
+  const [selectedBrains, setSelectedBrains] = useState<string[]>(
+    (agent?.brains ?? []).map(String),
+  );
+  const [selectedSkills, setSelectedSkills] = useState<string[]>(
+    (agent?.skills ?? []).map(String),
+  );
   const [memoryBrain, setMemoryBrain] = useState<string>(
-    agent?.memory_brain_id != null ? String(agent.memory_brain_id) : '',
-  )
+    agent?.memory_brain_id != null ? String(agent.memory_brain_id) : "",
+  );
   const [ttl, setTTL] = useState(
-    agent?.approval_ttl_seconds ? String(Math.round(agent.approval_ttl_seconds / 60)) : '',
-  )
+    agent?.approval_ttl_seconds
+      ? String(Math.round(agent.approval_ttl_seconds / 60))
+      : "",
+  );
   const [maxIter, setMaxIter] = useState(
-    agent?.max_iterations != null ? String(agent.max_iterations) : '',
-  )
+    agent?.max_iterations != null ? String(agent.max_iterations) : "",
+  );
   const [maxFleet, setMaxFleet] = useState(
-    agent?.max_fleet_agents != null ? String(agent.max_fleet_agents) : '',
-  )
+    agent?.max_fleet_agents != null ? String(agent.max_fleet_agents) : "",
+  );
   const [bgTimeout, setBgTimeout] = useState(
-    agent?.background_timeout_seconds ? String(Math.round(agent.background_timeout_seconds / 60)) : '',
-  )
-  const [status, setStatus] = useState(agent?.status ?? 'active')
+    agent?.background_timeout_seconds
+      ? String(Math.round(agent.background_timeout_seconds / 60))
+      : "",
+  );
+  const [status, setStatus] = useState(agent?.status ?? "active");
   // How the Gateway runs this agent: auto (it decides), background, or
   // inline. Only meaningful for an agent, not the Gateway.
-  const [delegationMode, setDelegationMode] = useState(agent?.delegation_mode ?? 'auto')
-  const [busy, setBusy] = useState(false)
-  const errors = useFormErrors()
+  const [delegationMode, setDelegationMode] = useState(
+    agent?.delegation_mode ?? "auto",
+  );
+  const [busy, setBusy] = useState(false);
+  const errors = useFormErrors();
 
   // Toggling a tool off also drops it from the confirm set: you cannot pause on
   // a tool the agent can no longer call.
   function toggleTool(name: string, on: boolean) {
-    setSelected((prev) => (on ? [...prev, name] : prev.filter((n) => n !== name)))
-    if (!on) setConfirm((prev) => prev.filter((n) => n !== name))
+    setSelected((prev) =>
+      on ? [...prev, name] : prev.filter((n) => n !== name),
+    );
+    if (!on) setConfirm((prev) => prev.filter((n) => n !== name));
   }
 
   // The confirmation control offers only the tools this agent holds. A tool the
@@ -840,18 +960,19 @@ function AgentForm({
   // Ordered by source, so the dropdown reads in the same runs as the checkboxes
   // above it. Two lists of the same tools in two different orders is a form
   // somebody has to search twice.
-  const confirmOptions: TokenOption[] = bySource(tools.filter((t) => selected.includes(t.name)))
-    .flatMap((group) =>
-      // No hint: it used to carry the name the model calls the tool by, which
-      // is ours and not the reader's. What identifies a tool here is its own
-      // words, under the service it came from.
-      group.items.map((t) => ({
-        value: t.name,
-        label: toolLabel(t),
-        fixed: t.approval_locked,
-        group: group.source,
-      })),
-    )
+  const confirmOptions: TokenOption[] = bySource(
+    tools.filter((t) => selected.includes(t.name)),
+  ).flatMap((group) =>
+    // No hint: it used to carry the name the model calls the tool by, which
+    // is ours and not the reader's. What identifies a tool here is its own
+    // words, under the service it came from.
+    group.items.map((t) => ({
+      value: t.name,
+      label: toolLabel(t),
+      fixed: t.approval_locked,
+      group: group.source,
+    })),
+  );
 
   // Any brain can be READ, so any is choosable as accessible; a locked one is
   // marked. Only an unlocked brain can be the agent's long-term memory, because
@@ -859,24 +980,38 @@ function AgentForm({
   const brainOptions: TokenOption[] = brains.map((b) => ({
     value: String(b.id),
     label: b.name,
-    hint: b.locked ? 'read only' : undefined,
-  }))
-  const unlockedBrains = brains.filter((b) => !b.locked)
+    hint: b.locked ? "read only" : undefined,
+  }));
+  const unlockedBrains = brains.filter((b) => !b.locked);
 
+  // ONE name, which is the rule everywhere else a skill is printed
+  // (lib/skills.ts, `label`): the handle is an identifier, so showing it beside
+  // a perfectly good title says the same thing twice in two shapes. A package
+  // that carried no title is already called by its handle, because that is what
+  // the fallback does, so nothing becomes unidentifiable.
+  //
+  // The status still shows. A skill that is switched off is assignable and says
+  // which it is, rather than vanishing from a list somebody is trying to find
+  // it in, and that is not an identifier.
+  const skillOptions: TokenOption[] = skills.map((sk) => ({
+    value: String(sk.id),
+    label: sk.name,
+    hint: sk.status === "active" ? undefined : sk.status,
+  }));
 
   async function save() {
     if (!name.trim()) {
-      errors.reject({ name: 'An agent needs a name.' })
-      return
+      errors.reject({ name: "An agent needs a name." });
+      return;
     }
-    errors.clear()
-    setBusy(true)
+    errors.clear();
+    setBusy(true);
     try {
-      const minutes = Number(ttl)
+      const minutes = Number(ttl);
       // The key is internal, not something a person types: the Gateway is
       // always "default"; a new agent leaves it empty and the server derives
       // one from the name; an edit keeps the key it already has.
-      const key = gateway ? GATEWAY : (agent?.key ?? '')
+      const key = gateway ? GATEWAY : (agent?.key ?? "");
       const body = {
         key,
         name: name.trim(),
@@ -887,24 +1022,28 @@ function AgentForm({
         tools: selected,
         confirm_tools: confirm.filter((n) => selected.includes(n)),
         brains: selectedBrains.map(Number),
+        skills: selectedSkills.map(Number),
         memory_brain_id: memoryBrain ? Number(memoryBrain) : null,
         status,
-        delegation_mode: gateway ? 'auto' : delegationMode,
+        delegation_mode: gateway ? "auto" : delegationMode,
         approval_ttl_seconds: ttl && minutes > 0 ? minutes * 60 : null,
         max_iterations: maxIter && Number(maxIter) > 0 ? Number(maxIter) : null,
-        max_fleet_agents: gateway && maxFleet && Number(maxFleet) > 0 ? Number(maxFleet) : null,
+        max_fleet_agents:
+          gateway && maxFleet && Number(maxFleet) > 0 ? Number(maxFleet) : null,
         // The background timeout is an agent concept: the Gateway does not
         // run in the background, so it never carries one.
         background_timeout_seconds:
-          !gateway && bgTimeout && Number(bgTimeout) > 0 ? Number(bgTimeout) * 60 : null,
-      }
-      if (agent) await api.agents.update(agent.id, body)
-      else await api.agents.create(body)
-      notify.success('The agent was saved.')
-      await onSaved()
+          !gateway && bgTimeout && Number(bgTimeout) > 0
+            ? Number(bgTimeout) * 60
+            : null,
+      };
+      if (agent) await api.agents.update(agent.id, body);
+      else await api.agents.create(body);
+      notify.success("The agent was saved.");
+      await onSaved();
     } catch (failure) {
-      errors.fail(failure)
-      setBusy(false)
+      errors.fail(failure);
+      setBusy(false);
     }
   }
 
@@ -913,16 +1052,25 @@ function AgentForm({
       open
       wide
       onOpenChange={(o) => !o && onClose()}
-      title={agent ? `Edit ${agent.name}` : gateway ? 'New Gateway' : 'New agent'}
+      title={
+        agent ? `Edit ${agent.name}` : gateway ? "New Gateway" : "New agent"
+      }
       onSubmit={save}
       submitting={busy}
     >
       <div className="grid grid-cols-2 gap-4">
         <Field label="Name" required error={errors.fields.name}>
-          <Input value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+          <Input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            autoFocus
+          />
         </Field>
         <Field label="Status" error={errors.fields.status}>
-          <NativeSelect value={status} onChange={(e) => setStatus(e.target.value)}>
+          <NativeSelect
+            value={status}
+            onChange={(e) => setStatus(e.target.value)}
+          >
             <option value="active">Active</option>
             <option value="disabled">Disabled</option>
           </NativeSelect>
@@ -942,13 +1090,12 @@ function AgentForm({
       </Field>
 
       {gateway ? (
-        <Field
-          label="Model"
-          hint="The model the Gateway runs on."
-        >
+        <Field label="Model" hint="The model the Gateway runs on.">
           <NativeSelect
-            value={modelID ?? ''}
-            onChange={(e) => setModelID(e.target.value ? Number(e.target.value) : null)}
+            value={modelID ?? ""}
+            onChange={(e) =>
+              setModelID(e.target.value ? Number(e.target.value) : null)
+            }
           >
             {models.map((m) => (
               <option key={m.id} value={m.id}>
@@ -963,8 +1110,10 @@ function AgentForm({
               picks it, so there is no "whatever the caller picks". */}
           <Field label="Model" hint="The model this agent runs on.">
             <NativeSelect
-              value={modelID ?? ''}
-              onChange={(e) => setModelID(e.target.value ? Number(e.target.value) : null)}
+              value={modelID ?? ""}
+              onChange={(e) =>
+                setModelID(e.target.value ? Number(e.target.value) : null)
+              }
             >
               {models.map((m) => (
                 <option key={m.id} value={m.id}>
@@ -977,7 +1126,10 @@ function AgentForm({
             label="Preferred mode"
             hint="How the Gateway runs it. Pin one and the Gateway no longer chooses. Fleet means several at once, on the workers, answered when they are all back."
           >
-            <NativeSelect value={delegationMode} onChange={(e) => setDelegationMode(e.target.value)}>
+            <NativeSelect
+              value={delegationMode}
+              onChange={(e) => setDelegationMode(e.target.value)}
+            >
               <option value="auto">Let the Gateway decide</option>
               <option value="background">Background</option>
               <option value="inline">Inline</option>
@@ -1007,8 +1159,10 @@ function AgentForm({
         form.settings.map((spec) => (
           <Field key={spec.key} label={spec.label} hint={spec.help}>
             <NativeSelect
-              value={settings[spec.key] ?? spec.default ?? ''}
-              onChange={(e) => setSettings({ ...settings, [spec.key]: e.target.value })}
+              value={settings[spec.key] ?? spec.default ?? ""}
+              onChange={(e) =>
+                setSettings({ ...settings, [spec.key]: e.target.value })
+              }
             >
               {(spec.choices ?? []).map((c) => (
                 <option key={c.value} value={c.value}>
@@ -1019,9 +1173,14 @@ function AgentForm({
           </Field>
         ))}
 
-      <Field label="Tools" hint="The tools this agent is allowed to use. Anything left unchecked is hidden from it, so the agent never sees it and cannot call it.">
+      <Field
+        label="Tools"
+        hint="The tools this agent is allowed to use. Anything left unchecked is hidden from it, so the agent never sees it and cannot call it."
+      >
         {tools.length === 0 ? (
-          <p className="text-xs text-muted-foreground">This build ships no tools.</p>
+          <p className="text-xs text-muted-foreground">
+            This build ships no tools.
+          </p>
         ) : (
           // Grouped by where each tool came from. A connection projecting thirty
           // of them into one alphabetical list is a list nobody can grant from:
@@ -1037,7 +1196,9 @@ function AgentForm({
                     key={tool.id}
                     checked={selected.includes(tool.name)}
                     onChange={(on) => toggleTool(tool.name, on)}
-                    label={<span className="block truncate">{toolLabel(tool)}</span>}
+                    label={
+                      <span className="block truncate">{toolLabel(tool)}</span>
+                    }
                   />
                 ))}
               </div>
@@ -1081,6 +1242,19 @@ function AgentForm({
       </Field>
 
       <Field
+        label="Skills"
+        hint="The procedures this agent may use. It reads only what you assign here, and a skill it was not given is one it cannot see."
+      >
+        <TokenMultiSelect
+          options={skillOptions}
+          value={selectedSkills}
+          onChange={setSelectedSkills}
+          placeholder="Add a skill…"
+          empty="No skills exist yet. Import one on the Skills screen."
+        />
+      </Field>
+
+      <Field
         label="Long-term memory"
         hint="One brain the agent writes back to as it learns, off the conversation. Unlocked brains only. Optional."
       >
@@ -1101,43 +1275,59 @@ function AgentForm({
       <div className="border-t border-border pt-4">
         <div className="mb-3 space-y-1 rounded-md border border-primary/30 bg-primary/5 px-4 py-3 text-xs text-muted-foreground">
           <p>
-            <span className="font-medium text-foreground">Approval window</span> — minutes a
-            confirmation stays answerable. Empty uses the deployment's.
+            <span className="font-medium text-foreground">Approval window</span>{" "}
+            — minutes a confirmation stays answerable. Empty uses the
+            deployment's.
           </p>
           {!gateway && (
             <p>
-              <span className="font-medium text-foreground">Background timeout</span> — minutes a
-              background task may work before it is stopped and reported as timed out. Empty uses 10.
+              <span className="font-medium text-foreground">
+                Background timeout
+              </span>{" "}
+              — minutes a background task may work before it is stopped and
+              reported as timed out. Empty uses 10.
             </p>
           )}
           <p>
-            <span className="font-medium text-foreground">Max iterations</span> — how many tool
-            steps this agent may take before it stops. Empty uses 100.
+            <span className="font-medium text-foreground">Max iterations</span>{" "}
+            — how many tool steps this agent may take before it stops. Empty
+            uses 100.
           </p>
           {gateway && (
             <p>
-              <span className="font-medium text-foreground">Max agents in a batch</span> — how many
-              agents may be started at once when work is split across them. Each one is a separate
-              conversation with a model, so this is a cost as much as a limit. Empty uses 20.
+              <span className="font-medium text-foreground">
+                Max agents in a batch
+              </span>{" "}
+              — how many agents may be started at once when work is split across
+              them. Each one is a separate conversation with a model, so this is
+              a cost as much as a limit. Empty uses 20.
             </p>
           )}
         </div>
 
         <div className="grid grid-cols-3 gap-4">
-          <Field label="Approval window (min)" error={errors.fields.approval_ttl_seconds}>
+          <Field
+            label="Approval window (min)"
+            error={errors.fields.approval_ttl_seconds}
+          >
             <Input
               value={ttl}
-              onChange={(e) => setTTL(e.target.value.replace(/\D/g, ''))}
+              onChange={(e) => setTTL(e.target.value.replace(/\D/g, ""))}
               inputMode="numeric"
               placeholder="1440"
             />
           </Field>
 
           {!gateway && (
-            <Field label="Background timeout (min)" error={errors.fields.background_timeout_seconds}>
+            <Field
+              label="Background timeout (min)"
+              error={errors.fields.background_timeout_seconds}
+            >
               <Input
                 value={bgTimeout}
-                onChange={(e) => setBgTimeout(e.target.value.replace(/\D/g, ''))}
+                onChange={(e) =>
+                  setBgTimeout(e.target.value.replace(/\D/g, ""))
+                }
                 inputMode="numeric"
                 placeholder="10"
               />
@@ -1147,7 +1337,7 @@ function AgentForm({
           <Field label="Max iterations" error={errors.fields.max_iterations}>
             <Input
               value={maxIter}
-              onChange={(e) => setMaxIter(e.target.value.replace(/\D/g, ''))}
+              onChange={(e) => setMaxIter(e.target.value.replace(/\D/g, ""))}
               inputMode="numeric"
               placeholder="100"
             />
@@ -1157,10 +1347,13 @@ function AgentForm({
               big one may be. It takes the slot the background timeout has on an
               agent, so both forms are three across. */}
           {gateway && (
-            <Field label="Max agents in a batch" error={errors.fields.max_fleet_agents}>
+            <Field
+              label="Max agents in a batch"
+              error={errors.fields.max_fleet_agents}
+            >
               <Input
                 value={maxFleet}
-                onChange={(e) => setMaxFleet(e.target.value.replace(/\D/g, ''))}
+                onChange={(e) => setMaxFleet(e.target.value.replace(/\D/g, ""))}
                 inputMode="numeric"
                 placeholder="20"
               />
@@ -1169,7 +1362,17 @@ function AgentForm({
         </div>
       </div>
 
+      {/* Who set this up, under the form rather than in its header: it is
+          provenance, not a field, and an agent can be configured by a person
+          today and by another agent later. Absent for anything configured
+          before this was recorded. */}
+      {form.agent && configuredBy(form.agent) !== "" && (
+        <p className="text-xs text-muted-foreground">
+          {configuredBy(form.agent)}
+        </p>
+      )}
+
       {errors.form && <p className="text-sm text-destructive">{errors.form}</p>}
     </Modal>
-  )
+  );
 }

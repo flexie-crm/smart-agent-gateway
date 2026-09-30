@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"flexie.io/sag/internal/model"
+	"flexie.io/sag/internal/tools/agentguide"
 )
 
 // The delegate tool offers a mode parameter only while at least one agent
@@ -78,5 +79,31 @@ func TestEveryPinnedModeTellsTheGatewayWhatItIs(t *testing.T) {
 	}
 	if pinnedModeLine("") != "" {
 		t.Error("an unset mode is auto, and should not be described as pinned")
+	}
+}
+
+// An agent nobody wrote instructions for is still described.
+//
+// This is a real configuration: an administrator names one "Terminal Agent",
+// gives it the terminal, and considers it explained. Before the abilities moved
+// behind agent_guide the roster's tool list was accidentally carrying the whole
+// explanation for such an agent; with them gone, an entry with no instructions
+// was a heading and a name, and the Gateway had nothing to route on and nothing
+// telling it there was more to find.
+func TestAnAgentWithNoInstructionsIsStillDescribed(t *testing.T) {
+	got := agentsBody([]agentInfo{
+		{Key: "terminal-agent", Name: "Terminal Agent"},
+	})
+	for _, want := range []string{"terminal-agent", "Terminal Agent", "No instructions were written", agentguide.Name} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the entry is missing %q:\n%s", want, got)
+		}
+	}
+	// An agent that HAS instructions is not told it has none.
+	described := agentsBody([]agentInfo{
+		{Key: "researcher", Name: "Researcher", Instructions: "Finds sources."},
+	})
+	if strings.Contains(described, "No instructions were written") {
+		t.Errorf("an agent with instructions was reported as having none:\n%s", described)
 	}
 }

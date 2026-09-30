@@ -151,7 +151,12 @@ func (h *mcpSettingsHandlers) put(w http.ResponseWriter, r *http.Request) {
 		ToolConfig:  req.ToolConfig,
 		BrainConfig: req.BrainConfig,
 	}
-	if err := h.app.Store.MCPServers().PutSettings(r.Context(), settings); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.MCPServers().PutSettings(r.Context(), settings, by); err != nil {
 		writeStoreError(w, h.app, err)
 		return
 	}

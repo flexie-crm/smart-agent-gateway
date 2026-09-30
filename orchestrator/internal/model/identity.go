@@ -8,6 +8,11 @@ type Group struct {
 	ID          int64
 	WorkspaceID int64
 	Name        string
+	// Who made it and who last changed it (model.Actor): the ids go to NULL
+	// when the person is deleted and the names are frozen, so the record reads
+	// afterwards.
+	Authored
+	Edited
 }
 
 // Role is a named bundle of permissions, granted to groups.
@@ -16,6 +21,11 @@ type Role struct {
 	WorkspaceID int64
 	Name        string
 	Permissions []string
+	// Who made it and who last changed it (model.Actor): the ids go to NULL
+	// when the person is deleted and the names are frozen, so the record reads
+	// afterwards.
+	Authored
+	Edited
 }
 
 // UserSession is a first-party refresh token (login session). The token
@@ -126,6 +136,17 @@ const (
 	PermBrainsEdit   = "brains:edit"
 	PermBrainsDelete = "brains:delete"
 
+	// Skills are procedures, imported as packages. The same kind of decision as
+	// a brain (what the agent knows, and may act on), which is why the two areas
+	// carry the same shape. Create is IMPORTING one, because that is the only way
+	// a skill comes into existence here; edit is enabling, disabling and rolling
+	// back to an earlier version, none of which changes a version, because a
+	// version cannot be changed.
+	PermSkillsView   = "skills:view"
+	PermSkillsCreate = "skills:create"
+	PermSkillsEdit   = "skills:edit"
+	PermSkillsDelete = "skills:delete"
+
 	// Workspaces partition the tenant. Deleting one takes everything in it:
 	// its vendors, agents, brains, and every conversation.
 	// Machines are PLATFORM scope, like workspaces: a GPU box is bought once and
@@ -234,6 +255,11 @@ var PermissionCatalog = []PermissionInfo{
 	{Key: PermBrainsCreate, Area: "Brains", Label: "Create"},
 	{Key: PermBrainsEdit, Area: "Brains", Label: "Edit"},
 	{Key: PermBrainsDelete, Area: "Brains", Label: "Delete"},
+
+	{Key: PermSkillsView, Area: "Skills", Label: "View"},
+	{Key: PermSkillsCreate, Area: "Skills", Label: "Import"},
+	{Key: PermSkillsEdit, Area: "Skills", Label: "Enable and roll back"},
+	{Key: PermSkillsDelete, Area: "Skills", Label: "Delete"},
 
 	{Key: PermAgentsView, Area: "Agents", Label: "View"},
 	{Key: PermAgentsCreate, Area: "Agents", Label: "Create"},

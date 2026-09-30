@@ -20,7 +20,8 @@ type toolStore struct{ db *sqldb.DB }
 
 const toolColumns = `id, workspace_id, name, kind, template, friendly_name, description,
 	input_schema, risk, requires_approval, config, guide, status,
-	mcp_server_id, remote_name, definition_hash, remote_missing, definition_changed_at`
+	mcp_server_id, remote_name, definition_hash, remote_missing, definition_changed_at,
+	` + authoredColumns
 
 // toolColumnsT is the same list qualified for a join. It is spelled out rather
 // than derived, because deriving it would mean building a query string at
@@ -28,7 +29,9 @@ const toolColumns = `id, workspace_id, name, kind, template, friendly_name, desc
 // doing it is ours.
 const toolColumnsT = `t.id, t.workspace_id, t.name, t.kind, t.template, t.friendly_name, t.description,
 	t.input_schema, t.risk, t.requires_approval, t.config, t.guide, t.status,
-	t.mcp_server_id, t.remote_name, t.definition_hash, t.remote_missing, t.definition_changed_at`
+	t.mcp_server_id, t.remote_name, t.definition_hash, t.remote_missing, t.definition_changed_at,
+	COALESCE(t.created_by, 0), t.created_by_name,
+	COALESCE(t.updated_by, 0), t.updated_by_name`
 
 // Sync reconciles the workspace with the tools the code offers.
 //
@@ -97,7 +100,14 @@ func (s *toolStore) ListForUser(ctx context.Context, workspaceID, userID int64) 
 	if err != nil {
 		return nil, fmt.Errorf("list tools for user: %w", err)
 	}
-	return scanTools(rows)
+	tools, err := scanTools(rows)
+	if err != nil {
+		return nil, err
+	}
+	// The grants are already applied by the query above; the skills are not,
+	// and this is the path a TURN reads, which is where a tool's guide learns
+	// what documentation came with it.
+	return tools, s.attachSkills(ctx, tools)
 }
 
 func (s *toolStore) GetByID(ctx context.Context, workspaceID, id int64) (*model.Tool, error) {
@@ -106,13 +116,16 @@ func (s *toolStore) GetByID(ctx context.Context, workspaceID, id int64) (*model.
 	if err != nil {
 		return nil, err
 	}
-	return t, s.attachGrants(ctx, []*model.Tool{t})
+	if err := s.attachGrants(ctx, []*model.Tool{t}); err != nil {
+		return nil, err
+	}
+	return t, s.attachSkills(ctx, []*model.Tool{t})
 }
 
 // Update writes the admin-owned columns and replaces the grants. The code-owned
 // columns are absent on purpose: a description is not something an admin edits,
 // it is something a deploy delivers.
-func (s *toolStore) Update(ctx context.Context, t *model.Tool) error {
+func (s *toolStore) Update(ctx context.Context, t *model.Tool, by model.Actor) error {
 	return s.db.Tx(ctx, func(ctx context.Context, tx *sqldb.Tx) error {
 		if err := requireExists(ctx, tx, "update tool",
 			`SELECT 1 FROM tools WHERE id = ? AND workspace_id = ?`, t.ID, t.WorkspaceID); err != nil {
@@ -122,10 +135,13 @@ func (s *toolStore) Update(ctx context.Context, t *model.Tool) error {
 		// the MCP sync for a drifted remote tool; the caller decides whether this
 		// write may touch it (only an MCP re-trust does). Admin-added confirmation
 		// for a builtin or custom tool lives on the agent now (agent_confirm_tools).
+		t.Changed(by)
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE tools SET status = ?, requires_approval = ?, config = ?
+			`UPDATE tools SET status = ?, requires_approval = ?, config = ?,
+			        updated_by = ?, updated_by_name = ?
 			 WHERE id = ? AND workspace_id = ?`,
-			t.Status, t.RequiresApproval, nullJSON(t.Config), t.ID, t.WorkspaceID); err != nil {
+			t.Status, t.RequiresApproval, nullJSON(t.Config),
+			nullID(t.UpdatedBy), t.UpdatedByName, t.ID, t.WorkspaceID); err != nil {
 			return fmt.Errorf("update tool: %w", err)
 		}
 
@@ -163,30 +179,42 @@ func statusOrActive(status string) string {
 // CreateCustom inserts a custom tool row: a self-describing tool backed by data,
 // not code. Sync never touches it (Sync only upserts the built-in tools it is
 // given), so it lives until it is deleted.
-func (s *toolStore) CreateCustom(ctx context.Context, t *model.Tool) error {
+func (s *toolStore) CreateCustom(ctx context.Context, t *model.Tool, by model.Actor) error {
 	// requires_approval defaults to 0: a custom tool is not an MCP projection, so
 	// it has no drift lock, and admin-added confirmation now lives on the agent.
-	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO tools
-			(workspace_id, name, kind, template, friendly_name, description, input_schema,
-			 risk, config, guide, status)
-		 VALUES (?, ?, 'custom', ?, ?, ?, ?, ?, ?, ?, ?)`,
-		t.WorkspaceID, t.Name, t.Template, t.FriendlyName, t.Description, nullJSON(t.InputSchema),
-		t.Risk, nullJSON(t.Config), nullString(t.Guide), statusOrActive(t.Status))
-	if err != nil {
-		return wrapWriteErr("create custom tool", err)
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return fmt.Errorf("create custom tool: %w", err)
-	}
-	t.ID = id
-	return nil
+	// A custom tool has an author, where a built-in does not: Sync writes those
+	// from the code registry, so their author columns stay empty, which is the
+	// honest answer (nobody made it, it came with the product).
+	t.Made(by)
+	t.Changed(by)
+	// In a transaction because the skills it points at are part of making it:
+	// a tool that exists without the documentation somebody attached to it is a
+	// half-made tool, and the next read would show it that way.
+	return s.db.Tx(ctx, func(ctx context.Context, tx *sqldb.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`INSERT INTO tools
+				(workspace_id, name, kind, template, friendly_name, description, input_schema,
+				 risk, config, guide, status,
+				 created_by, created_by_name, updated_by, updated_by_name)
+			 VALUES (?, ?, 'custom', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			t.WorkspaceID, t.Name, t.Template, t.FriendlyName, t.Description, nullJSON(t.InputSchema),
+			t.Risk, nullJSON(t.Config), nullString(t.Guide), statusOrActive(t.Status),
+			nullID(t.CreatedBy), t.CreatedByName, nullID(t.UpdatedBy), t.UpdatedByName)
+		if err != nil {
+			return wrapWriteErr("create custom tool", err)
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return fmt.Errorf("create custom tool: %w", err)
+		}
+		t.ID = id
+		return setToolSkills(ctx, tx, t.WorkspaceID, t.ID, t.Skills)
+	})
 }
 
 // UpdateCustom rewrites a custom tool's own columns. It refuses anything that is
 // not a custom tool, so it can never rewrite a built-in or an MCP row.
-func (s *toolStore) UpdateCustom(ctx context.Context, t *model.Tool) error {
+func (s *toolStore) UpdateCustom(ctx context.Context, t *model.Tool, by model.Actor) error {
 	return s.db.Tx(ctx, func(ctx context.Context, tx *sqldb.Tx) error {
 		// Existence is checked separately: MySQL reports zero affected rows for an
 		// UPDATE whose new values equal the old, so an edit that seals the same
@@ -196,16 +224,44 @@ func (s *toolStore) UpdateCustom(ctx context.Context, t *model.Tool) error {
 			t.ID, t.WorkspaceID); err != nil {
 			return err
 		}
+		t.Changed(by)
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE tools
-			 SET friendly_name = ?, description = ?, input_schema = ?, risk = ?, config = ?, guide = ?
+			 SET friendly_name = ?, description = ?, input_schema = ?, risk = ?, config = ?,
+			     guide = ?, updated_by = ?, updated_by_name = ?
 			 WHERE id = ? AND workspace_id = ? AND kind = 'custom'`,
-			t.FriendlyName, t.Description, nullJSON(t.InputSchema), t.Risk, nullJSON(t.Config), nullString(t.Guide),
+			t.FriendlyName, t.Description, nullJSON(t.InputSchema), t.Risk, nullJSON(t.Config),
+			nullString(t.Guide), nullID(t.UpdatedBy), t.UpdatedByName,
 			t.ID, t.WorkspaceID); err != nil {
 			return wrapWriteErr("update custom tool", err)
 		}
-		return nil
+		return setToolSkills(ctx, tx, t.WorkspaceID, t.ID, t.Skills)
 	})
+}
+
+// SetConfig replaces a custom tool's config and touches nothing else.
+//
+// No author stamp, deliberately: a renewed token is not somebody editing a
+// tool, and stamping the person whose sign-in happened to be refreshed as
+// having updated it would be a lie in a column people read.
+func (s *toolStore) SetConfig(ctx context.Context, workspaceID, toolID int64, config json.RawMessage) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE tools SET config = ? WHERE id = ? AND workspace_id = ? AND kind = 'custom'`,
+		nullJSON(config), toolID, workspaceID)
+	if err != nil {
+		return wrapWriteErr("write tool config", err)
+	}
+	// Zero rows here means the tool is gone or is not custom, which a caller
+	// holding a stale id must be told about rather than left believing a token
+	// was kept.
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("write tool config: %w", err)
+	}
+	if affected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
 }
 
 // Delete removes a custom tool. It refuses a non-custom tool: a built-in or a
@@ -371,6 +427,65 @@ func (s *toolStore) attachGrants(ctx context.Context, tools []*model.Tool) error
 	return rows.Err()
 }
 
+// attachSkills fills the skills each tool points at, in one query for the same
+// reason attachGrants uses one: a workspace has one list of these, not one per
+// tool.
+func (s *toolStore) attachSkills(ctx context.Context, tools []*model.Tool) error {
+	if len(tools) == 0 {
+		return nil
+	}
+	byID := make(map[int64]*model.Tool, len(tools))
+	for _, t := range tools {
+		t.Skills = []int64{}
+		byID[t.ID] = t
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT ts.tool_id, ts.skill_id
+		 FROM tool_skills ts
+		 JOIN tools t ON t.id = ts.tool_id
+		 WHERE t.workspace_id = ?
+		 ORDER BY ts.skill_id`, tools[0].WorkspaceID)
+	if err != nil {
+		return fmt.Errorf("list tool skills: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var toolID, skillID int64
+		if err := rows.Scan(&toolID, &skillID); err != nil {
+			return fmt.Errorf("scan tool skill: %w", err)
+		}
+		if t, ok := byID[toolID]; ok {
+			t.Skills = append(t.Skills, skillID)
+		}
+	}
+	return rows.Err()
+}
+
+// setToolSkills replaces the skills a tool points at. The INSERT ... SELECT is
+// the workspace check, so a skill from another workspace is silently not
+// written rather than trusted, exactly as an agent's are. A nil slice means no
+// opinion and writes nothing; an empty slice clears the lot.
+func setToolSkills(ctx context.Context, tx *sqldb.Tx, workspaceID, toolID int64, skillIDs []int64) error {
+	if skillIDs == nil {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM tool_skills WHERE tool_id = ?`, toolID); err != nil {
+		return fmt.Errorf("clear tool skills: %w", err)
+	}
+	for _, skillID := range skillIDs {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT IGNORE INTO tool_skills (tool_id, skill_id)
+			 SELECT ?, id FROM ai_skills WHERE id = ? AND workspace_id = ?`,
+			toolID, skillID, workspaceID); err != nil {
+			return fmt.Errorf("assign skill %d to tool: %w", skillID, err)
+		}
+	}
+	return nil
+}
+
 func scanTools(rows *sql.Rows) ([]*model.Tool, error) {
 	defer func() { _ = rows.Close() }()
 
@@ -400,7 +515,8 @@ func scanToolFields(scan func(dest ...any) error) (*model.Tool, error) {
 	var changedAt sql.NullTime
 	err := scan(&t.ID, &t.WorkspaceID, &t.Name, &t.Kind, &template, &t.FriendlyName,
 		&t.Description, &schema, &t.Risk, &t.RequiresApproval, &config, &guide, &t.Status,
-		&serverID, &remoteName, &definitionHash, &t.RemoteMissing, &changedAt)
+		&serverID, &remoteName, &definitionHash, &t.RemoteMissing, &changedAt,
+		&t.CreatedBy, &t.CreatedByName, &t.UpdatedBy, &t.UpdatedByName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -428,9 +544,11 @@ type agentConfigStore struct{ db *sqldb.DB }
 
 const agentColumns = `id, workspace_id, agent_key, name, instructions, model_id,
 	memory_brain_id, audio_model_id, reasoning, settings, approval_ttl_seconds, max_iterations, max_fleet_agents, background_timeout_seconds,
-	status, delegation_mode, created_at, updated_at`
+	status, delegation_mode,
+	COALESCE(created_by, 0), created_by_name, COALESCE(updated_by, 0), updated_by_name,
+	created_at, updated_at`
 
-func (s *agentConfigStore) Create(ctx context.Context, a *model.Agent) error {
+func (s *agentConfigStore) Create(ctx context.Context, a *model.Agent, by model.Actor) error {
 	now := time.Now().UTC()
 	a.CreatedAt, a.UpdatedAt = now, now
 	if a.Status == "" {
@@ -456,15 +574,20 @@ func (s *agentConfigStore) Create(ctx context.Context, a *model.Agent) error {
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO agents (workspace_id, agent_key, name, instructions, model_id,
 				memory_brain_id, audio_model_id, reasoning, settings, approval_ttl_seconds, max_iterations, max_fleet_agents, background_timeout_seconds,
-				status, delegation_mode, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				status, delegation_mode, created_by, created_by_name, updated_by, updated_by_name,
+				created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			a.WorkspaceID, a.Key, a.Name, a.Instructions, a.ModelID, a.MemoryBrainID, a.AudioModelID,
 			a.Reasoning, nullBytes(settings), approvalSeconds(a.ApprovalTTL), nullableInt(a.MaxIterations),
 			nullableInt(a.MaxFleetAgents), durationSeconds(a.BackgroundTimeout),
-			a.Status, delegationModeOrAuto(a.DelegationMode), a.CreatedAt, a.UpdatedAt)
+			a.Status, delegationModeOrAuto(a.DelegationMode),
+			nullID(by.UserID), by.Name, nullID(by.UserID), by.Name,
+			a.CreatedAt, a.UpdatedAt)
 		if err != nil {
 			return wrapWriteErr("insert agent", err)
 		}
+		a.CreatedBy, a.CreatedByName = by.UserID, by.Name
+		a.UpdatedBy, a.UpdatedByName = by.UserID, by.Name
 		if a.ID, err = res.LastInsertId(); err != nil {
 			return err
 		}
@@ -472,6 +595,9 @@ func (s *agentConfigStore) Create(ctx context.Context, a *model.Agent) error {
 			return err
 		}
 		if err := setAgentConfirmTools(ctx, tx, a.WorkspaceID, a.ID, a.ConfirmTools); err != nil {
+			return err
+		}
+		if err := setAgentSkills(ctx, tx, a.WorkspaceID, a.ID, a.Skills); err != nil {
 			return err
 		}
 		if err := setAgentBrains(ctx, tx, a.WorkspaceID, a.ID, a.Brains); err != nil {
@@ -526,7 +652,7 @@ func (s *agentConfigStore) List(ctx context.Context, workspaceID int64) ([]*mode
 	return agents, nil
 }
 
-func (s *agentConfigStore) Update(ctx context.Context, a *model.Agent) error {
+func (s *agentConfigStore) Update(ctx context.Context, a *model.Agent, by model.Actor) error {
 	settings, err := a.Settings.Marshal()
 	if err != nil {
 		return fmt.Errorf("update agent: %w", err)
@@ -541,19 +667,25 @@ func (s *agentConfigStore) Update(ctx context.Context, a *model.Agent) error {
 			`UPDATE agents SET agent_key = ?, name = ?, instructions = ?, model_id = ?,
 				memory_brain_id = ?, audio_model_id = ?, reasoning = ?, settings = ?, approval_ttl_seconds = ?, max_iterations = ?,
 				max_fleet_agents = ?,
-				background_timeout_seconds = ?, status = ?, delegation_mode = ?, updated_at = ?
+				background_timeout_seconds = ?, status = ?, delegation_mode = ?,
+				updated_by = ?, updated_by_name = ?, updated_at = ?
 			 WHERE id = ? AND workspace_id = ?`,
 			a.Key, a.Name, a.Instructions, a.ModelID, a.MemoryBrainID, a.AudioModelID, a.Reasoning,
 			nullBytes(settings), approvalSeconds(a.ApprovalTTL), nullableInt(a.MaxIterations), nullableInt(a.MaxFleetAgents),
 			durationSeconds(a.BackgroundTimeout),
-			a.Status, delegationModeOrAuto(a.DelegationMode), a.UpdatedAt,
+			a.Status, delegationModeOrAuto(a.DelegationMode),
+			nullID(by.UserID), by.Name, a.UpdatedAt,
 			a.ID, a.WorkspaceID); err != nil {
 			return wrapWriteErr("update agent", err)
 		}
+		a.UpdatedBy, a.UpdatedByName = by.UserID, by.Name
 		if err := setAgentTools(ctx, tx, a.WorkspaceID, a.ID, a.Tools); err != nil {
 			return err
 		}
 		if err := setAgentConfirmTools(ctx, tx, a.WorkspaceID, a.ID, a.ConfirmTools); err != nil {
+			return err
+		}
+		if err := setAgentSkills(ctx, tx, a.WorkspaceID, a.ID, a.Skills); err != nil {
 			return err
 		}
 		if err := setAgentBrains(ctx, tx, a.WorkspaceID, a.ID, a.Brains); err != nil {
@@ -679,6 +811,29 @@ func setAgentBrains(ctx context.Context, tx *sqldb.Tx, workspaceID, agentID int6
 	return nil
 }
 
+// setAgentSkills replaces the skills an agent may use. The INSERT ... SELECT is
+// the workspace check, so a skill from another workspace is silently not written
+// rather than trusted, exactly as a brain is. A nil slice means no opinion and
+// writes nothing; an empty slice clears the lot.
+func setAgentSkills(ctx context.Context, tx *sqldb.Tx, workspaceID, agentID int64, skillIDs []int64) error {
+	if skillIDs == nil {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM agent_skills WHERE agent_id = ?`, agentID); err != nil {
+		return fmt.Errorf("clear agent skills: %w", err)
+	}
+	for _, skillID := range skillIDs {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT IGNORE INTO agent_skills (agent_id, skill_id)
+			 SELECT ?, id FROM ai_skills WHERE id = ? AND workspace_id = ?`,
+			agentID, skillID, workspaceID); err != nil {
+			return fmt.Errorf("assign skill %d: %w", skillID, err)
+		}
+	}
+	return nil
+}
+
 // setGatewayFileRules replaces the Gateway's file routing. The INSERT ...
 // SELECT is the workspace check, so a model from another workspace is silently
 // not written rather than trusted, exactly as a brain is.
@@ -716,6 +871,9 @@ func (s *agentConfigStore) attachAgentTools(ctx context.Context, a *model.Agent)
 	if err := s.attachConfirmTools(ctx, a); err != nil {
 		return err
 	}
+	if err := s.attachSkills(ctx, a); err != nil {
+		return err
+	}
 	if err := s.attachBrains(ctx, a); err != nil {
 		return err
 	}
@@ -747,6 +905,30 @@ func (s *agentConfigStore) attachFileRules(ctx context.Context, a *model.Agent) 
 		out = append(out, rule)
 	}
 	a.FileRules = out
+	return rows.Err()
+}
+
+// attachSkills fills the ids of the skills this agent may use. Ids, not the
+// skills themselves, for the reason attachBrains gives: a form prefills a picker
+// with them, and what the turn needs (the handle, the name, the description) is
+// read through the skill store when the roster is built.
+func (s *agentConfigStore) attachSkills(ctx context.Context, a *model.Agent) error {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT skill_id FROM agent_skills WHERE agent_id = ? ORDER BY skill_id`, a.ID)
+	if err != nil {
+		return fmt.Errorf("list agent skills: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	ids := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("scan agent skill: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	a.Skills = ids
 	return rows.Err()
 }
 
@@ -857,7 +1039,9 @@ func scanAgent(row *sql.Row) (*model.Agent, error) {
 	var modelID, memoryBrainID, audioModelID, approvalTTL, maxIter, maxFleet, bgTimeout sql.NullInt64
 	var settings []byte
 	err := row.Scan(&a.ID, &a.WorkspaceID, &a.Key, &a.Name, &instructions, &modelID,
-		&memoryBrainID, &audioModelID, &a.Reasoning, &settings, &approvalTTL, &maxIter, &maxFleet, &bgTimeout, &a.Status, &a.DelegationMode, &a.CreatedAt, &a.UpdatedAt)
+		&memoryBrainID, &audioModelID, &a.Reasoning, &settings, &approvalTTL, &maxIter, &maxFleet, &bgTimeout, &a.Status, &a.DelegationMode,
+		&a.CreatedBy, &a.CreatedByName, &a.UpdatedBy, &a.UpdatedByName,
+		&a.CreatedAt, &a.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -875,7 +1059,9 @@ func scanAgentRow(rows *sql.Rows) (*model.Agent, error) {
 	var modelID, memoryBrainID, audioModelID, approvalTTL, maxIter, maxFleet, bgTimeout sql.NullInt64
 	var settings []byte
 	if err := rows.Scan(&a.ID, &a.WorkspaceID, &a.Key, &a.Name, &instructions, &modelID,
-		&memoryBrainID, &audioModelID, &a.Reasoning, &settings, &approvalTTL, &maxIter, &maxFleet, &bgTimeout, &a.Status, &a.DelegationMode, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		&memoryBrainID, &audioModelID, &a.Reasoning, &settings, &approvalTTL, &maxIter, &maxFleet, &bgTimeout, &a.Status, &a.DelegationMode,
+		&a.CreatedBy, &a.CreatedByName, &a.UpdatedBy, &a.UpdatedByName,
+		&a.CreatedAt, &a.UpdatedAt); err != nil {
 		return nil, fmt.Errorf("scan agent: %w", err)
 	}
 	a.Settings = model.ParseSettings(settings)
@@ -916,18 +1102,27 @@ func fillAgent(a *model.Agent, instructions sql.NullString, modelID, memoryBrain
 
 type workflowStore struct{ db *sqldb.DB }
 
-const workflowColumns = `id, workspace_id, name, status, created_by, created_at, updated_at`
+const workflowColumns = `id, workspace_id, name, status,
+	COALESCE(created_by, 0), created_by_name, COALESCE(updated_by, 0), updated_by_name,
+	created_at, updated_at`
 
-func (s *workflowStore) Create(ctx context.Context, w *model.Workflow) error {
+func (s *workflowStore) Create(ctx context.Context, w *model.Workflow, by model.Actor) error {
 	now := time.Now().UTC()
 	w.CreatedAt, w.UpdatedAt = now, now
 	if w.Status == "" {
 		w.Status = model.WorkflowDraft
 	}
+	// Who made it is the store's to record, not the caller's to pass in the
+	// entity: a body cannot claim to be somebody.
+	w.Made(by)
+	w.Changed(by)
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO workflows (workspace_id, name, status, created_by, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		w.WorkspaceID, w.Name, w.Status, w.CreatedBy, w.CreatedAt, w.UpdatedAt)
+		`INSERT INTO workflows
+		   (workspace_id, name, status, created_by, created_by_name,
+		    updated_by, updated_by_name, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		w.WorkspaceID, w.Name, w.Status, nullID(w.CreatedBy), w.CreatedByName,
+		nullID(w.UpdatedBy), w.UpdatedByName, w.CreatedAt, w.UpdatedAt)
 	if err != nil {
 		return wrapWriteErr("insert workflow", err)
 	}
@@ -940,7 +1135,9 @@ func (s *workflowStore) GetByID(ctx context.Context, workspaceID, id int64) (*mo
 	err := s.db.QueryRowContext(ctx,
 		`SELECT `+workflowColumns+` FROM workflows WHERE workspace_id = ? AND id = ?`,
 		workspaceID, id).
-		Scan(&w.ID, &w.WorkspaceID, &w.Name, &w.Status, &w.CreatedBy, &w.CreatedAt, &w.UpdatedAt)
+		Scan(&w.ID, &w.WorkspaceID, &w.Name, &w.Status,
+			&w.CreatedBy, &w.CreatedByName, &w.UpdatedBy, &w.UpdatedByName,
+			&w.CreatedAt, &w.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -962,7 +1159,8 @@ func (s *workflowStore) List(ctx context.Context, workspaceID int64) ([]*model.W
 	for rows.Next() {
 		w := &model.Workflow{}
 		if err := rows.Scan(&w.ID, &w.WorkspaceID, &w.Name, &w.Status,
-			&w.CreatedBy, &w.CreatedAt, &w.UpdatedAt); err != nil {
+			&w.CreatedBy, &w.CreatedByName, &w.UpdatedBy, &w.UpdatedByName,
+			&w.CreatedAt, &w.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
 		workflows = append(workflows, w)
@@ -970,16 +1168,18 @@ func (s *workflowStore) List(ctx context.Context, workspaceID int64) ([]*model.W
 	return workflows, rows.Err()
 }
 
-func (s *workflowStore) Update(ctx context.Context, w *model.Workflow) error {
+func (s *workflowStore) Update(ctx context.Context, w *model.Workflow, by model.Actor) error {
 	if err := requireExists(ctx, s.db, "update workflow",
 		`SELECT 1 FROM workflows WHERE id = ? AND workspace_id = ?`, w.ID, w.WorkspaceID); err != nil {
 		return err
 	}
 	w.UpdatedAt = time.Now().UTC()
+	w.Changed(by)
 	if _, err := s.db.ExecContext(ctx,
-		`UPDATE workflows SET name = ?, status = ?, updated_at = ?
+		`UPDATE workflows SET name = ?, status = ?, updated_by = ?, updated_by_name = ?, updated_at = ?
 		 WHERE id = ? AND workspace_id = ?`,
-		w.Name, w.Status, w.UpdatedAt, w.ID, w.WorkspaceID); err != nil {
+		w.Name, w.Status, nullID(w.UpdatedBy), w.UpdatedByName, w.UpdatedAt,
+		w.ID, w.WorkspaceID); err != nil {
 		return wrapWriteErr("update workflow", err)
 	}
 	return nil
@@ -1000,7 +1200,7 @@ func (s *workflowStore) Delete(ctx context.Context, workspaceID, id int64) error
 // lock. Two administrators saving at the same instant get version 4 and
 // version 5, never two version 4s: the number is derived inside the
 // transaction that holds the workflow, not read beforehand.
-func (s *workflowStore) CreateVersion(ctx context.Context, workspaceID int64, v *model.WorkflowVersion) error {
+func (s *workflowStore) CreateVersion(ctx context.Context, workspaceID int64, v *model.WorkflowVersion, by model.Actor) error {
 	return s.db.Tx(ctx, func(ctx context.Context, tx *sqldb.Tx) error {
 		var locked int64
 		err := tx.QueryRowContext(ctx,
@@ -1022,10 +1222,14 @@ func (s *workflowStore) CreateVersion(ctx context.Context, workspaceID int64, v 
 		v.Version = int(next.Int64) + 1
 		v.CreatedAt = time.Now().UTC()
 
+		v.Made(by)
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO workflow_versions (workflow_id, version, definition, is_published, created_by, created_at)
-			 VALUES (?, ?, ?, 0, ?, ?)`,
-			v.WorkflowID, v.Version, []byte(v.Definition), v.CreatedBy, v.CreatedAt)
+			`INSERT INTO workflow_versions
+			   (workflow_id, version, definition, is_published, created_by,
+			    created_by_name, created_at)
+			 VALUES (?, ?, ?, 0, ?, ?, ?)`,
+			v.WorkflowID, v.Version, []byte(v.Definition), nullID(v.CreatedBy),
+			v.CreatedByName, v.CreatedAt)
 		if err != nil {
 			return wrapWriteErr("insert workflow version", err)
 		}
@@ -1037,7 +1241,8 @@ func (s *workflowStore) CreateVersion(ctx context.Context, workspaceID int64, v 
 
 func (s *workflowStore) ListVersions(ctx context.Context, workspaceID, workflowID int64) ([]*model.WorkflowVersion, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT v.id, v.workflow_id, v.version, v.definition, v.is_published, v.created_by, v.created_at
+		`SELECT v.id, v.workflow_id, v.version, v.definition, v.is_published,
+		        COALESCE(v.created_by, 0), v.created_by_name, v.created_at
 		 FROM workflow_versions v
 		 JOIN workflows w ON w.id = v.workflow_id
 		 WHERE w.workspace_id = ? AND v.workflow_id = ?
@@ -1052,7 +1257,7 @@ func (s *workflowStore) ListVersions(ctx context.Context, workspaceID, workflowI
 		v := &model.WorkflowVersion{}
 		var definition []byte
 		if err := rows.Scan(&v.ID, &v.WorkflowID, &v.Version, &definition,
-			&v.IsPublished, &v.CreatedBy, &v.CreatedAt); err != nil {
+			&v.IsPublished, &v.CreatedBy, &v.CreatedByName, &v.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan workflow version: %w", err)
 		}
 		v.Definition = json.RawMessage(definition)
@@ -1065,7 +1270,7 @@ func (s *workflowStore) ListVersions(ctx context.Context, workspaceID, workflowI
 // so there is never an instant with two published versions of one workflow, nor
 // an instant with none: a turn that lands mid-publish sees one or the other,
 // and both are complete configurations.
-func (s *workflowStore) Publish(ctx context.Context, workspaceID, workflowID, versionID int64) error {
+func (s *workflowStore) Publish(ctx context.Context, workspaceID, workflowID, versionID int64, by model.Actor) error {
 	return s.db.Tx(ctx, func(ctx context.Context, tx *sqldb.Tx) error {
 		if err := requireExists(ctx, tx, "publish workflow",
 			`SELECT 1 FROM workflow_versions v
@@ -1085,8 +1290,10 @@ func (s *workflowStore) Publish(ctx context.Context, workspaceID, workflowID, ve
 		// A workflow with a published version is published: the two states
 		// cannot drift apart, because nothing else is allowed to set them.
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE workflows SET status = ?, updated_at = ? WHERE id = ? AND workspace_id = ?`,
-			model.WorkflowPublished, time.Now().UTC(), workflowID, workspaceID); err != nil {
+			`UPDATE workflows SET status = ?, updated_by = ?, updated_by_name = ?, updated_at = ?
+			 WHERE id = ? AND workspace_id = ?`,
+			model.WorkflowPublished, nullID(by.UserID), by.Name, time.Now().UTC(),
+			workflowID, workspaceID); err != nil {
 			return fmt.Errorf("publish workflow: %w", err)
 		}
 		return nil

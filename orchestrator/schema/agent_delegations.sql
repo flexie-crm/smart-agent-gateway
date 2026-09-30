@@ -5,6 +5,7 @@ CREATE TABLE `agent_delegations` (
   `parent_tool_call_id` varchar(64) NOT NULL,
   `agent_key` varchar(64) NOT NULL,
   `mode` varchar(16) NOT NULL,
+  `device_id` varchar(64) NOT NULL DEFAULT '',
   `fleet_id` bigint(20) unsigned DEFAULT NULL,
   `task` text DEFAULT NULL,
   `status` enum('running','done','failed','cancelled') NOT NULL DEFAULT 'running',

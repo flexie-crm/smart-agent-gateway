@@ -39,7 +39,7 @@ func (e *testEnv) agent(key, name, instructions string) {
 		Name:         name,
 		Instructions: instructions,
 		Status:       model.StatusActive,
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		e.t.Fatalf("create agent: %v", err)
 	}
 }
@@ -55,7 +55,7 @@ func (e *testEnv) agentWithTools(key, name string, tools ...string) {
 		Instructions: "Do the work.",
 		Status:       model.StatusActive,
 		Tools:        tools,
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		e.t.Fatalf("create agent: %v", err)
 	}
 }
@@ -69,14 +69,14 @@ func (e *testEnv) spareModel() int64 {
 		WorkspaceID: e.ws.ID, VendorKey: model.VendorOpenAICompatible,
 		Name: "Spare", BaseURL: "http://spare.invalid",
 	}
-	if err := e.app.Store.Vendors().Create(ctx, v); err != nil {
+	if err := e.app.Store.Vendors().Create(ctx, v, model.Nobody()); err != nil {
 		e.t.Fatalf("create spare vendor: %v", err)
 	}
 	m := &model.AIModel{
 		WorkspaceID: e.ws.ID, VendorID: v.ID, ModelKey: "spare-1",
 		Type: model.ModelTypeChat, ContextWindow: 1000,
 	}
-	if err := e.app.Store.AIModels().Create(ctx, m); err != nil {
+	if err := e.app.Store.AIModels().Create(ctx, m, model.Nobody()); err != nil {
 		e.t.Fatalf("create spare model: %v", err)
 	}
 	return m.ID
@@ -218,7 +218,7 @@ func TestADelegationPersistsTheAgentsSteps(t *testing.T) {
 		WorkspaceID: env.ws.ID, Key: "clock", Name: "Clock",
 		Instructions: "Tell the time.", Status: model.StatusActive,
 		Tools: []string{"current_time"},
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
 
@@ -686,7 +686,7 @@ func TestACallAfterATerminalDelegationIsNotLeftRunning(t *testing.T) {
 		WorkspaceID: env.ws.ID, Key: "clock", Name: "Clock",
 		Instructions: "Tell the time.", Status: model.StatusActive,
 		Tools: []string{"current_time"},
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
 

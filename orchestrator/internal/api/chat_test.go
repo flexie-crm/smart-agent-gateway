@@ -211,14 +211,14 @@ func (e *testEnv) registerModel(f *fakeVendor) int64 {
 		Name:        "Fake",
 		BaseURL:     f.server.URL,
 	}
-	if err := e.app.Store.Vendors().Create(ctx, vendor); err != nil {
+	if err := e.app.Store.Vendors().Create(ctx, vendor, model.Nobody()); err != nil {
 		e.t.Fatalf("create vendor: %v", err)
 	}
 	m := &model.AIModel{
 		WorkspaceID: e.ws.ID, VendorID: vendor.ID, ModelKey: "fake-1",
 		Type: model.ModelTypeChat, ContextWindow: 100_000,
 	}
-	if err := e.app.Store.AIModels().Create(ctx, m); err != nil {
+	if err := e.app.Store.AIModels().Create(ctx, m, model.Nobody()); err != nil {
 		e.t.Fatalf("create model: %v", err)
 	}
 	return m.ID
@@ -511,7 +511,7 @@ func TestAToollessMainAgentGetsNoTools(t *testing.T) {
 	modelID := env.registerModel(vendor)
 	if err := env.app.Store.Agents().Create(context.Background(), &model.Agent{
 		WorkspaceID: env.ws.ID, Key: model.DefaultAgentKey, Name: "Talker", Tools: []string{},
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
 
@@ -904,7 +904,7 @@ func TestLosingTheChatsPermissionBitesAtOnce(t *testing.T) {
 	}
 	for _, role := range roles {
 		role.Permissions = []string{}
-		if err := env.app.Store.Roles().Update(ctx, role); err != nil {
+		if err := env.app.Store.Roles().Update(ctx, role, model.Nobody()); err != nil {
 			t.Fatalf("update role: %v", err)
 		}
 	}

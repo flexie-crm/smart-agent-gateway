@@ -126,7 +126,10 @@ func (a *App) MCPLoadout(ctx context.Context, caller *MCPCaller) (tool.Loadout, 
 	// the brain tools reach nothing here (their empty allow-list default).
 	// An external agent over MCP is one agent per request: MCP calls are
 	// self-contained, so there is nothing for it to come back to.
-	loadout, err := a.Loadout(ctx, caller.WorkspaceID, caller.UserID, "", names, nil, nil, tool.OwnerOfAgent())
+	// No author either, and it costs nothing: with no brains there is no brain
+	// tool that can write, so there is nothing here to attribute.
+	loadout, err := a.Loadout(ctx, caller.WorkspaceID, caller.UserID, "", names, nil, nil,
+		tool.OwnerOfAgent(), model.Nobody())
 	if err != nil {
 		return tool.Loadout{}, err
 	}

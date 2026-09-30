@@ -32,7 +32,79 @@ const (
 	// string like every other declared field ("true" / ""), because the form is
 	// one shape for every type and a second one would be a second renderer.
 	FieldCheckbox FieldType = "checkbox"
+	// FieldPairs is any number of name/value rows, with a button to add one and
+	// a way to take one away. For a setting that is a LIST of pairs rather than
+	// one value: the extra headers an API wants beside its key, where a fixed
+	// "second name / second value" could only ever carry one of them.
+	//
+	// Its value travels as a string like every other declared field, one
+	// "name: value" per line, and that is not a compromise for the renderer: a
+	// secret is sealed at rest by path and the sealer only ever seals a STRING
+	// leaf (app.sealConfigSecrets uses leafString), so a list stored there
+	// would be skipped and every value in it written in plaintext. The rows are
+	// the interface; the string is the setting.
+	FieldPairs FieldType = "pairs"
+	// FieldCallback is one value the DEPLOYMENT knows and the reader has to
+	// paste somewhere else: an OAuth callback address. Read-only, and collected
+	// into nothing, because it is not a setting: it is a fact about this
+	// installation shown where it is needed.
+	//
+	// A field rather than a paragraph because it has to be copied exactly. A
+	// field rather than something the console adds by itself because only the
+	// TEMPLATE knows which of its sections is the one where somebody is
+	// registering an application. Its value is filled in by the layer that
+	// knows this deployment's address, since a template cannot.
+	FieldCallback FieldType = "callback"
 )
+
+// Pair is one name and value from a FieldPairs setting.
+type Pair struct {
+	Name  string
+	Value string
+}
+
+// ReadPairs reads a FieldPairs value: the "name: value" lines the form sent.
+//
+// Here rather than in whichever template happened to need it first, because the
+// FORMAT belongs to the field type. A second template declaring FieldPairs and
+// writing its own reader would be free to split on every colon instead of the
+// first, and two readings of one declared type is the drift this package exists
+// to prevent.
+//
+// The separator is the FIRST colon, so a value may contain one: a URL with a
+// port or a timestamp in a header is ordinary, and splitting on every colon
+// would quietly truncate it.
+//
+// It refuses rather than guessing, because these reach a form: a line with no
+// colon, a name with nothing after it, a value with no name, and the same name
+// twice, which would silently send one of them.
+func ReadPairs(text string) ([]Pair, error) {
+	var pairs []Pair
+	seen := map[string]bool{}
+	for i, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		name, value, found := strings.Cut(line, ":")
+		if !found {
+			return nil, fmt.Errorf("line %d has no colon in it. Write each one as \"name: value\", one per line", i+1)
+		}
+		name, value = strings.TrimSpace(name), strings.TrimSpace(value)
+		if name == "" {
+			return nil, fmt.Errorf("line %d has no name before the colon", i+1)
+		}
+		if value == "" {
+			return nil, fmt.Errorf("%q has no value. Give it one, or take the line out", name)
+		}
+		if seen[strings.ToLower(name)] {
+			return nil, fmt.Errorf("%q is listed twice, so only one of them would be sent", name)
+		}
+		seen[strings.ToLower(name)] = true
+		pairs = append(pairs, Pair{Name: name, Value: value})
+	}
+	return pairs, nil
+}
 
 // Option is one choice in a select: the value that is stored, and the words a
 // person reads.

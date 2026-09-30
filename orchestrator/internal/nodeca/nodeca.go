@@ -330,23 +330,34 @@ func ClientTLSPinned(ours tls.Certificate, pinnedPEM string) (*tls.Config, error
 	if err != nil {
 		return nil, fmt.Errorf("nodeca: that certificate cannot be read: %w", err)
 	}
+	// On the CONNECTION, for the same reason requireCommonName is: the
+	// per-certificate hook is not called at all when a session is resumed, so a
+	// pin installed only there is checked on the first connection to a machine
+	// and silently absent on every one after it. Nothing in this tree gives a
+	// client a session cache today, so nothing resumes and the pin has always
+	// held; that is one line away from being untrue, and the cost of not
+	// depending on it is this function.
+	//
+	// The state carries the peer's certificates whether the handshake was full
+	// or resumed, so there is one check and it runs every time.
+	check := func(state tls.ConnectionState) error {
+		// The leaf and nothing else. A chain sent by the machine is not
+		// evidence about anything here: what we are asserting is that the
+		// certificate is the one somebody copied off that machine.
+		if len(state.PeerCertificates) == 0 {
+			return fmt.Errorf("that machine presented no certificate")
+		}
+		if !bytes.Equal(state.PeerCertificates[0].Raw, pinned.Raw) {
+			return fmt.Errorf("that machine presented a different certificate " +
+				"from the one it was added with")
+		}
+		return nil
+	}
 	return &tls.Config{
 		Certificates:       []tls.Certificate{ours},
 		InsecureSkipVerify: true, //nolint:gosec // replaced by the exact-match check below
 		MinVersion:         tls.VersionTLS13,
-		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
-			// The leaf and nothing else. A chain sent by the machine is not
-			// evidence about anything here: what we are asserting is that the
-			// certificate is the one somebody copied off that machine.
-			if len(raw) == 0 {
-				return fmt.Errorf("that machine presented no certificate")
-			}
-			if !bytes.Equal(raw[0], pinned.Raw) {
-				return fmt.Errorf("that machine presented a different certificate " +
-					"from the one it was added with")
-			}
-			return nil
-		},
+		VerifyConnection:   check,
 	}, nil
 }
 

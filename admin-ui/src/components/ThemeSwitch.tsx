@@ -1,5 +1,5 @@
 import { LogOut, Monitor, Moon, Sun } from 'lucide-react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 
 import { cn } from '@/lib/utils'
 import {
@@ -31,11 +31,14 @@ export function ThemeSwitch({
   onSignOut?: () => void
 } = {}) {
   const [choice, setChoice] = useState<ThemeChoice>(() => rememberedChoice())
-  // Read when the machine changes its mind rather than when this was mounted.
-  const now = useRef(choice)
-  now.current = choice
 
-  useEffect(() => followTheMachine(() => now.current), [])
+  // Subscribed again whenever the choice changes, so the listener reads the
+  // CURRENT one rather than the one this was mounted with. It used to hold the
+  // choice in a ref written during render, which is a side effect in the middle
+  // of rendering and does not survive being rendered twice. Re-subscribing
+  // costs nothing: followTheMachine only adds a listener, and paints nothing
+  // until the machine actually changes its mind.
+  useEffect(() => followTheMachine(() => choice), [choice])
 
   const pick = useCallback((next: ThemeChoice) => {
     setChoice(next)

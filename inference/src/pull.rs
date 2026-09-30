@@ -33,6 +33,66 @@ use crate::{
     machine::Machine,
 };
 
+/// Move the finished download to where the catalogue will name it.
+///
+/// This one rename is what makes a pull atomic: before it nothing points at the
+/// staging directory, after it the weights are whole, and there is no state in
+/// between. It is also the last step of something that took an hour, which is
+/// what makes failing here expensive.
+///
+/// # Why it is retried on Windows and nowhere else
+///
+/// Windows consults every OPEN HANDLE inside a directory before moving it, and
+/// refuses with `Access is denied. (os error 5)` while one is held. That happens
+/// under EVERY sharing mode, `FILE_SHARE_DELETE` included, so a reader that
+/// opened the file politely does not help: the real-time virus scan or the
+/// Search indexer reading a just-written multi-gigabyte file is enough to turn
+/// an hour of transfer into a failure on its final step. The handle they hold
+/// goes away by itself a moment later, which is exactly the shape waiting fixes.
+///
+/// `rename(2)` does not consult open child handles, so no other platform can
+/// fail this way and no other platform waits. The call below is the same call it
+/// has always made, and a refusal there is a real one, reported at once rather
+/// than after half a minute of hoping.
+#[cfg(windows)]
+async fn put_in_place(staging: &std::path::Path, weights: &std::path::Path) -> std::io::Result<()> {
+    // Growing, and bounded at about twenty seconds in total. If it was not free
+    // at 100ms it is unlikely to be free at 200, and after an hour of
+    // downloading, twenty seconds is nothing; but a refusal that is never going
+    // to clear still has to be reported while somebody is watching.
+    const WAITS_MS: [u64; 9] = [100, 200, 400, 800, 1_600, 3_200, 5_000, 5_000, 5_000];
+
+    let mut attempt = 0;
+    loop {
+        match tokio::fs::rename(staging, weights).await {
+            Ok(()) => return Ok(()),
+            Err(err) if attempt < WAITS_MS.len() && someone_still_has_it(&err) => {
+                tokio::time::sleep(std::time::Duration::from_millis(WAITS_MS[attempt])).await;
+                attempt += 1;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// The two refusals a held handle produces, and only those.
+///
+/// Anything else is a fact that waiting cannot change: the target exists, the
+/// path is gone, the disk is full. Retrying those would turn an error somebody
+/// can act on into twenty seconds of silence followed by the same error.
+#[cfg(windows)]
+fn someone_still_has_it(err: &std::io::Error) -> bool {
+    const ACCESS_DENIED: i32 = 5;
+    const SHARING_VIOLATION: i32 = 32;
+    matches!(err.raw_os_error(), Some(ACCESS_DENIED) | Some(SHARING_VIOLATION))
+}
+
+/// The same move on a platform that never refuses it for a reason that passes.
+#[cfg(not(windows))]
+async fn put_in_place(staging: &std::path::Path, weights: &std::path::Path) -> std::io::Result<()> {
+    tokio::fs::rename(staging, weights).await
+}
+
 /// How long a finished pull stays readable before it is forgotten.
 ///
 /// The poller needs to see the terminal state at least once, and the row it
@@ -414,7 +474,7 @@ impl Pulls {
         let dir = ctx.catalog.dir(&uid);
         tokio::fs::create_dir_all(&dir).await?;
         let weights = ModelEntry::weights_path(&dir);
-        tokio::fs::rename(&staging, &weights).await?;
+        put_in_place(&staging, &weights).await?;
 
         let entry = ModelEntry {
             uid,
@@ -706,6 +766,73 @@ async fn read_facts(weights: &std::path::Path) -> Facts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A handle held inside the directory delays the move rather than losing it.
+    ///
+    /// Windows only, because it is the only platform that can fail this way, and
+    /// this is the one test in the file that is about the operating system
+    /// rather than about us.
+    ///
+    /// It asserts BOTH halves, and the first is what makes the second mean
+    /// anything: a bare rename really does fail while the handle is open, so a
+    /// passing second half is the retry working rather than the operating system
+    /// never having minded. Without that control the test would pass just as
+    /// happily against the bare call it replaced.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_handle_someone_else_holds_delays_the_move_rather_than_failing_it() {
+        let root = std::env::temp_dir().join(format!("sag-rename-{}", std::process::id()));
+        let staging = root.join("incoming");
+        let weights = root.join("weights");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("model.safetensors"), b"weights").unwrap();
+
+        // Somebody reading a file we have just written: a scanner, an indexer.
+        let held = std::fs::File::open(staging.join("model.safetensors")).unwrap();
+
+        // The control. This is the call the code made before, and it fails.
+        let bare = tokio::fs::rename(&staging, &weights).await;
+        let err = bare.expect_err("Windows accepted a move out from under an open handle");
+        assert!(
+            someone_still_has_it(&err),
+            "the refusal was {err:?}, which is not the one a held handle gives, \
+             so this test is no longer exercising what it claims to"
+        );
+
+        // And the same move, waited out. The handle goes while it is trying.
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(held);
+        });
+        put_in_place(&staging, &weights)
+            .await
+            .expect("the move was not retried until the handle went away");
+        assert!(weights.join("model.safetensors").is_file(), "the weights did not arrive");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// And a refusal that waiting cannot fix is reported at once.
+    ///
+    /// The cost of getting this wrong is not an error: it is twenty seconds of
+    /// silence and then the same error, on a path somebody is watching.
+    #[cfg(windows)]
+    #[test]
+    fn a_refusal_that_will_not_clear_is_not_waited_on() {
+        use std::io::{Error, ErrorKind};
+        for (kind, raw) in [
+            (ErrorKind::AlreadyExists, 183), // ERROR_ALREADY_EXISTS
+            (ErrorKind::NotFound, 2),        // ERROR_FILE_NOT_FOUND
+            (ErrorKind::Other, 112),         // ERROR_DISK_FULL
+        ] {
+            assert!(
+                !someone_still_has_it(&Error::from_raw_os_error(raw)),
+                "{kind:?} ({raw}) would be retried, and waiting cannot change it"
+            );
+        }
+        assert!(someone_still_has_it(&Error::from_raw_os_error(5)));
+        assert!(someone_still_has_it(&Error::from_raw_os_error(32)));
+    }
 
     fn repo(gated: bool) -> crate::hub::HubRepo {
         crate::hub::HubRepo {

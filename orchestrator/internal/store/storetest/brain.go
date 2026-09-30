@@ -22,7 +22,7 @@ import (
 func brainWith(t *testing.T, st store.Store, wsID int64, name string) *model.Brain {
 	t.Helper()
 	b := &model.Brain{WorkspaceID: wsID, Name: name}
-	if err := st.Brains().CreateBrain(ctx(), b); err != nil {
+	if err := st.Brains().CreateBrain(ctx(), b, model.Nobody()); err != nil {
 		t.Fatalf("create brain: %v", err)
 	}
 	return b
@@ -31,7 +31,7 @@ func brainWith(t *testing.T, st store.Store, wsID int64, name string) *model.Bra
 func categoryWith(t *testing.T, st store.Store, wsID int64, brain *model.Brain, name string) *model.BrainCategory {
 	t.Helper()
 	c := &model.BrainCategory{BrainID: brain.ID, Name: name}
-	if err := st.Brains().CreateCategory(ctx(), wsID, c); err != nil {
+	if err := st.Brains().CreateCategory(ctx(), wsID, c, model.Nobody()); err != nil {
 		t.Fatalf("create category: %v", err)
 	}
 	return c
@@ -40,10 +40,111 @@ func categoryWith(t *testing.T, st store.Store, wsID int64, brain *model.Brain, 
 func documentWith(t *testing.T, st store.Store, wsID int64, category *model.BrainCategory, title, content string, related ...int64) *model.BrainDocument {
 	t.Helper()
 	d := &model.BrainDocument{CategoryID: category.ID, Title: title, Content: content}
-	if err := st.Brains().SaveDocument(ctx(), wsID, d, related); err != nil {
+	if err := st.Brains().SaveDocument(ctx(), wsID, d, related, model.Nobody()); err != nil {
 		t.Fatalf("save document: %v", err)
 	}
 	return d
+}
+
+// Who wrote this, and who changed it.
+//
+// A brain, a category and a document can each be written by a person OR by an
+// agent (`brain_write` is a real tool, KB/32), so both pairs are needed here
+// where a skill needs only the first: a document IS edited, and an agent
+// correcting what a person wrote has to be visible as exactly that.
+func testBrainRecordsWhoWroteAndWhoChanged(t *testing.T, st store.Store) {
+	ws := mustWorkspace(t, st, "acme")
+	person := model.Actor{UserID: mustUser(t, st, ws.ID, "curator@acme.test").ID, Name: "A Curator"}
+
+	brain := &model.Brain{WorkspaceID: ws.ID, Name: "Product manual"}
+	if err := st.Brains().CreateBrain(ctx(), brain, person); err != nil {
+		t.Fatalf("create brain: %v", err)
+	}
+	category := &model.BrainCategory{BrainID: brain.ID, Name: "Billing"}
+	if err := st.Brains().CreateCategory(ctx(), ws.ID, category, person); err != nil {
+		t.Fatalf("create category: %v", err)
+	}
+	document := &model.BrainDocument{CategoryID: category.ID, Title: "Refunds", Content: "Thirty days."}
+	if err := st.Brains().SaveDocument(ctx(), ws.ID, document, nil, person); err != nil {
+		t.Fatalf("save document: %v", err)
+	}
+
+	// On creation both pairs are the same person, which is the honest answer:
+	// the last thing that happened to it IS the creation.
+	stored, err := st.Brains().Brain(ctx(), ws.ID, brain.ID)
+	if err != nil {
+		t.Fatalf("read brain: %v", err)
+	}
+	if stored.CreatedByName != "A Curator" || stored.UpdatedByName != "A Curator" {
+		t.Errorf("the brain says %q / %q", stored.CreatedByName, stored.UpdatedByName)
+	}
+	if stored.CreatedBy != person.UserID {
+		t.Errorf("the brain is not linked to who made it: %d", stored.CreatedBy)
+	}
+
+	categories, err := st.Brains().Categories(ctx(), ws.ID, brain.ID)
+	if err != nil {
+		t.Fatalf("list categories: %v", err)
+	}
+	if categories[0].CreatedByName != "A Curator" {
+		t.Errorf("the category says %q", categories[0].CreatedByName)
+	}
+	written, err := st.Brains().Document(ctx(), ws.ID, document.ID)
+	if err != nil {
+		t.Fatalf("read document: %v", err)
+	}
+	if written.CreatedByName != "A Curator" || written.UpdatedByName != "A Curator" {
+		t.Errorf("the document says %q / %q", written.CreatedByName, written.UpdatedByName)
+	}
+
+	// An AGENT corrects it. It has no user row, so the id is nothing and the
+	// name is what should be printed.
+	agent := model.Actor{Name: "Research agent"}
+	written.Content = "Thirty days, and fourteen on a sale item."
+	if err := st.Brains().SaveDocument(ctx(), ws.ID, written, nil, agent); err != nil {
+		t.Fatalf("agent save: %v", err)
+	}
+	corrected, err := st.Brains().Document(ctx(), ws.ID, document.ID)
+	if err != nil {
+		t.Fatalf("read document: %v", err)
+	}
+	// Who WROTE it does not change. An edit records who made the edit, and
+	// rewriting the author would lose the one fact an edit cannot change.
+	if corrected.CreatedBy != person.UserID || corrected.CreatedByName != "A Curator" {
+		t.Errorf("the author changed to %d/%q", corrected.CreatedBy, corrected.CreatedByName)
+	}
+	if corrected.UpdatedBy != 0 || corrected.UpdatedByName != "Research agent" {
+		t.Errorf("last changed by %d/%q, want 0/%q", corrected.UpdatedBy, corrected.UpdatedByName, "Research agent")
+	}
+
+	// A rename of the brain, by the agent too.
+	stored.Name = "Product manual (revised)"
+	if err := st.Brains().UpdateBrain(ctx(), stored, agent); err != nil {
+		t.Fatalf("update brain: %v", err)
+	}
+	renamed, err := st.Brains().Brain(ctx(), ws.ID, brain.ID)
+	if err != nil {
+		t.Fatalf("read brain: %v", err)
+	}
+	if renamed.CreatedByName != "A Curator" || renamed.UpdatedByName != "Research agent" {
+		t.Errorf("the brain says %q / %q", renamed.CreatedByName, renamed.UpdatedByName)
+	}
+
+	// The person leaves. Their ids go, their name stays everywhere it was
+	// recorded: that is the whole reason each pair is two columns.
+	if err := st.Users().Delete(ctx(), person.UserID); err != nil {
+		t.Fatalf("delete the person: %v", err)
+	}
+	after, err := st.Brains().Document(ctx(), ws.ID, document.ID)
+	if err != nil {
+		t.Fatalf("read document: %v", err)
+	}
+	if after.CreatedBy != 0 {
+		t.Errorf("the deleted person is still linked: %d", after.CreatedBy)
+	}
+	if after.CreatedByName != "A Curator" {
+		t.Errorf("who wrote it went with them: %q", after.CreatedByName)
+	}
 }
 
 func testBrainTree(t *testing.T, st store.Store) {
@@ -137,7 +238,7 @@ func testBrainDocumentByTitle(t *testing.T, st store.Store) {
 	// Why the primitive exists: a naive create of the same title collides on the
 	// unique key rather than silently updating.
 	dup := &model.BrainDocument{CategoryID: billing.ID, Title: "Refunds", Content: "again"}
-	if err := st.Brains().SaveDocument(ctx(), ws.ID, dup, nil); err == nil {
+	if err := st.Brains().SaveDocument(ctx(), ws.ID, dup, nil, model.Nobody()); err == nil {
 		t.Fatal("a duplicate title was created rather than refused")
 	}
 
@@ -149,7 +250,7 @@ func testBrainDocumentByTitle(t *testing.T, st store.Store) {
 	}
 	if err := st.Brains().SaveDocument(ctx(), ws.ID,
 		&model.BrainDocument{ID: existing.ID, CategoryID: billing.ID, Title: "Refunds", Content: "within 14 days"},
-		nil); err != nil {
+		nil, model.Nobody()); err != nil {
 		t.Fatalf("idempotent save: %v", err)
 	}
 	docs, err := st.Brains().Documents(ctx(), ws.ID, billing.ID)
@@ -179,7 +280,7 @@ func testBrainGraphIsSymmetric(t *testing.T, st store.Store) {
 	invoices := documentWith(t, st, ws.ID, category, "Invoices", "sent monthly")
 
 	// Say it once, in one direction.
-	if err := st.Brains().SaveDocument(ctx(), ws.ID, refunds, []int64{invoices.ID}); err != nil {
+	if err := st.Brains().SaveDocument(ctx(), ws.ID, refunds, []int64{invoices.ID}, model.Nobody()); err != nil {
 		t.Fatalf("link: %v", err)
 	}
 
@@ -202,7 +303,7 @@ func testBrainGraphIsSymmetric(t *testing.T, st store.Store) {
 
 	// Removing it removes both directions.
 	forward.Related = nil
-	if err := st.Brains().SaveDocument(ctx(), ws.ID, forward, nil); err != nil {
+	if err := st.Brains().SaveDocument(ctx(), ws.ID, forward, nil, model.Nobody()); err != nil {
 		t.Fatalf("unlink: %v", err)
 	}
 	back, err = st.Brains().Document(ctx(), ws.ID, invoices.ID)
@@ -229,7 +330,7 @@ func testBrainGraphCannotLeaveItsBrain(t *testing.T, st store.Store) {
 	secret := documentWith(t, st, ws.ID, there, "Secret", "nobody may read this")
 
 	// Ask for the link anyway.
-	if err := st.Brains().SaveDocument(ctx(), ws.ID, open, []int64{secret.ID}); err != nil {
+	if err := st.Brains().SaveDocument(ctx(), ws.ID, open, []int64{secret.ID}, model.Nobody()); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 
@@ -271,6 +372,12 @@ func testBrainSearch(t *testing.T, st store.Store) {
 	if hits[0].Brain != "Manual" || hits[0].Category != "Billing" {
 		t.Fatalf("the hit does not say where it lives: %+v", hits[0])
 	}
+	// In words for a person to read, and as ids for a screen to select with: a
+	// hit that cannot be opened is a search result nobody can follow.
+	if hits[0].BrainID != brain.ID || hits[0].CategoryID != category.ID {
+		t.Fatalf("the hit cannot be opened: brain %d, category %d, want %d and %d",
+			hits[0].BrainID, hits[0].CategoryID, brain.ID, category.ID)
+	}
 
 	// THE SECURITY SPINE: search is confined to the brains it was given. An agent
 	// with no brains assigned reaches nothing at all.
@@ -307,7 +414,7 @@ func testAgentBrains(t *testing.T, st store.Store) {
 		WorkspaceID: ws.ID, Key: model.DefaultAgentKey, Name: "House",
 		Brains: []int64{ours.ID, theirs.ID},
 	}
-	if err := st.Agents().Create(ctx(), agent); err != nil {
+	if err := st.Agents().Create(ctx(), agent, model.Nobody()); err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
 
@@ -330,7 +437,7 @@ func testAgentBrains(t *testing.T, st store.Store) {
 
 	// Replaced wholesale, so revoking is possible: an empty (not nil) list clears.
 	loaded.Brains = []int64{}
-	if err := st.Agents().Update(ctx(), loaded); err != nil {
+	if err := st.Agents().Update(ctx(), loaded, model.Nobody()); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
 	assigned, err = st.Brains().AgentBrains(ctx(), ws.ID, agent.ID)
@@ -358,13 +465,13 @@ func testADocumentCannotMoveBetweenBrains(t *testing.T, st store.Store) {
 
 	refunds := documentWith(t, st, ws.ID, billing, "Refunds", "within 30 days")
 	invoices := documentWith(t, st, ws.ID, billing, "Invoices", "sent monthly")
-	if err := st.Brains().SaveDocument(ctx(), ws.ID, refunds, []int64{invoices.ID}); err != nil {
+	if err := st.Brains().SaveDocument(ctx(), ws.ID, refunds, []int64{invoices.ID}, model.Nobody()); err != nil {
 		t.Fatalf("link: %v", err)
 	}
 
 	// Within the brain, a move is fine, and the graph survives it.
 	refunds.CategoryID = shipping.ID
-	if err := st.Brains().SaveDocument(ctx(), ws.ID, refunds, []int64{invoices.ID}); err != nil {
+	if err := st.Brains().SaveDocument(ctx(), ws.ID, refunds, []int64{invoices.ID}, model.Nobody()); err != nil {
 		t.Fatalf("a document could not move between categories of its own brain: %v", err)
 	}
 	moved, err := st.Brains().Document(ctx(), ws.ID, refunds.ID)
@@ -380,7 +487,7 @@ func testADocumentCannotMoveBetweenBrains(t *testing.T, st store.Store) {
 
 	// Out of the brain, it is refused.
 	moved.CategoryID = elsewhere.ID
-	err = st.Brains().SaveDocument(ctx(), ws.ID, moved, nil)
+	err = st.Brains().SaveDocument(ctx(), ws.ID, moved, nil, model.Nobody())
 	if err == nil {
 		t.Fatal("a document was carried into another brain")
 	}

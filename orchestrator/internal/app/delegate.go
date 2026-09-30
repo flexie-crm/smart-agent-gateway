@@ -14,6 +14,7 @@ import (
 	"flexie.io/sag/internal/store"
 	"flexie.io/sag/internal/tool"
 	"flexie.io/sag/internal/tools"
+	"flexie.io/sag/internal/tools/agentguide"
 	"flexie.io/sag/internal/tools/toolkit"
 )
 
@@ -21,36 +22,49 @@ import (
 // they are described to the Gateway, and what one runs as when the Gateway routes
 // to it. The runtime (internal/agent) only executes what this hands it.
 
-// agentInfo is one agent as the Gateway needs to see it to ROUTE to it:
-// the key it routes by, the name, the FULL instructions the administrator wrote
-// (so the Gateway knows what it is for, not just the first line), and its tools
-// as names + a short line (so the Gateway knows what it can reach). The tool's
-// deep guide is NOT here: that belongs to the agent, read when it runs. The
-// agent's hardcoded prompt frame is likewise not here; only what the
-// administrator entered.
+// agentInfo is one agent as the Gateway needs to see it: the key it routes by,
+// the name, the FULL instructions the administrator wrote (so the Gateway knows
+// what it is for, not just the first line), the tools it can actually reach and
+// the knowledge it holds.
+//
+// Only the first three reach the PROMPT. The rest is what agent_guide answers
+// when the Gateway asks about one agent, and the reason for the split is
+// arithmetic: an agent's abilities written into the prompt as prose are paid for
+// on every turn of every conversation and multiply by the number of agents,
+// while the decision they inform is taken in a handful of turns. The agent's
+// hardcoded prompt frame is not here either; only what the administrator
+// entered.
 type agentInfo struct {
 	Key          string
 	Name         string
 	Instructions string
-	Tools        []toolBrief
+	// Abilities is everything this agent may actually reach, resolved for the
+	// person asking: offered tools and the ones held on demand alike, with the
+	// infrastructure that rides along with every tool set left out (it is not a
+	// capability an administrator gave it).
+	Abilities []tool.Schema
+	// Brains is the knowledge it can consult and the brain it manages as
+	// memory, resolved the same way its own prompt resolves them.
+	Brains brainRoster
 	// DelegationMode pins how the Gateway runs this agent (KB/27): background,
 	// inline, or auto (the Gateway decides). It shapes both the roster text and the
 	// delegate tool's mode parameter.
 	DelegationMode string
 }
 
-// toolBrief is an agent's tool as the Gateway sees it in the roster: its name
-// and the one-line, model-facing description, never the deep how-to guide.
-type toolBrief struct {
-	Name        string
-	Description string
-}
-
 // agents lists the agents a Gateway may route to: every active agent
 // that is not the Gateway itself, with the instructions it was given and the
 // tools it holds, so the Gateway can route on real information. A workflow can
 // narrow this later; today the roster is simply the workspace's own agents.
-func (a *App) agentRoster(ctx context.Context, workspaceID, userID int64) ([]agentInfo, error) {
+// deviceID is the computer this turn came from, and it is not optional here.
+// An agent's tools are resolved exactly as the agent will get them, and a tool
+// that runs on somebody's own machine is only in a loadout when there is a
+// machine to run it on (machine.Offers). Resolved with no device, an agent
+// whose only tool is the terminal came back holding NOTHING, and agent_guide
+// then told the Gateway in as many words that it "holds no tools" while the
+// agent went on to run the command successfully. Measured against a real
+// installation, not reasoned about.
+func (a *App) agentRoster(ctx context.Context, workspaceID, userID int64, deviceID string) ([]agentInfo, error) {
 	agents, err := a.Store.Agents().List(ctx, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("list agents: %w", err)
@@ -63,28 +77,41 @@ func (a *App) agentRoster(ctx context.Context, workspaceID, userID int64) ([]age
 		// The agent's own tools, resolved as it would get them, so the Gateway
 		// sees exactly what it can reach: names and the short description, not the
 		// deep guide. This loadout is read, never called, so it belongs to no agent.
-		loadout, err := a.Loadout(ctx, workspaceID, userID, "", ag.Tools, ag.ConfirmTools, ag.Brains, tool.OwnerNone)
+		loadout, err := a.Loadout(ctx, workspaceID, userID, deviceID, ag.Tools, ag.ConfirmTools, ag.Brains, tool.OwnerNone,
+			// Read, never called: this loadout is the roster the Gateway shows.
+			model.Nobody())
 		if err != nil {
 			return nil, fmt.Errorf("resolve agent %q tools: %w", ag.Key, err)
 		}
-		briefs := make([]toolBrief, 0, len(loadout.Schemas))
-		for _, s := range loadout.Schemas {
-			// The FRIENDLY name, never the callable key: the key (e.g.
-			// "http_request") reads to the Gateway as a tool IT can call, and it
-			// hallucinates the call, which fails because the tool is the
-			// agent's, not the Gateway's. A friendly name is a capability, not
-			// an invocation.
-			name := s.FriendlyName
-			if name == "" {
-				name = s.Name
+		// Both lists. A tool projected from a connected service never lands in
+		// Schemas (it is held on demand, so dozens of them are not described on
+		// every turn), and reading only the first list is why an agent whose
+		// whole purpose was one connection read as an agent with no tools at
+		// all.
+		abilities := make([]tool.Schema, 0, len(loadout.Schemas)+len(loadout.OnDemand))
+		for _, schema := range append(append([]tool.Schema{}, loadout.Schemas...), loadout.OnDemand...) {
+			// Infrastructure rides along with every tool set (tool_guide, the
+			// connected-services lookup, the agent's own memory). It is not
+			// something an administrator gave this agent, so it is not part of
+			// the answer to what this agent can do, exactly as it is not
+			// counted in the prompt's own tally of abilities.
+			if schema.Kind == tool.KindInternal {
+				continue
 			}
-			briefs = append(briefs, toolBrief{Name: name, Description: s.Description})
+			abilities = append(abilities, schema)
 		}
+
+		brains, err := a.brainRosterFor(ctx, workspaceID, ag.Brains, ag.MemoryBrainID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve agent %q knowledge: %w", ag.Key, err)
+		}
+
 		infos = append(infos, agentInfo{
 			Key:            ag.Key,
 			Name:           ag.Name,
 			Instructions:   strings.TrimSpace(ag.Instructions),
-			Tools:          briefs,
+			Abilities:      abilities,
+			Brains:         brains,
 			DelegationMode: ag.DelegationMode,
 		})
 	}
@@ -118,16 +145,27 @@ func (a *App) ResolveAgent(ctx context.Context, workspaceID, userID int64, c Com
 	// whole delegation. Ten background agents get ten owners whether they
 	// are ten different agents or ten copies of one, so a session one of them
 	// opens can never be reached by another (tool.Owner).
-	loadout, err := a.Loadout(ctx, workspaceID, userID, c.DeviceID, ag.Tools, ag.ConfirmTools, ag.Brains, tool.OwnerOfAgent())
+	loadout, err := a.Loadout(ctx, workspaceID, userID, c.DeviceID, ag.Tools, ag.ConfirmTools, ag.Brains, tool.OwnerOfAgent(),
+		// The agent's own name: what IT writes into a knowledge base is its work.
+		model.Actor{Name: ag.Name})
 	if err != nil {
 		return agent.AgentProfile{}, err
 	}
-	// An agent is a full agent: if it has its own memory brain, it manages it
+	// An agent is a full agent: it reads its own skills with the same two tools,
+	// scoped to its own assignment, and if it has a memory brain it manages that
 	// exactly as the Gateway does, the same internal tool wired the same way.
-	tools.AppendMemory(&loadout, a.Store, ag.MemoryBrainID)
+	tools.AppendSkills(&loadout, a.Store.Skills(), a.Machines, tools.Computer{
+		WorkspaceID: workspaceID, UserID: userID, DeviceID: c.DeviceID,
+	}, reachableSkills(ag.Skills, loadout.Skills))
+	tools.AppendMemory(&loadout, a.Store, ag.MemoryBrainID, model.Actor{Name: ag.Name})
 
 	// Its own knowledge and memory brains, resolved into the map its prompt shows.
 	brains, err := a.brainRosterFor(ctx, workspaceID, ag.Brains, ag.MemoryBrainID)
+	if err != nil {
+		return agent.AgentProfile{}, err
+	}
+	// And its own skills, the same map the Gateway gets of its own.
+	held, err := a.skillRosterFor(ctx, workspaceID, ag.Skills)
 	if err != nil {
 		return agent.AgentProfile{}, err
 	}
@@ -142,6 +180,7 @@ func (a *App) ResolveAgent(ctx context.Context, workspaceID, userID int64, c Com
 		role:         ag.Instructions,
 		capabilities: loadout.Schemas,
 		brains:       brains,
+		skills:       held,
 		folder:       c.Folder,
 		machine:      c.Env,
 	})
@@ -198,6 +237,7 @@ func (a *App) StartBackground(_ context.Context, bg agent.BackgroundDelegation) 
 func (a *App) RunBackground(ctx context.Context) {
 	<-ctx.Done()
 	a.bg.shutdown()
+	a.compactions.stop()
 }
 
 // Quiesce stops the app taking on new work: no new turn, no new background
@@ -212,7 +252,8 @@ func (a *App) Quiesce() {
 func (a *App) DrainWork(ctx context.Context) bool {
 	agentsDone := a.bg.drain(ctx)
 	turnsDone := a.Runs.DrainForShutdown(ctx)
-	return agentsDone && turnsDone
+	summariesDone := a.compactions.drain(ctx)
+	return agentsDone && turnsDone && summariesDone
 }
 
 // WorkInFlight reports what is still going, for the shutdown log.
@@ -732,7 +773,7 @@ func memoryToolSchema() tool.Schema {
 // So the registry cannot answer for them, and anything asking "is this one of
 // ours" has to ask here.
 //
-// Built by calling the same constructors the loadout is built from, so a sixth
+// Built by calling the same constructors the loadout is built from, so another
 // one cannot be added without appearing in this list: it would have to be a
 // constructor, and a constructor left out of this list is what the test
 // TestEveryToolTheLoopAddsIsKnownAsOurs fails on.
@@ -744,6 +785,7 @@ var loopInternal = sync.OnceValue(func() map[string]bool {
 		fleetToolSchema(nil, 0),
 		backgroundStatusSchema(),
 		cancelBackgroundSchema(),
+		agentguide.Schema(),
 	} {
 		names[schema.Name] = true
 	}

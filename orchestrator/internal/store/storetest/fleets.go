@@ -461,6 +461,11 @@ func testFleetMembersAreWrittenAtOnce(t *testing.T, st store.Store) {
 			SessionID: session.ID, WorkspaceID: ws.ID,
 			ParentToolCallID: "call_bulk", AgentKey: "researcher",
 			Mode: model.HandoffFleet, Task: fmt.Sprintf("look up part %d", i+1),
+			// Every member reaches the computer the batch was asked for from.
+			// Written through the MULTI-ROW insert, which is a different
+			// statement from the single one and has its own column list to get
+			// wrong.
+			DeviceID: "the-laptop",
 		}
 	}
 	if err := st.Agent().CreateFleetMembers(ctx, fleet.ID, members); err != nil {
@@ -481,6 +486,21 @@ func testFleetMembersAreWrittenAtOnce(t *testing.T, st store.Store) {
 		seen[m.ID] = true
 		if m.FleetID == nil || *m.FleetID != fleet.ID {
 			t.Fatalf("member %d does not belong to the batch: %+v", i, m.FleetID)
+		}
+	}
+
+	// The computer survived the batched write. A fleet agent resolved without
+	// one is not an agent whose calls fail, it is an agent with no machine
+	// tools at all (machine.Offers), which is how three agents asked to run one
+	// command each reported "no shell reachable" without a single tool call
+	// between them.
+	back, err := st.Agent().FleetMembers(ctx, fleet.ID)
+	if err != nil {
+		t.Fatalf("read members: %v", err)
+	}
+	for i, m := range back {
+		if m.DeviceID != "the-laptop" {
+			t.Fatalf("member %d lost the computer it may act on: %+v", i, m)
 		}
 	}
 

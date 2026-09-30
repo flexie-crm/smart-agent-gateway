@@ -236,7 +236,7 @@ func checkTerminalSettings(config json.RawMessage) error {
 }
 
 // terminalHandler is the dispatcher with the policy in front of it.
-func terminalHandler(machines Machines, policy cmdpolicy.Policy) tool.Handler {
+func terminalHandler(machines Machines, policy cmdpolicy.Policy, owner tool.Owner) tool.Handler {
 	schema := terminalSchema()
 	run := Dispatch(machines, schema, schema.Name)
 	return func(ctx context.Context, call tool.Call) (tool.Result, error) {
@@ -248,6 +248,10 @@ func terminalHandler(machines Machines, policy cmdpolicy.Policy) tool.Handler {
 			return toolkit.Blocked(reason)
 		}
 		call.Args = checked
+		// Whose terminals these are. Bound here rather than carried on the
+		// turn, because an agent's identity is minted where its loadout is
+		// built and a turn does not have one (terminalScope).
+		call.Owner = owner
 		return run(ctx, call)
 	}
 }

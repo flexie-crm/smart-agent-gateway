@@ -303,8 +303,14 @@ func (r *Registry) callOnce(
 
 	raw, err := io.ReadAll(io.LimitReader(conn, maxResult+1))
 	if err != nil {
+		// Only the caller's context ending reaches this (keepWatch closes the
+		// connection, it never cancels ctx), so it is the turn that was
+		// stopped, not the computer that failed to answer. Its own error, as
+		// the dial-back wait already returns (link.go), and not ErrTimeout,
+		// which was retried into a context that could not succeed and logged
+		// as the computer not dialling back.
 		if ctx.Err() != nil {
-			return Result{}, sent, ErrTimeout
+			return Result{}, sent, ctx.Err()
 		}
 		// The socket ended before the answer did. The work is still going on
 		// that computer, so this is worth asking again for rather than

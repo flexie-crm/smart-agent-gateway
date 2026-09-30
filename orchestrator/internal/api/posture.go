@@ -7,7 +7,6 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"flexie.io/sag/internal/app"
-	"flexie.io/sag/internal/config"
 )
 
 // The posture is what kind of installation this is, answered by the server
@@ -45,13 +44,6 @@ type posture struct {
 	// SingleMachine says machines are not added or removed here: there is one,
 	// it is this computer, and the screen opens on it.
 	SingleMachine bool `json:"single_machine"`
-	// LocalModels says a model can run on hardware this installation owns, so
-	// there is something for the Machines screen to be about.
-	//
-	// False on a personal installation whose platform carries no engine, where
-	// every model is hosted. Nothing degrades: what goes away is a screen with
-	// nothing behind it.
-	LocalModels bool `json:"local_models"`
 	// Dev says this server is somebody's working copy, so a page served by it
 	// should say so and may offer the sign-in that needs no password typed.
 	//
@@ -74,12 +66,7 @@ func mountPosture(r chi.Router, a *app.App) {
 			SingleUser:    a.Config.Personal,
 			LocalSignIn:   a.Config.Personal,
 			SingleMachine: a.Config.Personal,
-			// A deployment always can: machines JOIN a server over the network,
-			// so what this build carries is not the question there. A personal
-			// installation is the only one whose own hardware is the whole
-			// fleet, and it can only offer that if an engine shipped with it.
-			LocalModels: !a.Config.Personal || config.EngineBundled,
-			Dev:         a.Config.Dev,
+			Dev:           a.Config.Dev,
 		})
 	})
 }

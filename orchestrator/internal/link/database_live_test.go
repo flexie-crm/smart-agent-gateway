@@ -52,7 +52,7 @@ func TestARealDatabaseThroughTheRealClient(t *testing.T) {
 	defer gateway.stop()
 
 	client := startRustClient(t, gateway.url, "a-real-looking-token")
-	defer client.stop()
+	defer client.Stop()
 	waitFor(t, "the real client to link", func() bool { return r.Online(5, 11, "the-laptop") })
 
 	// The tool's connection, exactly as the query tool builds it: the database
@@ -125,8 +125,18 @@ func TestARealDatabaseThroughTheRealClient(t *testing.T) {
 		// at max_recursive_iterations, which defaults to 1000, and a test that
 		// asked for fifty thousand rows and asserted on what it got would have
 		// been reporting the database's limit as a fault in the pipe.
+		//
+		// USING utf8mb4 is load bearing. Without it MariaDB types CHAR() as
+		// VARBINARY (checked: `REPEAT(CHAR(66), 4)` is varbinary(16), with the
+		// USING it is varchar(4)), and this tool does not return binary at all,
+		// by design: every value came back as "[binary, 64 bytes, not
+		// returned]" (datasource.Cell, where isBinaryType matches VARBINARY on
+		// the substring). So the per-row check failed on row 0 for everybody,
+		// and it was a fixture asking for the wrong column type rather than
+		// anything wrong with the route. It went unnoticed because this file
+		// only runs when SAG_TEST_DSN is set, and link-e2e does not need one.
 		res, err := conn.Query(ctx,
-			"SELECT seq AS n, REPEAT(CHAR(64 + (seq % 26) + 1), 64) AS filler FROM seq_1_to_"+
+			"SELECT seq AS n, REPEAT(CHAR(64 + (seq % 26) + 1 USING utf8mb4), 64) AS filler FROM seq_1_to_"+
 				strconv.Itoa(rows), nil, rows)
 		if err != nil {
 			t.Fatalf("query: %v", err)

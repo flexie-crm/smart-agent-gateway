@@ -102,7 +102,21 @@ func readUpdateRequest(path string) (edition, target, arch, current string, ok b
 // installer once pointed at a tarball no build had ever produced.
 func (s *Server) latestRelease(edition, target, arch, host string) (*release, error) {
 	name := fmt.Sprintf("%s-%s-%s.json", edition, target, arch)
-	raw, err := os.ReadFile(filepath.Join(s.dir, updatesDir, name))
+
+	// Read through a ROOT, so the manifest directory is a boundary the read
+	// cannot cross rather than one the caller is trusted to have checked.
+	// readUpdateRequest already refuses a segment carrying a separator or a
+	// dot-dot, and that check stays where it is because it gives a person a 404
+	// instead of a confusing empty answer. This is the floor under it: three
+	// path segments off a URL become a file name, and if that check is ever
+	// loosened the worst a request can reach is a name that does not exist.
+	root, err := os.OpenRoot(filepath.Join(s.dir, updatesDir))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+
+	raw, err := root.ReadFile(name)
 	if err != nil {
 		return nil, err
 	}

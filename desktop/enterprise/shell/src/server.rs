@@ -68,8 +68,10 @@ pub fn saved() -> Option<String> {
 pub fn save(address: &str) -> Result<(), String> {
     let dir = state_dir()?;
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    let body = serde_json::to_string_pretty(&Settings { address: address.to_string() })
-        .map_err(|e| format!("cannot write the settings: {e}"))?;
+    let body = serde_json::to_string_pretty(&Settings {
+        address: address.to_string(),
+    })
+    .map_err(|e| format!("cannot write the settings: {e}"))?;
     fs::write(settings_path()?, body).map_err(|e| format!("cannot save the address: {e}"))
 }
 
@@ -172,12 +174,24 @@ mod tests {
 
     #[test]
     fn an_address_typed_the_way_people_type_them_is_understood() {
-        assert_eq!(normalise("sag.example.com").unwrap(), "https://sag.example.com");
-        assert_eq!(normalise("  sag.example.com/  ").unwrap(), "https://sag.example.com");
-        assert_eq!(normalise("https://sag.example.com/").unwrap(), "https://sag.example.com");
+        assert_eq!(
+            normalise("sag.example.com").unwrap(),
+            "https://sag.example.com"
+        );
+        assert_eq!(
+            normalise("  sag.example.com/  ").unwrap(),
+            "https://sag.example.com"
+        );
+        assert_eq!(
+            normalise("https://sag.example.com/").unwrap(),
+            "https://sag.example.com"
+        );
         // Not everybody's server has a certificate yet, and an internal one on
         // plain HTTP is a real deployment rather than a mistake to refuse.
-        assert_eq!(normalise("http://10.0.0.4:8080").unwrap(), "http://10.0.0.4:8080");
+        assert_eq!(
+            normalise("http://10.0.0.4:8080").unwrap(),
+            "http://10.0.0.4:8080"
+        );
     }
 
     #[test]

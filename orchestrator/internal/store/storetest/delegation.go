@@ -20,6 +20,11 @@ func testDelegations(t *testing.T, st store.Store) {
 	d := &model.AgentDelegation{
 		SessionID: chat.ID, WorkspaceID: ws.ID, ParentToolCallID: "call_1",
 		AgentKey: "research", Mode: model.HandoffBackground,
+		// The computer it may act on. On the row because recovery restarts a
+		// killed delegation from here with no request to ask, and an agent
+		// brought back without it comes back with no machine tools at all
+		// rather than merely failing to reach them.
+		DeviceID: "the-laptop",
 		Progress: json.RawMessage(`{"step":"starting"}`),
 	}
 	if err := st.Agent().CreateDelegation(ctx(), d); err != nil {
@@ -36,6 +41,13 @@ func testDelegations(t *testing.T, st store.Store) {
 	}
 	if running[0].Status != model.DelegationRunning || string(running[0].Progress) != `{"step":"starting"}` {
 		t.Fatalf("delegation not stored running with progress: %+v", running[0])
+	}
+	if running[0].DeviceID != "the-laptop" {
+		t.Fatalf("the delegation lost the computer it may act on: %+v", running[0])
+	}
+	// And on the single read, which is the one recovery uses.
+	if one, err := st.Agent().GetDelegation(ctx(), d.ID); err != nil || one.DeviceID != "the-laptop" {
+		t.Fatalf("the computer did not survive a read back: %v %+v", err, one)
 	}
 
 	// Progress updates in place while running.

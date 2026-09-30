@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -8,8 +9,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"flexie.io/sag/internal/agent"
 	"flexie.io/sag/internal/app"
 	"flexie.io/sag/internal/model"
+	"flexie.io/sag/internal/run"
 	"flexie.io/sag/internal/store"
 )
 
@@ -26,6 +29,9 @@ func mountChats(r chi.Router, a *app.App) {
 		r.Post("/create", h.createChat)
 		// Conversations are addressed by their public id, never by a row id.
 		r.Post("/update/{uid}", h.updateChat)
+		// Compacting is the person's own housekeeping, like naming: it changes
+		// what the model is sent and nothing anybody sees, so it is not gated.
+		r.Post("/compact/{uid}", h.compactChat)
 		// Deleting is the one act here an organisation may want to withhold: a
 		// conversation is the record of what was asked and what the assistant
 		// was allowed to do about it. Naming and pinning are the person's own
@@ -159,6 +165,58 @@ func (h *chatHandlers) updateChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type compactChatRequest struct {
+	// ModelID is the model picked in the chat, the same field a turn sends: the
+	// summary is written by the model the next turn will run on.
+	ModelID int64 `json:"model_id"`
+}
+
+// compactChat starts summarizing the conversation so far and answers at once:
+// the summary is written in the background, the chat is frozen until it is, and
+// every tab the person has open hears when it is done (ContextMeter over the
+// socket). The chat shows exactly what it showed before; the next turn is built
+// from the summary and what follows it.
+func (h *chatHandlers) compactChat(w http.ResponseWriter, r *http.Request) {
+	uid := chi.URLParam(r, "uid")
+	if uid == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "a chat id is required")
+		return
+	}
+	var req compactChatRequest
+	if r.ContentLength > 0 && !decodeJSON(w, r, &req) {
+		return
+	}
+	claims := claimsFrom(r)
+
+	err := h.app.StartCompaction(r.Context(), claims.WorkspaceID, claims.UserID, uid, req.ModelID)
+	switch {
+	case errors.Is(err, app.ErrChatBusy):
+		writeError(w, http.StatusConflict, "chat_busy",
+			"This conversation is still working. Try again when it has finished.")
+		return
+	case errors.Is(err, agent.ErrNothingToCompact):
+		writeError(w, http.StatusConflict, "nothing_to_compact",
+			"Nothing new has been said since this conversation was last compacted.")
+		return
+	case errors.Is(err, app.ErrCompactNeedsModel):
+		writeError(w, http.StatusBadRequest, "invalid_request", "model_id is required")
+		return
+	case errors.Is(err, run.ErrShuttingDown):
+		writeError(w, http.StatusServiceUnavailable, "restarting",
+			"this service is restarting. Try that again in a moment.")
+		return
+	case errors.Is(err, store.ErrNotFound):
+		writeStoreError(w, h.app, err)
+		return
+	case err != nil:
+		h.app.Log.Error().Err(err).Str("chat", uid).Msg("start compacting a chat")
+		writeError(w, http.StatusInternalServerError, "server_error",
+			"The conversation could not be compacted. Try again in a moment.")
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
 }
 
 // deleteChat removes the conversation and everything it produced. Deleting a

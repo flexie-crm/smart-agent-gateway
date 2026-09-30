@@ -37,6 +37,17 @@ type Registry interface {
 	Lookup(name string) (tool.Schema, bool)
 	LookupTopic(id string) (tool.Topic, string, bool)
 	Guided() []string
+	// Owner names the agent a tool belongs to, and is empty for one the caller
+	// holds itself.
+	//
+	// The Gateway is told the NAMES of its agents and looks up what they can do
+	// (agent_guide), which hands back the callable key of every ability an
+	// agent holds. Those keys are documented like any other, and refusing to
+	// read them would mean the Gateway choosing where to send a task while
+	// being unable to find out what the tool it is choosing actually does. So
+	// they resolve, and every answer for one says whose it is: without that,
+	// reading a tool's guide looks exactly like holding the tool.
+	Owner(name string) string
 }
 
 // New builds the tool_guide tool over the given registry.
@@ -96,29 +107,65 @@ func Handler(reg Registry) tool.Handler {
 	}
 }
 
+// missed is what a lookup that found nothing answers with.
+//
+// found is stated rather than implied, because the rest of this tool answers
+// with a body and a title: a payload carrying only prose could be read as
+// documentation that happens to be short.
+func missed(reg Registry, why string) (tool.Result, error) {
+	return toolkit.Success(map[string]any{
+		"found":            false,
+		"message":          why,
+		"guides_available": reg.Guided(),
+	})
+}
+
 // openTopic returns one topic's body and the edges the model can follow next.
 func openTopic(reg Registry, id string) (tool.Result, error) {
 	topic, owner, ok := reg.LookupTopic(id)
 	if !ok {
-		return toolkit.Failed("there is no topic by that id; call tool_guide with tool_name to see a tool's topics. Abilities with documentation: " + join(reg.Guided()))
+		// Not a failure. Nothing went wrong here: the question was "is there a
+		// topic by this id", the answer is no, and the answer carries the list
+		// the model needs to ask again. Classifying it as a failure wrote a red
+		// row into somebody's conversation for a documentation lookup that
+		// worked exactly as designed, and the person reading it cannot tell
+		// that from a tool that broke.
+		//
+		// The branch below for neither argument given has always answered this
+		// way. A miss is the same situation as an empty call, reached by a
+		// different route, so it gets the same shape.
+		return missed(reg, "There is no topic by that id. Call tool_guide with tool_name to see one ability's topics.")
 	}
-	return toolkit.Success(map[string]any{
+	out := map[string]any{
 		"tool":        owner,
 		"topic":       topic.ID,
 		"title":       topic.Title,
 		"body":        topic.Body,
 		"related":     edges(topic.Edges),
 		"next_action": "To follow a related topic, call tool_guide with topic_id set to its id.",
-	})
+	}
+	if agent := reg.Owner(owner); agent != "" {
+		out["belongs_to"] = agent
+		out["note"] = "This ability is " + agent + "'s, not yours: you cannot call it. " +
+			"Delegate the task to " + agent + " to have it used."
+	}
+	return toolkit.Success(out)
 }
 
 // openTool returns a tool's flat guide and the table of contents of its topics.
 func openTool(reg Registry, name string) (tool.Result, error) {
 	schema, ok := reg.Lookup(name)
 	if !ok {
-		return toolkit.Failed("there is no ability by that name; the ones with documentation are: " + join(reg.Guided()))
+		// Same reasoning as an unknown topic id: a name that is not here is an
+		// answer, not a fault.
+		return missed(reg, "There is no ability by that name.")
 	}
 	out := map[string]any{"tool": name}
+	if owner := reg.Owner(name); owner != "" {
+		out["belongs_to"] = owner
+		out["note"] = "This ability is " + owner + "'s, not yours: you cannot call it. " +
+			"Delegate the task to " + owner + " to have it used."
+	}
 	if len(schema.Guide) > 0 {
 		out["guide"] = schema.Guide
 	}
@@ -126,10 +173,60 @@ func openTool(reg Registry, name string) (tool.Result, error) {
 		out["topics"] = toc
 		out["next_action"] = "To drill into one concept, call tool_guide with topic_id set to a topic's id."
 	}
+	// A tool a connected service projected is NOT ours to document, and saying
+	// so is the whole of this branch.
+	//
+	// This guide covers the abilities we ship. A projected tool's description
+	// comes from the service, and whether there is anything deeper to read is
+	// the service's to answer: MCP carries no standard for documentation beyond
+	// that description, so some vendors add a tool of their own for it (Flexie
+	// projects one, as nli_tool_guide) and most do not.
+	//
+	// What was here before answered "this ability has no deep documentation;
+	// its short description is all there is", which we cannot know and which
+	// was false in the case that produced this: the model was told there was
+	// nothing deeper about nli_query while the service's own guide had it, went
+	// looking for a topic anyway, and invented an id (query/leads-and-contacts)
+	// that failed. Asserting the absence of something only a third party can
+	// report is worse than declining to answer.
+	//
+	// RemoteName is here because it is the name the service's own tools expect:
+	// our prefix is ours, and a model that knows only "nli_query" would ask NLI
+	// about a tool it has never heard of.
+	if schema.Service != "" {
+		out["service"] = schema.Service
+		out["ours"] = false
+		out["does"] = schema.Description
+		if schema.RemoteName != "" {
+			out["name_on_service"] = schema.RemoteName
+		}
+		out["documentation"] = documentationIsTheServices(schema)
+		return toolkit.Success(out)
+	}
 	if len(schema.Guide) == 0 && len(schema.Topics) == 0 {
 		out["note"] = "This ability has no deep documentation; its short description is all there is: " + schema.Description
 	}
 	return toolkit.Success(out)
+}
+
+// documentationIsTheServices says where a projected tool's documentation lives,
+// in the only terms that are true: with the service.
+//
+// It routes rather than guesses. We do not look for a tool whose name suggests
+// it is a guide, because that would be a convention we invented on a third
+// party's behalf; integrations lists what the service actually offers and the
+// model can see a documentation tool there if one exists.
+func documentationIsTheServices(schema tool.Schema) string {
+	where := "This is " + schema.Service + "'s tool, not one of ours, and this guide documents our own abilities. " +
+		"Its description above is what " + schema.Service + " says about it, and anything deeper is " +
+		schema.Service + "'s to give: call integrations with operation \"tools\" and service \"" + schema.Service +
+		"\" to see everything it offers, including a documentation tool of its own if it has one."
+	if schema.RemoteName != "" {
+		where += " Ask any of those using the name " + schema.Service + " uses, which for this tool is \"" +
+			schema.RemoteName + "\": the prefix on \"" + schema.Name + "\" is ours and " + schema.Service +
+			" has never heard of it."
+	}
+	return where
 }
 
 // tableOfContents is the topic list without the bodies: just enough for the
@@ -154,11 +251,4 @@ func edges(list []tool.TopicEdge) []map[string]string {
 		})
 	}
 	return out
-}
-
-func join(names []string) string {
-	if len(names) == 0 {
-		return "(none)"
-	}
-	return strings.Join(names, ", ")
 }

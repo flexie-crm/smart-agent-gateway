@@ -2,7 +2,10 @@ package template
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net"
+	"strings"
 )
 
 // Reaching what the gateway cannot.
@@ -51,4 +54,59 @@ type Machines interface {
 	// Online reports whether that installation is connected, so a Test can say
 	// so before an administrator saves a tool that cannot work.
 	Online(workspaceID, userID int64, deviceID string) bool
+}
+
+// Ticked reads a checkbox.
+//
+// A declared setting arrives as a STRING whatever its type, because the form is
+// one shape for all of them, so every template that offers a checkbox has to
+// decide what counts as on. Two of them had decided it privately and
+// identically; a third copy is how a rule stops being one rule. It lives here,
+// with the field it reads, for the same reason tool.ReadPairs lives with the
+// pairs field.
+func Ticked(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "true", "1", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// ReachChat reads the checkbox out of a stored configuration.
+//
+// IT IS ONE FIELD AND IT HAD TWO SPELLINGS, which is why this exists. The form
+// names it with a dot ("reach.chat"), every template stores its settings by
+// splitting dotted keys into nested objects, and so what lands in the database
+// is {"reach":{"chat":"true"}}. Both templates that offered the checkbox then
+// read it back as a FLAT key with a dot in its JSON name, which matches
+// nothing: the value was always false, the box did nothing, and a database or a
+// server on an office network was quietly dialled from this server instead of
+// from the computer that can see it. The server tool was worse still, because
+// it re-marshals a typed struct and so DROPPED the setting altogether.
+//
+// Nothing reported it because the failure looks like the thing it is for: an
+// address that cannot be reached is exactly what somebody ticking this box
+// already has.
+//
+// Both spellings are accepted. The nested one is what every template writes;
+// the flat one is what a configuration assembled by hand or by a future path
+// would hold, and a field with one meaning should not depend on which.
+func ReachChat(config json.RawMessage) bool {
+	var held struct {
+		Nested struct {
+			Chat any `json:"chat"`
+		} `json:"reach"`
+		Flat any `json:"reach.chat"`
+	}
+	if err := json.Unmarshal(config, &held); err != nil {
+		return false
+	}
+	if held.Nested.Chat != nil {
+		return Ticked(fmt.Sprint(held.Nested.Chat))
+	}
+	if held.Flat != nil {
+		return Ticked(fmt.Sprint(held.Flat))
+	}
+	return false
 }

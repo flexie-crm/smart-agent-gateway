@@ -153,6 +153,12 @@ export class ReconnectingSocket {
     this.start()
   }
 
+  /** unsubscribe leaves a topic now, and it is not rejoined on a reconnect. */
+  unsubscribe(topic: string): void {
+    if (!this.topics.delete(topic)) return
+    this.sendRaw({ type: 'unsubscribe', topic })
+  }
+
   currentState(): SocketState {
     return this.state
   }

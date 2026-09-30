@@ -15,10 +15,18 @@ CREATE TABLE `mcp_servers` (
   `tool_prefix` varchar(64) NOT NULL,
   `last_synced_at` datetime(3) DEFAULT NULL,
   `last_error` text DEFAULT NULL,
+  `created_by` bigint(20) unsigned DEFAULT NULL,
+  `created_by_name` varchar(255) NOT NULL DEFAULT '',
+  `updated_by` bigint(20) unsigned DEFAULT NULL,
+  `updated_by_name` varchar(255) NOT NULL DEFAULT '',
   `created_at` datetime(3) NOT NULL,
   `updated_at` datetime(3) NOT NULL,
   PRIMARY KEY (`id`),
+  KEY `fk_mcp_server_created_by` (`created_by`),
+  KEY `fk_mcp_server_updated_by` (`updated_by`),
   UNIQUE KEY `uniq_ws_name` (`workspace_id`,`name`),
   UNIQUE KEY `uniq_ws_prefix` (`workspace_id`,`tool_prefix`),
+  CONSTRAINT `fk_mcp_server_created_by` FOREIGN KEY (`created_by`) REFERENCES `users` (`id`) ON DELETE SET NULL,
+  CONSTRAINT `fk_mcp_server_updated_by` FOREIGN KEY (`updated_by`) REFERENCES `users` (`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_mcp_workspace` FOREIGN KEY (`workspace_id`) REFERENCES `workspaces` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

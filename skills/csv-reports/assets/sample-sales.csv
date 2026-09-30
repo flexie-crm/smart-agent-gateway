@@ -1,0 +1,11 @@
+order_id,customer,region,units,unit_price,notes
+1001,Ardit Hoxha,Tirana,3,24.50,
+1002,Blerina Krasniqi,Prishtina,1,120.00,gift wrap
+1003,Marco Bianchi,Milano,12,8.75,
+1004,Elira Berisha,Durres,2,,price to confirm
+1005,Sokol Gjoka,Vlore,5,15.20,
+1003,Marco Bianchi,Milano,12,8.75,
+1007,Anna Schmidt,Berlin,1,340.00,
+1008,Dritan Leka,Shkoder,4,19.99,
+1009,Elira Berisha,Durres,7,11.05,
+1010,Luca Rossi,Roma,2,64.40,n/a

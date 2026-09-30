@@ -17,6 +17,7 @@ import type { ConfirmationRequest } from './chat-types'
 
 // Re-export ChatMessage so existing imports from this module keep working
 import { apiFetch } from './api';
+import { CONTEXT_EVENT, NO_METER, readMeter, type ContextMeter } from './context-meter'
 export type { ChatMessage } from './chat-types'
 
 /**
@@ -70,6 +71,13 @@ export function useChatStream(
   // What may be attached and whether anything may be spoken, from the history
   // answer rather than an endpoint of its own.
   const [accepts, setAccepts] = useState<ChatAccepts>(NO_ACCEPTS)
+  // How full the conversation is, and whether it is being compacted: from the
+  // history answer when it opens, then from the socket after every step.
+  const [meter, setMeter] = useState<ContextMeter>(NO_METER)
+  // Read by sendMessage, which must not send into a conversation being
+  // compacted and should not be rebuilt every time the meter moves.
+  const compactingRef = useRef(false)
+  compactingRef.current = meter.compacting
   // Background delegations still in flight for this conversation, rendered as
   // chips (Mode C). Seeded from history on load, moved live over the socket.
   const [delegations, setDelegations] = useState<Delegation[]>([])
@@ -259,6 +267,9 @@ export function useChatStream(
     // request of its own beside this one, for a fact needed exactly when a
     // conversation opens and at no other time.
     setAccepts(readAccepts(data.meta?.accepts));
+    // How full it is, and whether a compaction is under way: a reload in the
+    // middle of one comes back frozen, as the tab that asked for it is.
+    setMeter(readMeter(data.meta?.context));
     // And whether there is a turn still being answered here. Returned so the
     // caller rejoins only when there is something to rejoin: it used to POST to
     // /chat/attach after every history load and be told 204, nothing is
@@ -284,6 +295,7 @@ export function useChatStream(
       setMessages([]);
       setApprovalModeState('manual');
       setDelegations([]);
+      setMeter(NO_METER);
       lastFetchKeyRef.current = '';
       // And then ASK, because a draft still has a composer.
       //
@@ -697,14 +709,23 @@ export function useChatStream(
       if (showingCardRef.current) return
       void loadHistoryRef.current?.(chatIdRef.current)
     }
+    // How full a conversation is, pushed after every step and around a
+    // compaction. Only this conversation's: every tab hears every push.
+    const onContext = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { chat_uid?: string } | undefined
+      if (!detail || !chatIdRef.current || detail.chat_uid !== chatIdRef.current) return
+      setMeter(readMeter(detail))
+    }
     window.addEventListener(DELEGATION_EVENT, onDelegation)
     window.addEventListener(TURN_EVENT, onTurn)
     window.addEventListener(CARD_EVENT, onCard)
+    window.addEventListener(CONTEXT_EVENT, onContext)
     window.addEventListener(SOCKET_READY_EVENT, onSocketReady)
     return () => {
       window.removeEventListener(DELEGATION_EVENT, onDelegation)
       window.removeEventListener(TURN_EVENT, onTurn)
       window.removeEventListener(CARD_EVENT, onCard)
+      window.removeEventListener(CONTEXT_EVENT, onContext)
       window.removeEventListener(SOCKET_READY_EVENT, onSocketReady)
     }
   }, [])
@@ -750,6 +771,9 @@ export function useChatStream(
 
   const sendMessage = useCallback((text: string, attachments?: FileAttachment[]) => {
     if (!text.trim()) return
+    // Frozen while a summary is written: the server would refuse it anyway, and
+    // a message that vanishes into a refusal is worse than a box that waits.
+    if (compactingRef.current) return
 
     const userMessage: ChatMessage = {
       id: nanoid(),
@@ -1011,5 +1035,35 @@ export function useChatStream(
   // Bind the latest runClientTool to the ref so applyCommand can dispatch to it.
   runClientToolRef.current = runClientTool;
 
-  return { messages, isStreaming, sendMessage, stop, reset, activity, respondToConfirmation, rejoin, approvalMode, setApprovalMode, delegations, cancelDelegation, accepts, hasOlder: older.more, loadingOlder, loadOlder }
+  /**
+   * Asks for this conversation to be compacted, under the chats endpoint.
+   *
+   * The server answers at once and writes the summary in the background; the
+   * chat is frozen from the moment of asking, and it is the socket that says
+   * when it is done (or the next reload, which reads the same thing). A refusal
+   * is said in the meter's own line, which is where the person is looking.
+   */
+  const compact = useCallback(async (chatsEndpoint: string) => {
+    const chat = chatIdRef.current
+    if (!chat || compactingRef.current) return
+    setMeter(m => ({ ...m, compacting: true, failed: '' }))
+    const couldNot = 'The conversation could not be compacted. Try again in a moment.'
+    try {
+      // The model the next turn would use, so the summary is written by the
+      // model that reads it. Only that: the endpoint refuses fields it does
+      // not know.
+      const extra = (await resolveDynamic(extraData)) as { model_id?: unknown } | null | undefined
+      const res = await apiFetch(`${chatsEndpoint}/compact/${encodeURIComponent(chat)}`, {
+        method: 'POST',
+        body: JSON.stringify({ model_id: extra?.model_id }),
+      })
+      if (res.ok) return
+      const body = await res.json().catch(() => ({}))
+      setMeter(m => ({ ...m, compacting: false, failed: typeof body?.error_description === 'string' ? body.error_description : couldNot }))
+    } catch {
+      setMeter(m => ({ ...m, compacting: false, failed: couldNot }))
+    }
+  }, [extraData])
+
+  return { messages, isStreaming, sendMessage, stop, reset, activity, respondToConfirmation, rejoin, approvalMode, setApprovalMode, delegations, cancelDelegation, accepts, hasOlder: older.more, loadingOlder, loadOlder, meter, compact }
 }

@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -154,12 +155,22 @@ func (s *Server) handleIP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if r.URL.Query().Get("plain") != "" {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		_, _ = fmt.Fprintln(w, ip)
+	// Answered from a parsed address, so what goes back is a string the net
+	// package built rather than the one that arrived in a header.
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "that is not an address"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"ip": ip})
+	if r.URL.Query().Get("plain") != "" {
+		// text/plain with the charset stated, and nosniff, so a browser cannot
+		// decide this is a document however it is fetched.
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		_, _ = fmt.Fprintln(w, parsed.String())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"ip": parsed.String()})
 }
 
 // handleReachable opens a connection back to the caller and says what happened.
@@ -190,7 +201,7 @@ func (s *Server) handleReachable(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, s.probe(parsed, port))
+	writeJSON(w, http.StatusOK, s.probe(r.Context(), parsed, port))
 }
 
 // probe is the connection itself: TCP first, then a TLS hello.
@@ -205,11 +216,18 @@ func (s *Server) handleReachable(w http.ResponseWriter, r *http.Request) {
 // verifying it is not what this answers: the question is whether packets
 // arrive, and a handshake starting is proof of that. Trust is settled later, by
 // the gateway, against the authority that issued it.
-func (s *Server) probe(ip net.IP, port int) reachResult {
+// The context is the caller's own: somebody who closes the tab while this is
+// dialling a stranger's address has no answer to receive, and both halves of
+// the probe stop rather than holding a socket open for the timeout.
+func (s *Server) probe(ctx context.Context, ip net.IP, port int) reachResult {
 	addr := net.JoinHostPort(ip.String(), strconv.Itoa(port))
 	out := reachResult{Address: addr, IP: ip.String(), Port: port}
 
-	conn, err := net.DialTimeout("tcp", addr, probeTimeout)
+	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		out.Detail = "nothing accepted a connection on that port. The service may not be " +
 			"running, or a firewall, security group or missing port forward is stopping it."
@@ -218,13 +236,14 @@ func (s *Server) probe(ip net.IP, port int) reachResult {
 	defer func() { _ = conn.Close() }()
 	out.Reachable = true
 
-	_ = conn.SetDeadline(time.Now().Add(probeTimeout))
 	tlsConn := tls.Client(conn, &tls.Config{
 		// See above: identity is not what is being asked here, arrival is.
-		InsecureSkipVerify: true, //nolint:gosec
+		InsecureSkipVerify: true, //nolint:gosec // deliberate, and explained above
 		ServerName:         ip.String(),
 	})
-	if err := tlsConn.Handshake(); err != nil {
+	// The context bounds this, so there is no deadline on the connection to keep
+	// in step with it: one ceiling, set once, covering the dial and the hello.
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		out.Detail = "something is listening on that port, but it did not answer as the " +
 			"inference node does. Another service may already be using the port."
 		return out

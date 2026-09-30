@@ -243,11 +243,11 @@ func TestMCPSyncProjectsAndTracksDrift(t *testing.T) {
 	stranger := env.createConnection(token, "Stranger", "the-wrong-key", badRemote)
 	rec := env.do(http.MethodPost, "/v1/mcp-servers/"+itoa(stranger.ID)+"/sync", token, nil)
 	env.expectStatus(rec, http.StatusBadGateway)
-	var listed []mcpServerBody
+	var screen mcpConnectionsBody
 	rec = env.do(http.MethodGet, "/v1/mcp-servers", token, nil)
 	env.expectStatus(rec, http.StatusOK)
-	env.decode(rec, &listed)
-	for _, s := range listed {
+	env.decode(rec, &screen)
+	for _, s := range screen.Servers {
 		if s.ID == stranger.ID && s.LastError == "" {
 			t.Fatal("the refused sync left no trace where an administrator looks")
 		}
@@ -599,9 +599,9 @@ func TestADerivedClientIDIsRememberedForTheCallback(t *testing.T) {
 	// back, because the token exchange has nothing else to identify us with.
 	rec = env.do(http.MethodGet, "/v1/mcp-servers", token, nil)
 	env.expectStatus(rec, http.StatusOK)
-	var connections []mcpServerBody
-	env.decode(rec, &connections)
-	for _, c := range connections {
+	var screen mcpConnectionsBody
+	env.decode(rec, &screen)
+	for _, c := range screen.Servers {
 		if c.ID != created.ID {
 			continue
 		}
@@ -615,4 +615,35 @@ func TestADerivedClientIDIsRememberedForTheCallback(t *testing.T) {
 		return
 	}
 	t.Fatal("the connection came back missing from the list")
+}
+
+// The redirect URI is on the screen's own answer, because registering an
+// application at a service needs it and nothing else could supply it.
+//
+// It is the ONE field at the far end that cannot be guessed: OAuth matches it
+// character for character, and until this was returned the only way to learn it
+// was to read our source. Asserted as the exact string the client sends at
+// authorize and exchange, because a listing that returned some other correct
+// looking address would be worse than returning none.
+func TestTheConnectionsScreenCarriesTheRedirectURI(t *testing.T) {
+	env := newTestEnv(t)
+	env.createUser("admin@acme.test", "dev-Passw0rd!", model.PermSuperuser)
+	token, _ := env.login("admin@acme.test", "dev-Passw0rd!")
+
+	rec := env.do(http.MethodGet, "/v1/mcp-servers", token, nil)
+	env.expectStatus(rec, http.StatusOK)
+
+	var screen mcpConnectionsBody
+	env.decode(rec, &screen)
+
+	want := env.app.MCPRedirectURI()
+	if want == "" {
+		t.Fatal("this deployment has no redirect URI at all")
+	}
+	if screen.CallbackURL != want {
+		t.Fatalf("the screen offers %q to paste, but the client sends %q", screen.CallbackURL, want)
+	}
+	if !strings.HasSuffix(screen.CallbackURL, "/connect/mcp/callback") {
+		t.Fatalf("the redirect URI does not point at the callback: %q", screen.CallbackURL)
+	}
 }

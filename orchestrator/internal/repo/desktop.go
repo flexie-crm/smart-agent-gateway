@@ -64,7 +64,15 @@ func (s *Server) installerFor(edition, platform string) *installer {
 // Empty when it cannot be read, and the page then says nothing about a version,
 // which is better than saying a wrong one.
 func (s *Server) publishedVersion(edition, platform string) string {
-	raw, err := os.ReadFile(filepath.Join(s.dir, updatesDir, edition+"-"+manifestOS(platform)+"-x86_64.json"))
+	// Through a root, for the same reason latestRelease reads through one: the
+	// manifest directory is a boundary, not a convention.
+	root, err := os.OpenRoot(filepath.Join(s.dir, updatesDir))
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = root.Close() }()
+
+	raw, err := root.ReadFile(edition + "-" + manifestOS(platform) + "-x86_64.json")
 	if err != nil {
 		return ""
 	}

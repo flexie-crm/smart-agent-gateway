@@ -6,6 +6,7 @@ package agent
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -56,10 +57,17 @@ type Runner struct {
 	// a mode and calls what it finds; it does not know which it has, which is
 	// what stops a new mode being a new branch in every path that touches one.
 	handoffs map[string]Handoff
+	// cardSecret turns a park's stored seed into the token a person answers
+	// with. See TokenFromSeed.
+	cardSecret []byte
 }
 
-func NewRunner(st store.Store, gw *provider.Gateway, log zerolog.Logger) *Runner {
-	r := &Runner{store: st, gateway: gw, log: log}
+// cardSecret is what a park's seed is turned into a token with. It is the
+// deployment's own secret, held here because the park is created here; the two
+// other places that deliver a card derive the same token from the same secret
+// (TokenFromSeed).
+func NewRunner(st store.Store, gw *provider.Gateway, log zerolog.Logger, cardSecret []byte) *Runner {
+	r := &Runner{store: st, gateway: gw, log: log, cardSecret: cardSecret}
 	r.memory = newMemoryQueue(r.distill, log)
 	// Registered here rather than discovered: what a build can do is a list
 	// somebody can read, not something assembled by import side effects.
@@ -122,6 +130,13 @@ type Turn struct {
 	// application concern (which model, which rules) and the loop is not the
 	// place that decides any of it.
 	ReadAttachments func(ctx context.Context, workspaceID int64, ids []string) string
+	// ContextUsed hears how much of the model's window the conversation takes,
+	// in the characters the trim counts: before every step, which is what that
+	// step is about to send, and once more when the answer is in. baseChars is
+	// the part that is not the conversation (the system prompt and the tools).
+	// Nil measures nothing. Attached to every turn where turns are started
+	// (run.Manager), so no way into a conversation can forget it.
+	ContextUsed func(m *model.AIModel, chars, baseChars int)
 	// SystemPrompt and Tools are the resolved profile: what the layered
 	// configuration decided this turn is, for this person, on this channel.
 	SystemPrompt string
@@ -193,8 +208,23 @@ type Turn struct {
 	// DelegationID is the row THIS turn is running as, when it is an agent's own
 	// turn rather than the Gateway's. It is stamped onto any card the agent
 	// raises, so an answer comes back to the member that asked (a batch's members
-	// share one parent call, and nothing else tells them apart).
+	// share one parent call, and nothing else tells them apart). It is written on
+	// each of the agent's steps too, for the same reason.
 	DelegationID int64
+	// StepChanged hears that one of this agent's steps was written, or that one
+	// of its tool calls finished, by the step's row id. It is how somebody
+	// watching a detached agent sees it move; the app decides how the news
+	// travels, because only the app knows whether this is running beside the
+	// person's socket or on a worker. Nil for every other turn.
+	StepChanged func(stepID int64)
+}
+
+// stepChanged tells whoever is watching this agent that a step moved. The
+// hook is optional, and a step with no row yet has nothing to point at.
+func (t Turn) stepChanged(stepID int64) {
+	if t.StepChanged != nil && stepID != 0 {
+		t.StepChanged(stepID)
+	}
 }
 
 // ServerInitiated reports whether this turn has no request behind it.
@@ -399,6 +429,9 @@ func (r *Runner) loop(
 		if err := r.foldInWhatWasSaid(ctx, turn, &messages, out); err != nil {
 			r.log.Error().Err(err).Msg("could not add what was said mid-turn")
 		}
+		// Measured here, whole, before the trim: this is how full the
+		// conversation is, which is the thing the person is shown.
+		measureContext(turn, resolved, messages, tools)
 
 		req := resolved.Prepare(provider.GenerateRequest{
 			Messages:  messages,
@@ -468,6 +501,9 @@ func (r *Runner) loop(
 			if len(messages) > heardLate {
 				continue
 			}
+			// Once more with the answer in, which is how full the conversation
+			// is when the person reads it and decides what to do next.
+			measureContext(turn, resolved, messages, tools)
 			return answer{Content: step.Text, Reasoning: step.Reasoning}, nil
 		}
 
@@ -520,6 +556,7 @@ func (r *Runner) loop(
 				}
 				if terminal {
 					r.settleUnreached(ctx, turn, step.ToolCalls[index+1:])
+					r.recordTerminalAnswer(ctx, turn, terminalAnswer)
 					return answer{Content: terminalAnswer}, nil
 				}
 				messages = append(messages, provider.Message{
@@ -643,6 +680,34 @@ func (r *Runner) stoppedShort(ctx context.Context, turn Turn, limit int) (answer
 		r.log.Error().Err(err).Int64("session_id", turn.SessionID).Msg("record the limit notice")
 	}
 	return answer{Content: said}, nil
+}
+
+// recordTerminalAnswer writes an agent's answer down as the turn's last word.
+//
+// In terminal mode the agent's answer IS the turn's answer, and it was only
+// ever streamed. The agent's own steps are neither shown on a reload
+// (api/chat.go) nor read back into the Gateway's transcript (GatewaySteps), and
+// nothing else wrote the words, so a reload showed the person's prompt and a
+// delegate row that cannot be opened. Recorded the way stoppedShort records its
+// own notice.
+func (r *Runner) recordTerminalAnswer(ctx context.Context, turn Turn, text string) {
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	seq, err := r.store.Agent().NextSeq(ctx, turn.SessionID)
+	if err != nil {
+		r.log.Error().Err(err).Int64("session_id", turn.SessionID).Msg("next step for the terminal answer")
+		return
+	}
+	if err := r.store.Agent().SaveStep(ctx, &model.AgentStep{
+		SessionID: turn.SessionID,
+		Seq:       seq,
+		Kind:      model.StepAssistant,
+		Text:      text,
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		r.log.Error().Err(err).Int64("session_id", turn.SessionID).Msg("record the terminal answer")
+	}
 }
 
 // assistantMessage is the model-facing shape of a step the loop just produced.
@@ -855,7 +920,7 @@ func (r *Runner) streamStep(
 
 		case provider.EventUsage:
 			if event.Usage != nil {
-				r.recordModelCall(ctx, turn, resolved, started, *event.Usage)
+				r.recordModelCall(ctx, turn, resolved, started, *event.Usage, req)
 			}
 
 		case provider.EventError:
@@ -960,8 +1025,19 @@ func (r *Runner) fail(ctx context.Context, turn Turn, out *chat.Stream, message 
 	return errFailed
 }
 
-func (r *Runner) recordModelCall(ctx context.Context, turn Turn, resolved *provider.Resolved, started time.Time, usage provider.Usage) {
+// recordModelCall keeps what a call cost, and what it teaches about the model:
+// the characters sent (sent is the request exactly as it went, after the trim)
+// beside the tokens the vendor reported for them. That pair is added to the
+// model's running totals, which is how its rate is known (provider.CharsPerToken).
+func (r *Runner) recordModelCall(ctx context.Context, turn Turn, resolved *provider.Resolved, started time.Time, usage provider.Usage, sent provider.GenerateRequest) {
+	chars := int64(sentChars(sent))
+	if provider.Measurable(chars, usage.InputTokens) {
+		if err := r.store.AIModels().MeasureTokens(ctx, resolved.Model.ID, chars, usage.InputTokens, provider.MeasureKeep); err != nil {
+			r.log.Warn().Err(err).Int64("model_id", resolved.Model.ID).Msg("measure the model's tokens")
+		}
+	}
 	err := r.store.Agent().RecordModelCall(ctx, &model.ModelCall{
+		InputChars:   chars,
 		WorkspaceID:  turn.WorkspaceID,
 		SessionID:    turn.SessionID,
 		ModelID:      resolved.Model.ID,
@@ -1067,6 +1143,14 @@ func (r *Runner) buildTranscript(ctx context.Context, turn Turn) ([]provider.Mes
 	// its result, and the agent's steps (now durable, so they can rebuild an
 	// interrupted delegation) would be a second, confusing copy of the same work.
 	steps = GatewaySteps(steps)
+	// A compacted conversation is read from its newest summary onward: the
+	// summary where the steps it covers were, then every step after it in full.
+	// The steps it covers are still stored and still shown; the model is sent
+	// the summary instead of them.
+	summary, steps, err := r.sinceSummary(ctx, turn.SessionID, steps)
+	if err != nil {
+		return nil, err
+	}
 	// What the person attached becomes part of what they said, for the model.
 	// It is composed here rather than stored on the step so the chat keeps
 	// showing the person's own words; the account it is built from was written
@@ -1075,7 +1159,7 @@ func (r *Runner) buildTranscript(ctx context.Context, turn Turn) ([]provider.Mes
 	r.withAttachments(ctx, turn, steps)
 	// A resumed turn has already written the result of the call it was waiting
 	// on, so nothing needs skipping: the transcript is whole.
-	return conversation(turn.SystemPrompt, steps, ""), nil
+	return withSummary(conversation(turn.SystemPrompt, steps, ""), summary), nil
 }
 
 // GatewaySteps keeps only the conversation's own steps, dropping the inner steps
@@ -1182,20 +1266,38 @@ func narration(byName map[string]tool.Schema, name string) string {
 	return ""
 }
 
-// newToken mints a confirmation token and the hash stored against it. The
-// token itself is never persisted, so a leaked database cannot approve
-// anything.
-// NewToken mints a fresh confirmation token and its hash. It is how a reload
-// re-issues a card whose original token was never stored, only hashed.
-func NewToken() (token, hash string, err error) { return newToken() }
-
-func newToken() (token, hash string, err error) {
+// NewTokenSeed mints the seed a card's token is derived from. It is stored on
+// the park; the token itself still never is.
+func NewTokenSeed() (string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
-		return "", "", fmt.Errorf("agent: read random: %w", err)
+		return "", fmt.Errorf("agent: read random: %w", err)
 	}
-	token = "sag_cf_" + base64.RawURLEncoding.EncodeToString(raw)
-	return token, HashToken(token), nil
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+// TokenFromSeed derives a card's token, and is the whole reason the seed
+// exists: every delivery of one card derives the SAME token.
+//
+// A token used to be minted per delivery, because only its hash was stored and
+// a second delivery could not reproduce the first. So the second delivery
+// replaced the first token, and a card already on somebody's screen stopped
+// working: their click answered 410 and nothing happened. On the approval path
+// that is the worst failure there is, because the person is told nothing and
+// the action they allowed does not run.
+//
+// Deriving it costs nothing and removes the problem rather than coordinating
+// around it: three places deliver a card and none of them can now invalidate
+// another.
+//
+// The secret is what keeps this safe. A seed read out of the database approves
+// nothing on its own, exactly as a hash did: it takes the server's secret to
+// turn a seed into a token. Single use is unchanged, and was never the token's
+// job anyway: it is the park's status, claimed atomically.
+func TokenFromSeed(secret []byte, seed string) string {
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(seed))
+	return "sag_cf_" + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
 // HashToken is how a presented confirmation token is looked up.

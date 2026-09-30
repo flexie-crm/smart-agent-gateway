@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"flexie.io/sag/internal/agent"
@@ -26,6 +27,7 @@ import (
 	"flexie.io/sag/internal/store"
 	"flexie.io/sag/internal/tool"
 	"flexie.io/sag/internal/tools"
+	"flexie.io/sag/internal/tools/apitool"
 	"flexie.io/sag/internal/tools/machine"
 	"flexie.io/sag/internal/tools/query"
 	"flexie.io/sag/internal/tools/sshtool"
@@ -63,6 +65,11 @@ type App struct {
 	// App in a process.
 	trust            *machineTrust
 	machineTrustOnce sync.Mutex
+	// signIns holds one lock per custom tool whose sign-in a person gave, so a
+	// renewal happens once however many bindings of the tool ask at the same
+	// moment. A refresh token that rotates works once, and presenting it twice
+	// is what an authorization server treats as theft (toolGrant.renew).
+	signIns sync.Map // tool id -> *sync.Mutex
 	// Files keeps the bytes somebody uploaded. The rows are in Store; this is
 	// only where the bytes live.
 	Files   *filestore.Store
@@ -108,6 +115,14 @@ type App struct {
 	// bg owns the goroutines that run background-mode delegations (Mode C,
 	// KB/27): the server drains it (RunBackground), the worker never starts it.
 	bg *backgroundManager
+	// compactions owns the conversation summaries being written in the
+	// background: drained and stopped with everything else at shutdown.
+	compactions *compactions
+	// watchingAgents is set once this process runs the listener that pushes an
+	// agent's steps to whoever has it open (WatchAgents). An agent running
+	// here then tells of its steps on the bus; one running anywhere else has
+	// to send them over the queue.
+	watchingAgents atomic.Bool
 	// ssh is the SSH tool template, held because it owns live connections to the
 	// servers its tools work on. Shutdown closes them.
 	ssh interface{ Close() }
@@ -260,16 +275,23 @@ func New(cfg *config.Config, log zerolog.Logger, st store.Store) (*App, error) {
 	ssh := sshtool.New(machines)
 	a.Templates.Add(ssh)
 	a.ssh = ssh
+	// One configured HTTP API is one tool. It holds nothing between calls, so
+	// unlike the SSH template there is nothing here to close at shutdown.
+	a.Templates.Add(apitool.New(machines))
 
-	a.Agent = agent.NewRunner(st, a.Gateway, log)
+	a.Agent = agent.NewRunner(st, a.Gateway, log, cfg.SessionSecret)
 	// A turn belongs to the run manager, not to the request that asked for it.
 	a.Runs = run.NewManager(st, a.Agent, a.Said, log)
 	// Background delegations run as goroutines this owns; the manager needs the
 	// runner and the run manager, which now exist.
 	a.bg = newBackgroundManager(a, log)
+	a.compactions = newCompactions()
 	// A completion turn has no request behind it, so the run manager tells us when
 	// one starts and we nudge the person's tabs to attach (KB/27).
 	a.Runs.OnServerTurn(a.notifyServerTurn)
+	// Every turn says how full its conversation is; this keeps it and tells the
+	// person's tabs.
+	a.Runs.OnContext(a.recordContextUse)
 
 	a.WS = ws.NewHub(log, validate, originHosts(cfg.AllowedOrigins))
 

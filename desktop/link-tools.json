@@ -1,10 +1,13 @@
 {
+  "browser": 3,
   "current_time": 1,
   "edit_file": 2,
   "find_files": 1,
   "machine_info": 1,
   "read_file": 1,
   "search_files": 1,
+  "skill_install": 1,
+  "skill_run": 1,
   "terminal": 3,
   "write_file": 2
 }

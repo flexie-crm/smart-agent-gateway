@@ -45,6 +45,14 @@ type AgentDelegation struct {
 	ParentToolCallID string
 	AgentKey         string
 	Mode             string
+	// DeviceID is which of the person's computers this agent may act on.
+	//
+	// Stored for the same reason Task is: a background delegation outlives the
+	// process, recovery restarts it from this row with no request to ask, and
+	// without the device it comes back with every machine tool missing rather
+	// than merely failing (machine.Offers answers nil for an empty device and
+	// the loadout drops the tools). Empty for a run with no computer behind it.
+	DeviceID string
 	// FleetID is set when this delegation is one of a batch the Gateway asked
 	// for in a single call, and nil when it stands alone. It is the only thing
 	// that makes a fleet member different from any other delegation.
@@ -217,6 +225,11 @@ type AgentStep struct {
 	// them on resume.
 	AgentKey         string
 	ParentToolCallID string
+	// DelegationID is the one agent run this step belongs to, zero for a step
+	// that belongs to none (the Gateway's own, or a synchronous agent's). The
+	// key and the parent call cannot say it for a fleet: its members share one
+	// parent call, and the same agent can be given several of its tasks.
+	DelegationID int64
 
 	// Attachments are the public ids of the files sent WITH this message, on a
 	// user step. Ids rather than the account of what they contain: that account
@@ -307,10 +320,51 @@ type ModelCall struct {
 	ModelID      int64
 	InputTokens  int64
 	OutputTokens int64
-	DurationMS   int64
-	Status       string
-	ErrorText    string
-	CreatedAt    time.Time
+	// InputChars is the characters sent, measured the way the trim measures
+	// them, beside the tokens the vendor reported for the same request. Zero
+	// when a request carried files, whose characters say nothing about tokens.
+	InputChars int64
+	DurationMS int64
+	Status     string
+	ErrorText  string
+	CreatedAt  time.Time
+}
+
+// Compaction is a summary that stands in for the start of a conversation when
+// the model is shown it.
+//
+// It covers every step up to and including ThroughSeq. The next turn is built
+// from the newest one and every step after it, so the model reads the summary
+// where it would have read those steps. The steps themselves are untouched:
+// what the chat shows is what was said, and this changes only what the model is
+// sent. A newer summary is written from the one before it, so the newest is the
+// only one ever read.
+type Compaction struct {
+	ID         int64
+	SessionID  int64
+	ThroughSeq int
+	Summary    string
+	// Vendor and Model are what wrote it, frozen as text the way a step records
+	// what answered it, so the record survives the model being removed.
+	Vendor string
+	Model  string
+	Authored
+	CreatedAt time.Time
+}
+
+// ContextUse is how much of its model's context window a conversation took when
+// it was last measured, in the characters the trim counts (KB/10).
+//
+// The model is kept rather than a percentage, so the percentage is worked out
+// against the window as it is set when somebody looks. Zero ModelID is a
+// conversation never measured, or whose model has since been removed.
+type ContextUse struct {
+	ModelID int64
+	// Chars is everything a request carries: the messages and the tools.
+	Chars int
+	// BaseChars is the part that does not come from the conversation: the
+	// system prompt and the tools. It is what a compaction adds its summary to.
+	BaseChars int
 }
 
 // Park statuses. A background agent's card waits as Queued behind a live
@@ -337,13 +391,27 @@ const (
 // re-resolves the profile and the permissions live: revoking a tool while the
 // card is on screen revokes it, and approving is not a way around that.
 type ParkSnapshot struct {
-	ID          int64
-	TokenHash   string
+	ID        int64
+	TokenHash string
+	// TokenSeed is what the card's token is derived from (agent.TokenFromSeed).
+	// Stored so that every delivery of one card hands over the same token; the
+	// token itself is still never stored, and the seed alone approves nothing.
+	TokenSeed   string
 	WorkspaceID int64
 	SessionID   int64
 	UserID      int64
 	AgentID     *int64
 	ModelID     int64
+	// DeviceID is the computer this call was prepared for, when it was prepared
+	// for one.
+	//
+	// It belongs to the PARK rather than to whoever answers the card, and both
+	// halves of that matter. The card is redrawn from here on a reload, and a
+	// tool that runs on somebody's machine has no schema to draw from without
+	// it, so the card vanished. And the approved call runs here, so taking the
+	// computer from the request meant approving on a second machine ran the
+	// command on that one: where it runs was part of what was approved.
+	DeviceID string
 	// The prepared call: what will run, unchanged, the moment a person says yes.
 	ToolName   string
 	ToolCallID string

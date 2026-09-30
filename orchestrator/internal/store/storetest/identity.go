@@ -13,7 +13,7 @@ import (
 func mustWorkspace(t *testing.T, st store.Store, slug string) *model.Workspace {
 	t.Helper()
 	w := &model.Workspace{Slug: slug, Name: slug}
-	if err := st.Workspaces().Create(ctx(), w); err != nil {
+	if err := st.Workspaces().Create(ctx(), w, model.Nobody()); err != nil {
 		t.Fatalf("create workspace: %v", err)
 	}
 	return w
@@ -25,7 +25,7 @@ func mustWorkspace(t *testing.T, st store.Store, slug string) *model.Workspace {
 func mustUser(t *testing.T, st store.Store, wsID int64, email string) *model.User {
 	t.Helper()
 	u := &model.User{Email: email, Name: email, PasswordHash: "hash"}
-	if err := st.Users().Create(ctx(), u); err != nil {
+	if err := st.Users().Create(ctx(), u, model.Nobody()); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 	if err := st.Workspaces().SetMembers(ctx(), u.ID, []int64{wsID}); err != nil {
@@ -37,7 +37,7 @@ func mustUser(t *testing.T, st store.Store, wsID int64, email string) *model.Use
 func mustGroup(t *testing.T, st store.Store, wsID int64, name string) *model.Group {
 	t.Helper()
 	g := &model.Group{WorkspaceID: wsID, Name: name}
-	if err := st.Groups().Create(ctx(), g); err != nil {
+	if err := st.Groups().Create(ctx(), g, model.Nobody()); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 	return g
@@ -46,7 +46,7 @@ func mustGroup(t *testing.T, st store.Store, wsID int64, name string) *model.Gro
 func mustRole(t *testing.T, st store.Store, wsID int64, name string, perms []string) *model.Role {
 	t.Helper()
 	r := &model.Role{WorkspaceID: wsID, Name: name, Permissions: perms}
-	if err := st.Roles().Create(ctx(), r); err != nil {
+	if err := st.Roles().Create(ctx(), r, model.Nobody()); err != nil {
 		t.Fatalf("create role: %v", err)
 	}
 	return r
@@ -77,7 +77,7 @@ func testWorkspaces(t *testing.T, st store.Store) {
 	}
 	// The slug is the tenant key: a duplicate must be rejected, not
 	// silently create a second workspace.
-	if err := st.Workspaces().Create(ctx(), &model.Workspace{Slug: "acme", Name: "Other"}); !errors.Is(err, store.ErrConflict) {
+	if err := st.Workspaces().Create(ctx(), &model.Workspace{Slug: "acme", Name: "Other"}, model.Nobody()); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("expected ErrConflict on duplicate slug, got %v", err)
 	}
 }
@@ -89,7 +89,7 @@ func testWorkspaceAdministration(t *testing.T, st store.Store) {
 	// Update writes what it says: name, slug, description, and the status switch.
 	acme.Name, acme.Slug, acme.Status = "Acme Corp", "acme-corp", model.StatusSuspended
 	acme.Description = "Everything the sales team touches."
-	if err := st.Workspaces().Update(ctx(), acme); err != nil {
+	if err := st.Workspaces().Update(ctx(), acme, model.Nobody()); err != nil {
 		t.Fatalf("update workspace: %v", err)
 	}
 	got, err := st.Workspaces().GetByID(ctx(), acme.ID)
@@ -102,19 +102,19 @@ func testWorkspaceAdministration(t *testing.T, st store.Store) {
 
 	// The slug stays the tenant key on update too.
 	acme.Slug = "globex"
-	if err := st.Workspaces().Update(ctx(), acme); !errors.Is(err, store.ErrConflict) {
+	if err := st.Workspaces().Update(ctx(), acme, model.Nobody()); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("expected ErrConflict on duplicate slug, got %v", err)
 	}
 
 	// Updating a workspace that is not there says so.
 	missing := &model.Workspace{ID: 999999, Slug: "missing", Name: "Missing", Status: model.StatusActive}
-	if err := st.Workspaces().Update(ctx(), missing); !errors.Is(err, store.ErrNotFound) {
+	if err := st.Workspaces().Update(ctx(), missing, model.Nobody()); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 
 	// AddMember grants one workspace without replacing the person's list.
 	acme.Slug, acme.Status = "acme-corp", model.StatusActive
-	if err := st.Workspaces().Update(ctx(), acme); err != nil {
+	if err := st.Workspaces().Update(ctx(), acme, model.Nobody()); err != nil {
 		t.Fatalf("reactivate workspace: %v", err)
 	}
 	u := mustUser(t, st, globex.ID, "one@acme.test")
@@ -164,7 +164,7 @@ func testUsers(t *testing.T, st store.Store) {
 
 	u.Name = "Renamed"
 	u.Status = model.StatusDisabled
-	if err := st.Users().Update(ctx(), u); err != nil {
+	if err := st.Users().Update(ctx(), u, model.Nobody()); err != nil {
 		t.Fatalf("update user: %v", err)
 	}
 	got, err = st.Users().GetByID(ctx(), u.ID)
@@ -175,17 +175,17 @@ func testUsers(t *testing.T, st store.Store) {
 	// Re-applying identical values must succeed: MySQL reports zero
 	// affected rows for an unchanged UPDATE, which must not be read as
 	// "row missing".
-	if err := st.Users().Update(ctx(), got); err != nil {
+	if err := st.Users().Update(ctx(), got, model.Nobody()); err != nil {
 		t.Fatalf("no-op update must succeed: %v", err)
 	}
 
-	if err := st.Users().UpdatePassword(ctx(), u.ID, "new-hash"); err != nil {
+	if err := st.Users().UpdatePassword(ctx(), u.ID, "new-hash", model.Nobody()); err != nil {
 		t.Fatalf("update password: %v", err)
 	}
-	if err := st.Users().UpdatePassword(ctx(), u.ID, "new-hash"); err != nil {
+	if err := st.Users().UpdatePassword(ctx(), u.ID, "new-hash", model.Nobody()); err != nil {
 		t.Fatalf("no-op password update must succeed: %v", err)
 	}
-	if err := st.Users().UpdatePassword(ctx(), 999999, "x"); !errors.Is(err, store.ErrNotFound) {
+	if err := st.Users().UpdatePassword(ctx(), 999999, "x", model.Nobody()); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("password update for unknown user must report ErrNotFound, got %v", err)
 	}
 	if got, _ = st.Users().GetByID(ctx(), u.ID); got.PasswordHash != "new-hash" {
@@ -213,7 +213,7 @@ func testUserUniqueness(t *testing.T, st store.Store) {
 
 	err := st.Users().Create(ctx(), &model.User{
 		Email: "same@example.test", Name: "Dup", PasswordHash: "h",
-	})
+	}, model.Nobody())
 	if !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("expected ErrConflict for a duplicate email, got %v", err)
 	}
@@ -225,7 +225,7 @@ func testWorkspaceMembership(t *testing.T, st store.Store) {
 	acme := mustWorkspace(t, st, "acme")
 	globex := mustWorkspace(t, st, "globex")
 	closed := &model.Workspace{Slug: "closed", Name: "closed", Status: "suspended"}
-	if err := st.Workspaces().Create(ctx(), closed); err != nil {
+	if err := st.Workspaces().Create(ctx(), closed, model.Nobody()); err != nil {
 		t.Fatalf("create suspended workspace: %v", err)
 	}
 	user := mustUser(t, st, acme.ID, "member@acme.test")
@@ -376,17 +376,17 @@ func testGroups(t *testing.T, st store.Store) {
 	}
 
 	g.Name = "Sales EMEA"
-	if err := st.Groups().Update(ctx(), g); err != nil {
+	if err := st.Groups().Update(ctx(), g, model.Nobody()); err != nil {
 		t.Fatalf("update group: %v", err)
 	}
 	if got, _ = st.Groups().GetByID(ctx(), ws.ID, g.ID); got.Name != "Sales EMEA" {
 		t.Fatalf("group rename not persisted: %+v", got)
 	}
 	// Unchanged UPDATE must not be mistaken for a missing row.
-	if err := st.Groups().Update(ctx(), g); err != nil {
+	if err := st.Groups().Update(ctx(), g, model.Nobody()); err != nil {
 		t.Fatalf("no-op group update must succeed: %v", err)
 	}
-	if err := st.Groups().Update(ctx(), &model.Group{ID: 999999, WorkspaceID: ws.ID, Name: "X"}); !errors.Is(err, store.ErrNotFound) {
+	if err := st.Groups().Update(ctx(), &model.Group{ID: 999999, WorkspaceID: ws.ID, Name: "X"}, model.Nobody()); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("update of unknown group must report ErrNotFound, got %v", err)
 	}
 
@@ -396,7 +396,7 @@ func testGroups(t *testing.T, st store.Store) {
 		t.Fatalf("list groups: %v (%d)", err, len(list))
 	}
 
-	if err := st.Groups().Create(ctx(), &model.Group{WorkspaceID: ws.ID, Name: "Support"}); !errors.Is(err, store.ErrConflict) {
+	if err := st.Groups().Create(ctx(), &model.Group{WorkspaceID: ws.ID, Name: "Support"}, model.Nobody()); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("expected ErrConflict on duplicate group name, got %v", err)
 	}
 
@@ -539,7 +539,7 @@ func testRoles(t *testing.T, st store.Store) {
 		t.Fatalf("list roles must include permissions: %v %+v", err, list)
 	}
 
-	if err := st.Roles().Create(ctx(), &model.Role{WorkspaceID: ws.ID, Name: "Ops"}); !errors.Is(err, store.ErrConflict) {
+	if err := st.Roles().Create(ctx(), &model.Role{WorkspaceID: ws.ID, Name: "Ops"}, model.Nobody()); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("expected ErrConflict on duplicate role name, got %v", err)
 	}
 
@@ -570,7 +570,7 @@ func testRolePermissionReplacement(t *testing.T, st store.Store) {
 	// Update replaces the whole set: removed permissions must disappear.
 	r.Name = "Ops 2"
 	r.Permissions = []string{model.PermGroupsView}
-	if err := st.Roles().Update(ctx(), r); err != nil {
+	if err := st.Roles().Update(ctx(), r, model.Nobody()); err != nil {
 		t.Fatalf("update role: %v", err)
 	}
 	got, err := st.Roles().GetByID(ctx(), ws.ID, r.ID)
@@ -586,7 +586,7 @@ func testRolePermissionReplacement(t *testing.T, st store.Store) {
 
 	// Clearing permissions leaves an empty set, not the old one.
 	r.Permissions = nil
-	if err := st.Roles().Update(ctx(), r); err != nil {
+	if err := st.Roles().Update(ctx(), r, model.Nobody()); err != nil {
 		t.Fatalf("clear permissions: %v", err)
 	}
 	if got, _ = st.Roles().GetByID(ctx(), ws.ID, r.ID); len(got.Permissions) != 0 {

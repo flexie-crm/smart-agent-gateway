@@ -2,6 +2,7 @@ package storetest
 
 import (
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 
@@ -427,5 +428,90 @@ func testResolveToolCallKnowsItsRow(t *testing.T, st store.Store) {
 	orphan := &model.ToolCall{SessionID: chat.ID, WorkspaceID: ws.ID, ToolCallID: "never-started", ToolName: "terminal"}
 	if err := st.Agent().ResolveToolCall(ctx(), orphan); err == nil {
 		t.Fatal("resolving a call with no row was allowed")
+	}
+}
+
+// A conversation's summaries: the newest is the one read, one conversation's is
+// never another's, and a conversation never compacted says so rather than
+// answering with nothing.
+func testCompactions(t *testing.T, st store.Store) {
+	ws := mustWorkspace(t, st, "acme")
+	user := mustUser(t, st, ws.ID, "u@acme.test")
+	chat := mustChat(t, st, ws.ID, user.ID, "Long one")
+	other := mustChat(t, st, ws.ID, user.ID, "Another")
+
+	if _, err := st.Agent().LatestCompaction(ctx(), chat.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("a conversation never compacted answered %v, want ErrNotFound", err)
+	}
+
+	save := func(sessionID int64, through int, summary string) *model.Compaction {
+		t.Helper()
+		c := &model.Compaction{SessionID: sessionID, ThroughSeq: through, Summary: summary, Vendor: "a-vendor", Model: "a-model"}
+		c.Made(model.Actor{UserID: user.ID, Name: "A Person"})
+		if err := st.Agent().SaveCompaction(ctx(), c); err != nil {
+			t.Fatalf("save compaction: %v", err)
+		}
+		if c.ID == 0 || c.CreatedAt.IsZero() {
+			t.Fatalf("the saved summary was not stamped: %+v", c)
+		}
+		return c
+	}
+	save(chat.ID, 3, "the first summary")
+	second := save(chat.ID, 7, "the second summary")
+	save(other.ID, 99, "another conversation's summary")
+
+	latest, err := st.Agent().LatestCompaction(ctx(), chat.ID)
+	if err != nil {
+		t.Fatalf("latest compaction: %v", err)
+	}
+	if latest.ID != second.ID || latest.ThroughSeq != 7 || latest.Summary != "the second summary" {
+		t.Fatalf("the newest summary is not the one read: %+v", latest)
+	}
+	if latest.Vendor != "a-vendor" || latest.Model != "a-model" ||
+		latest.CreatedBy != user.ID || latest.CreatedByName != "A Person" {
+		t.Fatalf("the summary lost who asked for it or what wrote it: %+v", latest)
+	}
+}
+
+// How full a conversation is: the latest measurement replaces the last, a
+// conversation never measured reads as nothing, and removing the model forgets
+// which one it was rather than leaving a number against a window that is gone.
+func testContextUse(t *testing.T, st store.Store) {
+	ws := mustWorkspace(t, st, "acme")
+	user := mustUser(t, st, ws.ID, "u@acme.test")
+	chat := mustChat(t, st, ws.ID, user.ID, "Filling up")
+	vendor := mustVendor(t, st, ws.ID, "A vendor", nil)
+	first := mustAIModel(t, st, ws.ID, vendor.ID, "first")
+	second := mustAIModel(t, st, ws.ID, vendor.ID, "second")
+
+	if use, err := st.Agent().ContextUse(ctx(), chat.ID); err != nil || use != (model.ContextUse{}) {
+		t.Fatalf("a conversation never measured read as %+v (%v)", use, err)
+	}
+
+	set := func(use model.ContextUse) {
+		t.Helper()
+		if err := st.Agent().SetContextUse(ctx(), chat.ID, use); err != nil {
+			t.Fatalf("set context use: %v", err)
+		}
+	}
+	set(model.ContextUse{ModelID: first.ID, Chars: 1000, BaseChars: 400})
+	set(model.ContextUse{ModelID: second.ID, Chars: 2500, BaseChars: 600})
+	use, err := st.Agent().ContextUse(ctx(), chat.ID)
+	if err != nil {
+		t.Fatalf("context use: %v", err)
+	}
+	if use != (model.ContextUse{ModelID: second.ID, Chars: 2500, BaseChars: 600}) {
+		t.Fatalf("the latest measurement did not replace the last: %+v", use)
+	}
+
+	if err := st.AIModels().Delete(ctx(), ws.ID, second.ID); err != nil {
+		t.Fatalf("delete model: %v", err)
+	}
+	use, err = st.Agent().ContextUse(ctx(), chat.ID)
+	if err != nil {
+		t.Fatalf("context use: %v", err)
+	}
+	if use.ModelID != 0 {
+		t.Fatalf("the conversation still points at a deleted model: %+v", use)
 	}
 }

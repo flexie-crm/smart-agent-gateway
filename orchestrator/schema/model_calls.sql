@@ -9,6 +9,7 @@ CREATE TABLE `model_calls` (
   `status` enum('completed','failed') NOT NULL,
   `error_text` text DEFAULT NULL,
   `created_at` datetime(3) NOT NULL,
+  `input_chars` bigint(20) NOT NULL DEFAULT 0,
   PRIMARY KEY (`id`),
   KEY `idx_ws_created` (`workspace_id`,`created_at`),
   KEY `idx_session` (`session_id`),

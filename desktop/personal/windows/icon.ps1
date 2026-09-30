@@ -158,9 +158,75 @@ If the browser is missing: cd chat-ui; npx playwright install chromium
 		$w.Dispose()
 		$stream.Dispose()
 	}
+
+	# ------------------------------------------------------ the installer's own
+	# NSIS draws two pictures of its own: a strip across the top of the middle
+	# pages (150x57) and a panel down the left of the welcome and finish pages
+	# (164x314). Left unset, both are the default template's, and they are the
+	# first thing anybody sees of this product.
+	#
+	# BMP, because it is what NSIS reads, and 24-bit uncompressed because that is
+	# what the dialog blits: no alpha channel is honoured, so the mark is composed
+	# onto the page's own white here rather than carrying transparency that would
+	# come out as black. MUI's pages are white by default (MUI_BGCOLOR), so the
+	# strip has no visible edge.
+	#
+	# THE DIMENSIONS ARE NOT CHECKED BY ANYTHING DOWNSTREAM. A bitmap of the wrong
+	# size is stretched or clipped into the control with no error from makensis
+	# and no sign at run time beyond a picture that looks wrong, so they are
+	# written down once, here, and asserted after drawing.
+	Add-Type -AssemblyName System.Drawing
+
+	# What was actually written, read back off the file. It guards the format
+	# rather than the drawing: System.Drawing is asked for 24bpp and gives a BM
+	# with a 40-byte header and BI_RGB today, and this is what would say so on the
+	# day it stops.
+	function AssertBitmap($path, $width, $height) {
+		$bytes = [System.IO.File]::ReadAllBytes($path)
+		$signature = [char] $bytes[0] + [char] $bytes[1]
+		$w = [BitConverter]::ToInt32($bytes, 18)
+		$h = [BitConverter]::ToInt32($bytes, 22)
+		$bpp = [BitConverter]::ToInt16($bytes, 28)
+		$compression = [BitConverter]::ToInt32($bytes, 30)
+		if ($signature -ne 'BM') { throw "$path is not a bitmap" }
+		if ($w -ne $width -or $h -ne $height) { throw "$path is ${w}x${h}, and NSIS wants ${width}x${height}" }
+		if ($bpp -ne 24) { throw "$path is $bpp-bit; NSIS reads 24" }
+		if ($compression -ne 0) { throw "$path is compressed, and NSIS reads BI_RGB only" }
+	}
+
+	# The mark on a white field, at a size and a place. Rendered from the vector
+	# at the size it is drawn at, like every other size above, rather than
+	# resampled from one of the PNGs.
+	function Compose($width, $height, $mark, $x, $y, $path) {
+		$png = Join-Path $work "mark-$mark.png"
+		if (-not (Test-Path $png)) {
+			& node $render $detailed $png $mark
+			if ($LASTEXITCODE -ne 0) { throw "rendering the mark at $mark failed" }
+		}
+		$canvas = New-Object System.Drawing.Bitmap $width, $height, ([System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
+		try {
+			$paint = [System.Drawing.Graphics]::FromImage($canvas)
+			try {
+				$paint.Clear([System.Drawing.Color]::White)
+				$paint.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+				$drawn = [System.Drawing.Image]::FromFile($png)
+				try { $paint.DrawImage($drawn, $x, $y, $mark, $mark) } finally { $drawn.Dispose() }
+			} finally { $paint.Dispose() }
+			$canvas.Save($path, [System.Drawing.Imaging.ImageFormat]::Bmp)
+		} finally { $canvas.Dispose() }
+		AssertBitmap $path $width $height
+	}
+
+	# The strip: the mark at the strip's own height less a margin, hard left,
+	# where the eye starts. The page's title sits well to the right of it.
+	Compose 150 57 41 8 8 (Join-Path $icons 'header.bmp')
+	# And the panel: bigger, centred across the panel, high enough that the
+	# welcome text below it has room.
+	Compose 164 314 96 34 56 (Join-Path $icons 'sidebar.bmp')
 } finally {
 	Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host ("  {0}: {1} sizes ({2}), {3:N0} bytes, filling the frame" -f `
 	(Split-Path $Out -Leaf), 6, '16, 32, 48, 64, 128, 256', (Get-Item $Out).Length)
+Write-Host ("  header.bmp 150x57 and sidebar.bmp 164x314, 24-bit, in {0}" -f $icons)

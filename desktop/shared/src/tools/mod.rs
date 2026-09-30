@@ -13,10 +13,18 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod browser;
 pub mod clock;
 pub mod files;
 pub mod info;
+pub mod skill;
 pub mod terminal;
+/// Ending a process and everything it started, which on this platform is one
+/// object rather than a signal to a group. Shared by the terminal and by a
+/// skill's script, because writing the unsafe half twice is how two callers
+/// end up with two different bugs.
+#[cfg(windows)]
+pub(crate) mod windows_job;
 
 /// What the gateway sends: which tool, and the arguments the model gave.
 #[derive(Debug, Deserialize)]
@@ -64,23 +72,43 @@ pub struct Response {
 
 impl Response {
     pub fn ok(content: Value) -> Self {
-        Self { ok: true, content: Some(content), kind: "", message: String::new() }
+        Self {
+            ok: true,
+            content: Some(content),
+            kind: "",
+            message: String::new(),
+        }
     }
 
     /// The assistant called this wrongly: wrong arguments, a missing one, a
     /// path that is not a path. Worth telling it, because it can correct.
     pub fn bad_arguments(message: impl Into<String>) -> Self {
-        Self { ok: false, content: None, kind: "bad_arguments", message: message.into() }
+        Self {
+            ok: false,
+            content: None,
+            kind: "bad_arguments",
+            message: message.into(),
+        }
     }
 
     /// This computer would not: outside what it may touch, or turned off here.
     pub fn refused(message: impl Into<String>) -> Self {
-        Self { ok: false, content: None, kind: "denied", message: message.into() }
+        Self {
+            ok: false,
+            content: None,
+            kind: "denied",
+            message: message.into(),
+        }
     }
 
     /// It tried and could not. The file was locked, the disk was full.
     pub fn failed(message: impl Into<String>) -> Self {
-        Self { ok: false, content: None, kind: "failed", message: message.into() }
+        Self {
+            ok: false,
+            content: None,
+            kind: "failed",
+            message: message.into(),
+        }
     }
 }
 
@@ -96,11 +124,35 @@ pub fn runs() -> serde_json::Map<String, Value> {
     runs.insert(info::NAME.to_string(), Value::from(info::VERSION));
     runs.insert(clock::NAME.to_string(), Value::from(clock::VERSION));
     runs.insert(terminal::NAME.to_string(), Value::from(terminal::VERSION));
-    runs.insert(files::read::NAME.to_string(), Value::from(files::read::VERSION));
-    runs.insert(files::write::NAME.to_string(), Value::from(files::write::VERSION));
-    runs.insert(files::edit::NAME.to_string(), Value::from(files::edit::VERSION));
-    runs.insert(files::find::NAME.to_string(), Value::from(files::find::VERSION));
-    runs.insert(files::search::NAME.to_string(), Value::from(files::search::VERSION));
+    runs.insert(
+        files::read::NAME.to_string(),
+        Value::from(files::read::VERSION),
+    );
+    runs.insert(
+        files::write::NAME.to_string(),
+        Value::from(files::write::VERSION),
+    );
+    runs.insert(
+        files::edit::NAME.to_string(),
+        Value::from(files::edit::VERSION),
+    );
+    runs.insert(
+        files::find::NAME.to_string(),
+        Value::from(files::find::VERSION),
+    );
+    runs.insert(
+        files::search::NAME.to_string(),
+        Value::from(files::search::VERSION),
+    );
+    runs.insert(
+        skill::install::NAME.to_string(),
+        Value::from(skill::install::VERSION),
+    );
+    runs.insert(
+        skill::run::NAME.to_string(),
+        Value::from(skill::run::VERSION),
+    );
+    runs.insert(browser::NAME.to_string(), Value::from(browser::VERSION));
     runs
 }
 
@@ -164,7 +216,10 @@ mod calls {
         if let Some(known) = all.get(id) {
             return (known.clone(), true);
         }
-        let fresh = Call { answer: Arc::new(OnceCell::new()), at: Instant::now() };
+        let fresh = Call {
+            answer: Arc::new(OnceCell::new()),
+            at: Instant::now(),
+        };
         all.insert(id.to_string(), fresh.clone());
         (fresh, false)
     }
@@ -248,6 +303,12 @@ async fn dispatch(request: Request) -> Response {
         files::edit::NAME => files::edit::run(request.args).await,
         files::find::NAME => files::find::run(request.args).await,
         files::search::NAME => files::search::run(request.args).await,
+        // The two a skill is run with. Not abilities the assistant is offered:
+        // the gateway makes them on its own, which is why they are here and in
+        // no schema.
+        skill::install::NAME => skill::run_install(request.args).await,
+        skill::run::NAME => skill::run_script(request.args).await,
+        browser::NAME => browser::run(request.args).await,
         // A tool this build has never heard of. It should not be reachable (the
         // gateway offers only what was declared), so it is worth saying plainly
         // rather than failing vaguely.
@@ -278,6 +339,39 @@ pub(crate) fn test_workspace() -> &'static std::path::PathBuf {
     })
 }
 
+/// How many times the runtime got to do something else while `work` ran.
+///
+/// The link's control socket shares a runtime with everything the application
+/// does for the gateway, and has to answer the gateway's heartbeat while any of
+/// it works. Asked on a runtime with ONE thread, which is what `#[tokio::test]`
+/// gives, the answer does not depend on luck: work that holds the thread leaves
+/// this at exactly zero, and work handed to the blocking pool leaves the
+/// runtime free to count. On the application's runtime the same fault silenced
+/// the link in some runs and not others, which is why it looked random (KB/29).
+#[cfg(test)]
+pub(crate) async fn ticks_while<T>(work: impl std::future::Future<Output = T>) -> (T, usize) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let counting = ticks.clone();
+    let ticker = tokio::spawn(async move {
+        loop {
+            counting.fetch_add(1, Ordering::Relaxed);
+            tokio::task::yield_now().await;
+        }
+    });
+    // Started before the work is, so that zero means it was STOPPED rather
+    // than that it never began.
+    while ticks.load(Ordering::Relaxed) == 0 {
+        tokio::task::yield_now().await;
+    }
+    let before = ticks.load(Ordering::Relaxed);
+    let answer = work.await;
+    let during = ticks.load(Ordering::Relaxed) - before;
+    ticker.abort();
+    (answer, during)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,8 +391,19 @@ mod tests {
         crate::tools::test_workspace();
 
         let ask = |id: &str| {
+            // Wait, append, print: the same three steps in either shell. The
+            // wait has to outlast the second arrival, which is what makes this
+            // a race rather than a queue. cmd waits with `ping` because
+            // `timeout` refuses a redirected stdin, which is exactly what this
+            // tool hands it.
+            #[cfg(not(windows))]
             let command = format!(
                 "sleep 1; echo ran >> {}; echo done",
+                marks.to_string_lossy()
+            );
+            #[cfg(windows)]
+            let command = format!(
+                "ping -n 2 127.0.0.1 >nul & echo ran >> {} & echo done",
                 marks.to_string_lossy()
             );
             let id = id.to_string();
@@ -409,9 +514,10 @@ mod contract {
 
     #[test]
     fn this_half_speaks_what_the_contract_says() {
-        let agreed: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(include_str!("../../../link-tools.json"))
-                .expect("link-tools.json is not valid JSON");
+        let agreed: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../link-tools.json")),
+        )
+        .expect("link-tools.json is not valid JSON");
         let speaks = super::runs();
 
         for (tool, version) in &agreed {

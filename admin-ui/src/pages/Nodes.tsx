@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { CheckboxField } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Field, Modal } from '@/components/ui/modal'
+import { LOCAL_ENGINE } from '@/lib/api'
 import { useFormErrors } from '@/lib/form'
 import { useNotify } from '@/lib/notify'
 import { api, useResource } from '@/lib/resources'
@@ -71,7 +72,18 @@ function isThisComputer(address: string | undefined): boolean {
   }
 }
 
-const INFERENCE = 'Models that run on hardware we own: this computer, and any machine added to it.'
+/**
+ * What this screen is about, which is not the same sentence everywhere.
+ *
+ * This computer is one of the machines only where an engine shipped inside the
+ * application. On a build that carries none, saying so is a claim the screen
+ * then contradicts: the server does not send this computer at all there
+ * (app.Nodes), so the sentence would name a machine that is not in the list
+ * under it.
+ */
+const INFERENCE = LOCAL_ENGINE
+  ? 'Models that run on hardware we own: this computer, and any machine added to it.'
+  : 'Models that run on hardware we own: any machine added here.'
 
 /* --- the machines ---------------------------------------------------------- */
 

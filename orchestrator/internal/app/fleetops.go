@@ -83,8 +83,12 @@ func (f *fleetRuns) cancel(fleetID int64) int {
 	return len(stops)
 }
 
-// RunFleetOps listens for instructions about work this process is doing. The
-// worker owns it; the server, which runs no fleet members, has nothing to stop.
+// RunFleetOps listens for instructions about work this process is doing.
+//
+// The worker owns it. The server does run some members itself now, the ones
+// holding a tool that reaches the person's own computer, but it does not need
+// this: it is the process that SENDS the cancellation, and it stops those
+// directly (CancelFleet).
 func (a *App) RunFleetOps(ctx context.Context) {
 	if a.Queue == nil {
 		return

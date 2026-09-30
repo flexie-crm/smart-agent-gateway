@@ -53,7 +53,13 @@ const SERVERS = [
 function serve(onPost: (url: string) => Response) {
   const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input)
-    if ((init?.method ?? 'GET') === 'GET') return new Response(JSON.stringify(SERVERS), { status: 200 })
+    // The screen's own answer: the connections, plus the one fact that belongs
+    // to the screen rather than to a row.
+    if ((init?.method ?? 'GET') === 'GET')
+      return new Response(
+        JSON.stringify({ servers: SERVERS, callback_url: 'https://sag.example.test/connect/mcp/callback' }),
+        { status: 200 },
+      )
     return onPost(url)
   })
   vi.stubGlobal('fetch', fetch)
@@ -62,6 +68,34 @@ function serve(onPost: (url: string) => Response) {
 
 describe('the mcp servers screen', () => {
   afterEach(() => vi.unstubAllGlobals())
+
+  // Registering SAG at a service needs one thing from our side that cannot be
+  // guessed: the address it sends the person back to. OAuth matches it
+  // character for character, and until it was shown here the only way to learn
+  // it was to read the source.
+  //
+  // Asserted only in the OAuth branch, because an API key connection redirects
+  // nobody and a redirect URI beside it would be a field with no meaning.
+  it('shows the redirect URI to paste, but only where a sign-in happens', async () => {
+    serve(() => new Response('{}', { status: 200 }))
+    render(
+      <StrictMode>
+        <MCPServers />
+      </StrictMode>,
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: /add mcp server/i }))
+    // An API key connection has nowhere to come back to.
+    expect(screen.queryByText('https://sag.example.test/connect/mcp/callback')).not.toBeInTheDocument()
+
+    // By role, not by label: Field renders a <label> with no htmlFor and does
+    // not wrap its control, so nothing on any form in this console is reachable
+    // by its label yet (noted in CLAUDE.md, open for all the screens at once).
+    const [auth] = screen.getAllByRole('combobox')
+    fireEvent.change(auth, { target: { value: 'oauth' } })
+
+    expect(await screen.findByText('https://sag.example.test/connect/mcp/callback')).toBeInTheDocument()
+  })
 
   it('shows each connection by name, not by the prefix its tools are stored under', async () => {
     serve(() => new Response('{}', { status: 200 }))

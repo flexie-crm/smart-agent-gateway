@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"flexie.io/sag/internal/app"
 	"flexie.io/sag/internal/chat"
 	"flexie.io/sag/internal/model"
 	"flexie.io/sag/internal/tool"
@@ -60,7 +61,7 @@ func TestToolsArriveFromTheCodeAndAreGovernedByTheAdmin(t *testing.T) {
 	// and whether the tool is on: where a call pauses for a person is the
 	// agent's decision, and an approval sent here is not a field at all.
 	group := &model.Group{WorkspaceID: env.ws.ID, Name: "ops"}
-	if err := env.app.Store.Groups().Create(context.Background(), group); err != nil {
+	if err := env.app.Store.Groups().Create(context.Background(), group, model.Nobody()); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 	rec = env.do(http.MethodPut, fmt.Sprintf("/v1/tools/%d", clock.ID), token, toolUpdateBody{
@@ -153,6 +154,51 @@ func TestAgentKeyIsGeneratedFromName(t *testing.T) {
 	}
 }
 
+// Who configured an agent is taken from the REQUEST, never from the body.
+//
+// That is the security half of it: a client can send anything, so the one thing
+// it must not be able to send is who it is. The name is resolved from the
+// authenticated person and frozen into the row.
+func TestWhoConfiguredAnAgentComesFromTheRequest(t *testing.T) {
+	env := newTestEnv(t)
+	env.createUser("admin@acme.test", "dev-Passw0rd!", model.PermSuperuser)
+	token, _ := env.login("admin@acme.test", "dev-Passw0rd!")
+
+	// The body claims somebody else made it. It is ignored.
+	rec := env.do(http.MethodPost, "/v1/agents", token, map[string]any{
+		"name":            "Sales Helper",
+		"created_by":      999,
+		"created_by_name": "Somebody Else",
+	})
+	env.expectStatus(rec, http.StatusCreated)
+
+	var created agentBody
+	env.decode(rec, &created)
+	// createUser names a person by their email, so that is the name to expect.
+	if created.CreatedByName != "admin@acme.test" {
+		t.Errorf("created by %q, want the person who sent the request", created.CreatedByName)
+	}
+	if created.CreatedBy == 999 {
+		t.Error("the body decided who created the agent")
+	}
+	if created.CreatedBy == 0 {
+		t.Error("the agent is not linked to the person who made it")
+	}
+
+	// And the form the dialog opens carries it, which is where it is shown.
+	rec = env.do(http.MethodGet, fmt.Sprintf("/v1/agents/%d/form", created.ID), token, nil)
+	env.expectStatus(rec, http.StatusOK)
+	var form agentFormBody
+	env.decode(rec, &form)
+	if form.Agent == nil {
+		t.Fatal("the form carries no agent")
+	}
+	if form.Agent.CreatedByName != created.CreatedByName {
+		t.Errorf("the form says %q and the create said %q",
+			form.Agent.CreatedByName, created.CreatedByName)
+	}
+}
+
 // aModel is any model these rows can point at: what the dialogs configure is not
 // what this is about, only that saving the agent does not take it away.
 func (e *testEnv) aModel() int64 {
@@ -162,14 +208,14 @@ func (e *testEnv) aModel() int64 {
 		WorkspaceID: e.ws.ID, VendorKey: model.VendorAnthropic,
 		Name: "For the dialogs", BaseURL: "https://example.test",
 	}
-	if err := e.app.Store.Vendors().Create(ctx, vendor); err != nil {
+	if err := e.app.Store.Vendors().Create(ctx, vendor, model.Nobody()); err != nil {
 		e.t.Fatalf("create vendor: %v", err)
 	}
 	m := &model.AIModel{
 		WorkspaceID: e.ws.ID, VendorID: vendor.ID, ModelKey: "for-the-dialogs",
 		Type: model.ModelTypeChat, ContextWindow: 100_000,
 	}
-	if err := e.app.Store.AIModels().Create(ctx, m); err != nil {
+	if err := e.app.Store.AIModels().Create(ctx, m, model.Nobody()); err != nil {
 		e.t.Fatalf("create model: %v", err)
 	}
 	return m.ID
@@ -207,7 +253,7 @@ func TestSavingAnAgentKeepsWhatItsOtherDialogsConfigured(t *testing.T) {
 	modelID := env.aModel()
 	stored.AudioModelID = &modelID
 	stored.FileRules = []model.FileRule{{Types: []string{"application/pdf"}, ModelID: modelID}}
-	if err := env.app.Store.Agents().Update(context.Background(), stored); err != nil {
+	if err := env.app.Store.Agents().Update(context.Background(), stored, model.Nobody()); err != nil {
 		t.Fatalf("set what the dialogs own: %v", err)
 	}
 
@@ -298,11 +344,11 @@ func TestAgentMemoryBrainMustBeUnlocked(t *testing.T) {
 
 	ctx := context.Background()
 	locked := &model.Brain{WorkspaceID: env.ws.ID, Name: "Policy", Slug: "policy", Locked: true}
-	if err := env.app.Store.Brains().CreateBrain(ctx, locked); err != nil {
+	if err := env.app.Store.Brains().CreateBrain(ctx, locked, model.Nobody()); err != nil {
 		t.Fatalf("create locked brain: %v", err)
 	}
 	open := &model.Brain{WorkspaceID: env.ws.ID, Name: "Notes", Slug: "notes"}
-	if err := env.app.Store.Brains().CreateBrain(ctx, open); err != nil {
+	if err := env.app.Store.Brains().CreateBrain(ctx, open, model.Nobody()); err != nil {
 		t.Fatalf("create open brain: %v", err)
 	}
 
@@ -567,27 +613,26 @@ func TestAWorkflowReshapesTheTurn(t *testing.T) {
 	// The administrator gives this group a workflow: no tools, and different
 	// instructions.
 	group := &model.Group{WorkspaceID: env.ws.ID, Name: "sales"}
-	if err := env.app.Store.Groups().Create(ctx, group); err != nil {
+	if err := env.app.Store.Groups().Create(ctx, group, model.Nobody()); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 	if err := env.app.Store.Groups().AddMember(ctx, group.ID, user.ID); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
 
-	wf := &model.Workflow{WorkspaceID: env.ws.ID, Name: "Sales", CreatedBy: user.ID}
-	if err := env.app.Store.Workflows().Create(ctx, wf); err != nil {
+	wf := &model.Workflow{WorkspaceID: env.ws.ID, Name: "Sales"}
+	if err := env.app.Store.Workflows().Create(ctx, wf, model.Nobody()); err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
 	version := &model.WorkflowVersion{
 		WorkflowID: wf.ID,
 		Definition: json.RawMessage(
 			`{"kind":"profile","profile":{"tools":[],"system_prompt":"You are the sales assistant."}}`),
-		CreatedBy: user.ID,
 	}
-	if err := env.app.Store.Workflows().CreateVersion(ctx, env.ws.ID, version); err != nil {
+	if err := env.app.Store.Workflows().CreateVersion(ctx, env.ws.ID, version, model.Nobody()); err != nil {
 		t.Fatalf("create version: %v", err)
 	}
-	if err := env.app.Store.Workflows().Publish(ctx, env.ws.ID, wf.ID, version.ID); err != nil {
+	if err := env.app.Store.Workflows().Publish(ctx, env.ws.ID, wf.ID, version.ID, model.Nobody()); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 	if err := env.app.Store.Workflows().SetAssignments(ctx, env.ws.ID, wf.ID, []model.WorkflowAssignment{
@@ -652,20 +697,19 @@ func TestAPinnedModelOutranksThePicker(t *testing.T) {
 	pickedID := env.registerModel(picked)
 	pinnedID := env.registerModel(pinned)
 
-	wf := &model.Workflow{WorkspaceID: env.ws.ID, Name: "Pinned", CreatedBy: user.ID}
-	if err := env.app.Store.Workflows().Create(ctx, wf); err != nil {
+	wf := &model.Workflow{WorkspaceID: env.ws.ID, Name: "Pinned"}
+	if err := env.app.Store.Workflows().Create(ctx, wf, model.Nobody()); err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
 	version := &model.WorkflowVersion{
 		WorkflowID: wf.ID,
 		Definition: json.RawMessage(
 			fmt.Sprintf(`{"kind":"profile","profile":{"model_id":%d}}`, pinnedID)),
-		CreatedBy: user.ID,
 	}
-	if err := env.app.Store.Workflows().CreateVersion(ctx, env.ws.ID, version); err != nil {
+	if err := env.app.Store.Workflows().CreateVersion(ctx, env.ws.ID, version, model.Nobody()); err != nil {
 		t.Fatalf("create version: %v", err)
 	}
-	if err := env.app.Store.Workflows().Publish(ctx, env.ws.ID, wf.ID, version.ID); err != nil {
+	if err := env.app.Store.Workflows().Publish(ctx, env.ws.ID, wf.ID, version.ID, model.Nobody()); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 	if err := env.app.Store.Workflows().SetAssignments(ctx, env.ws.ID, wf.ID, []model.WorkflowAssignment{
@@ -1275,7 +1319,7 @@ func TestAProjectedToolIsReadUnderItsServiceAndWithoutThePrefix(t *testing.T) {
 		WorkspaceID: env.ws.ID, Name: "NLI", URL: "https://nli.test/mcp",
 		AuthType: model.MCPAuthNone, Status: model.StatusActive, ToolPrefix: "nli",
 	}
-	if err := env.app.Store.MCPServers().Create(context.Background(), server); err != nil {
+	if err := env.app.Store.MCPServers().Create(context.Background(), server, model.Nobody()); err != nil {
 		t.Fatalf("create connection: %v", err)
 	}
 	if _, err := env.app.Store.Tools().SyncMCPTools(context.Background(), env.ws.ID, server.ID, []*model.Tool{{
@@ -1346,5 +1390,78 @@ func TestAProjectedToolIsReadUnderItsServiceAndWithoutThePrefix(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("the exposure list did not offer the projected tool: %+v", screen.Tools)
+	}
+}
+
+// The agent dialog can assign a skill, and it asks ONE question to do it: the
+// form carries what can be assigned beside what is assigned.
+//
+// A choice carries ONE name, which is model.Skill.Label: the title, or the
+// handle when the package carried none. The handle is an identifier, so sending
+// it alongside would let a form print the same thing twice in two shapes.
+func TestAnAgentIsAssignedSkillsThroughItsOwnForm(t *testing.T) {
+	env := newTestEnv(t)
+	env.createUser("admin@acme.test", "dev-Passw0rd!", model.PermSuperuser)
+	token, _ := env.login("admin@acme.test", "dev-Passw0rd!")
+	env.upload(token, "file", samplePackage(t))
+
+	rec := env.do(http.MethodGet, "/v1/skills/view", token, nil)
+	var view app.SkillOverview
+	env.decode(rec, &view)
+	if view.Skill == nil {
+		t.Fatal("no skill was imported to assign")
+	}
+	skillID := view.Skill.ID
+
+	rec = env.do(http.MethodPost, "/v1/agents", token, map[string]any{
+		"name":   "Invoice Helper",
+		"skills": []int64{skillID},
+	})
+	env.expectStatus(rec, http.StatusCreated)
+	var created agentBody
+	env.decode(rec, &created)
+	if len(created.Skills) != 1 || created.Skills[0] != skillID {
+		t.Fatalf("the agent was created holding %v, want [%d]", created.Skills, skillID)
+	}
+
+	rec = env.do(http.MethodGet, fmt.Sprintf("/v1/agents/%d/form", created.ID), token, nil)
+	env.expectStatus(rec, http.StatusOK)
+	var form agentFormBody
+	env.decode(rec, &form)
+
+	// What is assigned, so the picker prefills.
+	if form.Agent == nil || len(form.Agent.Skills) != 1 || form.Agent.Skills[0] != skillID {
+		t.Fatalf("the form does not prefill the assignment: %+v", form.Agent)
+	}
+	// And what CAN be assigned, on the same answer rather than beside it: a
+	// dialog asks one question when it opens (KB/19).
+	if len(form.Skills) != 1 {
+		t.Fatalf("the form offers %d skills, want 1", len(form.Skills))
+	}
+	choice := form.Skills[0]
+	if choice.ID != skillID {
+		t.Errorf("the choice is %+v, want skill %d", choice, skillID)
+	}
+	// The package's TITLE (`metadata.title`, "PDF Toolkit"), not its handle
+	// ("pdf-processing"). testManifest carries both and they differ, which is
+	// what makes this tell them apart rather than pass on either.
+	if choice.Name != "PDF Toolkit" {
+		t.Errorf("the choice is named %q, want the package's title", choice.Name)
+	}
+	if choice.Status != model.SkillActive {
+		t.Errorf("status = %q, so a disabled skill could not be shown as one", choice.Status)
+	}
+
+	// Taking it away is possible, which an assignment written by appending
+	// would not be.
+	rec = env.do(http.MethodPut, fmt.Sprintf("/v1/agents/%d", created.ID), token, map[string]any{
+		"name":   "Invoice Helper",
+		"skills": []int64{},
+	})
+	env.expectStatus(rec, http.StatusOK)
+	var revoked agentBody
+	env.decode(rec, &revoked)
+	if len(revoked.Skills) != 0 {
+		t.Errorf("the agent still holds %v", revoked.Skills)
 	}
 }

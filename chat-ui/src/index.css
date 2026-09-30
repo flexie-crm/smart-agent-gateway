@@ -106,11 +106,25 @@
    * render, and .dark repaints it, because that is what a custom property is
    * for. Eight is enough: more colours in code is decoration, and the point of
    * highlighting is to tell a string from a keyword at a glance. */
-  /* What the person said: a pale card in daylight. See .dark for the night
-   * side, and message.tsx for why it stopped being a hardcoded slate. */
-  --said: oklch(0.968 0.002 255);
+  /* What the person said: a pale blue card in daylight. See .dark for the
+   * night side, and message.tsx for why it stopped being a hardcoded slate.
+   *
+   * #e8f3fe, which is oklch(0.959 0.019 248) and round-trips to exactly those
+   * bytes. It replaces a near-white grey, and it is the better card for two
+   * reasons rather than one: their words are told from the answer by colour
+   * instead of by a shade of white, and it is MORE separated from the page
+   * than the grey was (1.0865:1 against 1.0599:1) rather than less. Measured
+   * against the real page, which is oklch(0.988 ...) and not white: computing
+   * it against white gave 1.124 and 1.101, both wrong in the same direction.
+   *
+   * The text on it reads at 15.72:1, so the foreground is unchanged.
+   *
+   * The border moved with it. A grey hairline around a blue card is a visible
+   * mismatch, so it is the same hue at the same edge strength the grey pair
+   * had: 1.147:1 against the fill, where the old one was 1.145:1. */
+  --said: oklch(0.959 0.019 248);
   --said-foreground: oklch(0.21 0.01 255);
-  --said-border: oklch(0.922 0.003 255);
+  --said-border: oklch(0.913 0.035 248);
 
   --code-comment: oklch(0.62 0.02 250);
   --code-keyword: oklch(0.5 0.19 300);
@@ -188,10 +202,18 @@
   --sidebar-border: oklch(1 0 0 / 7%);
   --sidebar-ring: oklch(0.6 0.05 255);
 
-  /* What the person said, in a shade of the page rather than a slab of white.
-   * In daylight this is a pale grey card; at night a white one would be a lamp
-   * pointed at the reader every few lines. */
-  --said: oklch(0.295 0.011 255);
+  /* What the person said. A deep blue at night, which is what tells their own
+   * words apart from the answer at a glance: the grey this used to be sat so
+   * close to the page that a short message read as part of the reply above it.
+   *
+   * The colour is sampled, not picked: #173e76 out of a ChatGPT reply, which
+   * is oklch(0.369 0.106 258). Dark enough to stay a surface rather than a
+   * lamp, and the existing foreground reads on it at 8.14:1, well past the
+   * 4.5:1 floor, so the text colour is unchanged.
+   *
+   * Daylight keeps its pale grey card: a saturated blue on white is the thing
+   * that shouts, and there the page is already bright enough to separate them. */
+  --said: oklch(0.369 0.106 258);
   --said-foreground: oklch(0.9 0.006 255);
   --said-border: oklch(1 0 0 / 8%);
 
@@ -268,4 +290,16 @@
   --code-operator: oklch(0.72 0.03 250);
   --code-emphasis: oklch(0.75 0.16 300);
   --foreground: oklch(0.87 0 0);
+}
+
+/* The bar an agent opened from its chip sweeps along its header's bottom line
+   while its work is on the way (components/AgentView.tsx), the console's own
+   (admin-ui/src/index.css). It sweeps rather than fills, because one request's
+   progress cannot be measured: a bar that claimed 40% would be making it up. */
+@keyframes modal-loading {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(300%); }
+}
+.animate-modal-loading {
+  animation: modal-loading 1.1s ease-in-out infinite;
 }

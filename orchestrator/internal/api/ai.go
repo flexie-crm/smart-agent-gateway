@@ -234,7 +234,14 @@ func (h *aiHandlers) createVendor(w http.ResponseWriter, r *http.Request) {
 		}
 		vendor.Credentials = sealed
 	}
-	if err := h.app.Store.Vendors().Create(r.Context(), vendor); err != nil {
+	// Who is doing it, resolved from the authenticated person and frozen into
+	// the row by the store.
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.Vendors().Create(r.Context(), vendor, by); err != nil {
 		writeStoreError(w, h.app, err)
 		return
 	}
@@ -280,7 +287,14 @@ func (h *aiHandlers) updateVendor(w http.ResponseWriter, r *http.Request) {
 		}
 		vendor.Credentials = sealed
 	}
-	if err := h.app.Store.Vendors().Update(r.Context(), vendor); err != nil {
+	// Who is doing it, resolved from the authenticated person and frozen into
+	// the row by the store.
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.Vendors().Update(r.Context(), vendor, by); err != nil {
 		writeStoreError(w, h.app, err)
 		return
 	}
@@ -303,7 +317,12 @@ func (h *aiHandlers) clearVendorCredentials(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	if err := h.app.Store.Vendors().ClearCredentials(r.Context(), vendor.WorkspaceID, vendor.ID); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.Vendors().ClearCredentials(r.Context(), vendor.WorkspaceID, vendor.ID, by); err != nil {
 		writeStoreError(w, h.app, err)
 		return
 	}
@@ -493,7 +512,13 @@ func (h *aiHandlers) createLocalModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	created, err := h.app.AttachNodeModel(r.Context(), in.MachineID, claimsFrom(r).WorkspaceID, in.UID)
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+
+	created, err := h.app.AttachNodeModel(r.Context(), in.MachineID, claimsFrom(r).WorkspaceID, in.UID, by)
 	if err != nil {
 		if nodeErr, ok := inference.AsError(err); ok {
 			writeError(w, nodeErr.Status, nodeErr.Code, nodeErr.Message)
@@ -551,7 +576,14 @@ func (h *aiHandlers) createModel(w http.ResponseWriter, r *http.Request) {
 	if !h.validateModel(w, r, m, fieldErrors{}) {
 		return
 	}
-	if err := h.app.Store.AIModels().Create(r.Context(), m); err != nil {
+	// Who is doing it, resolved from the authenticated person and frozen into
+	// the row by the store.
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.AIModels().Create(r.Context(), m, by); err != nil {
 		writeSaveError(w, h.app, err, "model_key", "this vendor already has this model")
 		return
 	}
@@ -587,7 +619,14 @@ func (h *aiHandlers) updateModel(w http.ResponseWriter, r *http.Request) {
 	if !h.validateModel(w, r, m, problems) {
 		return
 	}
-	if err := h.app.Store.AIModels().Update(r.Context(), m); err != nil {
+	// Who is doing it, resolved from the authenticated person and frozen into
+	// the row by the store.
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.AIModels().Update(r.Context(), m, by); err != nil {
 		writeSaveError(w, h.app, err, "model_key", "this vendor already has this model")
 		return
 	}

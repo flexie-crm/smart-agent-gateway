@@ -72,7 +72,8 @@ func MemorySchema() tool.Schema {
 // MemoryHandler binds the memory tool to the ONE brain this agent manages as its
 // memory. There is no brain to name and no allow-list to intersect: it is the
 // agent's own, always readable and writable by it.
-func MemoryHandler(st WriteStore, memoryBrainID int64) tool.Handler {
+// `by` is the agent whose memory this is: its own notes are its own writes.
+func MemoryHandler(st WriteStore, memoryBrainID int64, by model.Actor) tool.Handler {
 	return func(ctx context.Context, call tool.Call) (tool.Result, error) {
 		var args memArgs
 		if err := json.Unmarshal(call.Args, &args); err != nil {
@@ -82,7 +83,7 @@ func MemoryHandler(st WriteStore, memoryBrainID int64) tool.Handler {
 		case memOpSearch:
 			return memorySearch(ctx, st, call.WorkspaceID, memoryBrainID, args)
 		case memOpSave:
-			return memorySave(ctx, st, call.WorkspaceID, memoryBrainID, args)
+			return memorySave(ctx, st, call.WorkspaceID, memoryBrainID, args, by)
 		case memOpGet:
 			return memoryGet(ctx, st, call.WorkspaceID, memoryBrainID, args)
 		case "":
@@ -112,7 +113,7 @@ func memorySearch(ctx context.Context, st WriteStore, ws, memoryBrainID int64, a
 	return toolkit.Success(map[string]any{"query": query, "count": len(hits), "results": hits})
 }
 
-func memorySave(ctx context.Context, st WriteStore, ws, memoryBrainID int64, args memArgs) (tool.Result, error) {
+func memorySave(ctx context.Context, st WriteStore, ws, memoryBrainID int64, args memArgs, by model.Actor) (tool.Result, error) {
 	catName := strings.TrimSpace(args.Category)
 	if catName == "" {
 		return toolkit.BadArguments(`a "category" is required to save a memory: reuse one that fits, or name a new one.`)
@@ -125,7 +126,7 @@ func memorySave(ctx context.Context, st WriteStore, ws, memoryBrainID int64, arg
 		return toolkit.BadArguments(`"content" is required.`)
 	}
 
-	cat, err := findOrCreateCategory(ctx, st, ws, memoryBrainID, catName)
+	cat, err := findOrCreateCategory(ctx, st, ws, memoryBrainID, catName, by)
 	if err != nil {
 		return tool.Result{}, err
 	}
@@ -143,7 +144,7 @@ func memorySave(ctx context.Context, st WriteStore, ws, memoryBrainID int64, arg
 	}
 
 	d := &model.BrainDocument{ID: docID, CategoryID: cat.ID, Title: title, Content: args.Content}
-	if err := st.SaveDocument(ctx, ws, d, args.Related); err != nil {
+	if err := st.SaveDocument(ctx, ws, d, args.Related, by); err != nil {
 		return tool.Result{}, err
 	}
 	return toolkit.Success(map[string]any{"memory": verb, "id": d.ID, "category": cat.Name, "title": title})
@@ -174,7 +175,7 @@ func memoryGet(ctx context.Context, st WriteStore, ws, memoryBrainID int64, args
 
 // findOrCreateCategory reuses a category by name or creates it. The memory brain
 // has no fixed set of categories: the agent invents them as it organises itself.
-func findOrCreateCategory(ctx context.Context, st WriteStore, ws, brainID int64, name string) (*model.BrainCategory, error) {
+func findOrCreateCategory(ctx context.Context, st WriteStore, ws, brainID int64, name string, by model.Actor) (*model.BrainCategory, error) {
 	cats, err := st.Categories(ctx, ws, brainID)
 	if err != nil {
 		return nil, err
@@ -185,7 +186,7 @@ func findOrCreateCategory(ctx context.Context, st WriteStore, ws, brainID int64,
 		}
 	}
 	c := &model.BrainCategory{BrainID: brainID, Name: name}
-	if err := st.CreateCategory(ctx, ws, c); err != nil {
+	if err := st.CreateCategory(ctx, ws, c, by); err != nil {
 		return nil, err
 	}
 	return c, nil

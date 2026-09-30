@@ -5,6 +5,7 @@ import { codeTheme } from '@/components/ui/ai/code-theme';
 import { useGrammar } from '@/components/ui/ai/code-language';
 import { cn, t } from '@/lib/utils';
 import { ChevronDownIcon, Cog, Lock, X, Loader2 } from 'lucide-react';
+import { TIMELINE_CHEVRON } from './timeline-chevron';
 import type { ToolChip } from '@lib/chat-types';
 import { fetchToolCall, type ToolCallField, type ToolCallRecord } from '@lib/api';
 
@@ -88,7 +89,8 @@ export function ToolRow({ tool, lang }: { tool: ToolChip; lang?: Record<string, 
       {canOpen && (
         <ChevronDownIcon
           className={cn(
-            'size-3.5 shrink-0 text-muted-foreground/60 transition-transform',
+            TIMELINE_CHEVRON,
+            'text-muted-foreground/60 transition-transform',
             open ? 'rotate-180' : 'rotate-0'
           )}
         />
@@ -249,7 +251,14 @@ function ToolCallSection({ title, fields }: { title?: string; fields?: PanelFiel
 function ToolCallEntry({ field, alone }: { field: PanelField; alone: boolean }) {
   const { name, value, as, tone } = field;
   const subject =
-    alone && (as === 'command' || as === 'text' || as === 'sql' || as === 'table' || as === 'body');
+    alone &&
+    (as === 'command' ||
+      as === 'text' ||
+      as === 'sql' ||
+      as === 'javascript' ||
+      as === 'yaml' ||
+      as === 'table' ||
+      as === 'body');
   const label = name && !subject ? <span className="shrink-0 text-zinc-500">{name}</span> : null;
 
   if (as === 'command' && typeof value === 'string') {
@@ -258,6 +267,20 @@ function ToolCallEntry({ field, alone }: { field: PanelField; alone: boolean }) 
         {label}
         <div className={cn(!subject && 'mt-0.5')}>
           <Painted text={value} language="bash" prompt />
+        </div>
+      </div>
+    );
+  }
+  // Code and structure, both painted by the highlighter this chat already has.
+  // The language is the tool's own declaration, never guessed from the text:
+  // a snapshot and a script are both indented blocks and sniffing would get it
+  // wrong on the short ones.
+  if ((as === 'javascript' || as === 'yaml') && typeof value === 'string') {
+    return (
+      <div>
+        {label}
+        <div className={cn(!subject && 'mt-0.5')}>
+          <Painted text={value} language={as} />
         </div>
       </div>
     );

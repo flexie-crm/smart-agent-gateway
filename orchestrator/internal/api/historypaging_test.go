@@ -99,6 +99,55 @@ func TestAShortConversationArrivesWholeAndSaysSo(t *testing.T) {
 	}
 }
 
+// A conversation whose newest steps are all an agent's still opens on its own
+// messages. Agents write their steps into the conversation they were started
+// from, and a page is what a PERSON is shown, which is never an agent's inner
+// work: counting those steps into the page filled it with rows the history
+// then hid, and a real conversation (a Gateway reply, then 142 steps of a
+// five-agent fleet and two background agents) opened on nothing at all.
+func TestAConversationEndingInAgentsWorkStillOpensOnItsMessages(t *testing.T) {
+	env := newTestEnv(t)
+	env.createUser("admin@acme.test", "dev-Passw0rd!", model.PermSuperuser)
+	token, _ := env.login("admin@acme.test", "dev-Passw0rd!")
+	ctx := context.Background()
+
+	chatID := env.longConversation(t, token, 6) // two questions and two answers, seq 1 to 4
+	session, err := env.app.Store.Agent().GetSessionByUID(ctx, env.ws.ID, chatID)
+	if err != nil {
+		t.Fatalf("find the conversation: %v", err)
+	}
+	// Then more agent work than a page holds, after the conversation's last step.
+	for seq := 100; seq < 250; seq++ {
+		if err := env.app.Store.Agent().SaveStep(ctx, &model.AgentStep{
+			SessionID: session.ID, Seq: seq, Kind: model.StepAssistant,
+			Text: "agent work " + itoa64(int64(seq)), CreatedAt: time.Now().UTC(),
+			AgentKey: "helper-agent", ParentToolCallID: "call_fleet",
+		}); err != nil {
+			t.Fatalf("write an agent step: %v", err)
+		}
+	}
+
+	rec := env.do(http.MethodPost, "/v1/chat/history", token, map[string]any{"chat_id": chatID})
+	env.expectStatus(rec, http.StatusOK)
+	var page historyResponse
+	env.decode(rec, &page)
+
+	if rowsIn(page) != 6 {
+		t.Fatalf("the conversation opened on %d rows of its 6: %+v", rowsIn(page), page.Messages)
+	}
+	if last := page.Messages[len(page.Messages)-1]; last.Content != "answer 3" {
+		t.Fatalf("the newest page does not end on the conversation's last answer: %+v", last)
+	}
+	if page.Meta.More {
+		t.Fatal("everything the person is shown was sent, and the page still claims there is more")
+	}
+	for _, m := range page.Messages {
+		if len(m.Content) >= 10 && m.Content[:10] == "agent work" {
+			t.Fatalf("an agent's own step was shown as the conversation's: %+v", m)
+		}
+	}
+}
+
 func rowsIn(page historyResponse) int {
 	rows := 0
 	for _, m := range page.Messages {

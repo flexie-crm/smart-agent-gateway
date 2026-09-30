@@ -150,12 +150,12 @@ func TestStatsDoNotLeakAcrossWorkspaces(t *testing.T) {
 	token, _ := env.login("u@acme.test", "dev-Passw0rd!")
 
 	other := &model.Workspace{Slug: "globex", Name: "Globex"}
-	if err := env.app.Store.Workspaces().Create(context.Background(), other); err != nil {
+	if err := env.app.Store.Workspaces().Create(context.Background(), other, model.Nobody()); err != nil {
 		t.Fatalf("create workspace: %v", err)
 	}
 	if err := env.app.Store.Vendors().Create(context.Background(), &model.AIVendor{
 		WorkspaceID: other.ID, VendorKey: model.VendorAnthropic, Name: "Theirs",
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		t.Fatalf("create vendor: %v", err)
 	}
 

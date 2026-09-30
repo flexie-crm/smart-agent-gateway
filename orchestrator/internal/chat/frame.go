@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 )
 
 // FrameType enumerates everything that can appear on the wire. Adding a type
@@ -199,6 +200,10 @@ type Stream struct {
 	// blank delta before the first word can be told from the paragraph break
 	// between two.
 	wrote bool
+	// lastSign is when anything was last written here. It is recorded before
+	// any of the filtering below, because the question it answers is whether
+	// the turn is alive, not what this person may see of it.
+	lastSign time.Time
 }
 
 // Show is what a person may see of HOW an answer was reached: the model's
@@ -223,7 +228,17 @@ type Show struct {
 // Everything is what a stream shows when nobody has said otherwise.
 func Everything() Show { return Show{Reasoning: true, Tools: true} }
 
-func NewStream(sink Sink) *Stream { return &Stream{sink: sink, show: Everything()} }
+func NewStream(sink Sink) *Stream {
+	return &Stream{sink: sink, show: Everything(), lastSign: time.Now()}
+}
+
+// QuietFor is how long since anything was written here. It is what tells a turn
+// that has hung from a turn that is busy (run.Manager).
+func (s *Stream) QuietFor() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return time.Since(s.lastSign)
+}
 
 // leadingBlank reports a text frame that cannot draw anything: whitespace with
 // no words yet written to put it between.
@@ -251,12 +266,16 @@ func (s *Stream) leadingBlank(frame Frame) bool {
 
 // NewStreamShowing builds a stream that carries only what this person may see.
 func NewStreamShowing(sink Sink, show Show) *Stream {
-	return &Stream{sink: sink, show: show}
+	return &Stream{sink: sink, show: show, lastSign: time.Now()}
 }
 
 func (s *Stream) Write(frame Frame) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Any frame at all is a sign of life: a word, a thought, a tool starting,
+	// the heartbeat a running tool sends every ten seconds. Recorded FIRST, so
+	// that nothing below can filter away the evidence that a turn is working.
+	s.lastSign = time.Now()
 	if s.closed {
 		return nil
 	}

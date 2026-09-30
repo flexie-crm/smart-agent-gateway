@@ -64,7 +64,7 @@ func newHarness(t *testing.T, concurrency int) *harness {
 	t.Cleanup(func() { _ = q.Close() })
 
 	ws := &model.Workspace{Slug: "worker-test", Name: "worker-test"}
-	if err := st.Workspaces().Create(context.Background(), ws); err != nil {
+	if err := st.Workspaces().Create(context.Background(), ws, model.Nobody()); err != nil {
 		t.Fatalf("create workspace: %v", err)
 	}
 

@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react'
 import path from 'path'
 // @ts-expect-error a plain module, shared by both front ends
 import { buildStamp } from '../scripts/build-stamp.mjs'
+import { CODE_LANGUAGES } from "./src/lib/code-languages";
 
 // Stamped into every build, automatically. See chat-ui/vite.config.js.
 const STAMP: string = buildStamp()
@@ -11,6 +12,19 @@ const STAMP: string = buildStamp()
 // development, same origin in production). This server only serves the UI:
 // there is no proxy in front of the API, in any environment.
 export default defineConfig({
+  // The grammars, pre-bundled, so they work in DEV as well as in a build.
+  //
+  // Each one is a thin ESM wrapper around a CommonJS module in `refractor`, and
+  // a browser handed that raw says "does not provide an export named default".
+  // A build never sees it because Rollup does the interop; the dev server only
+  // does it for dependencies it has been told about, and these are reached
+  // through a glob it cannot see into. See src/lib/code-languages.ts.
+  optimizeDeps: {
+    include: CODE_LANGUAGES.map(
+      (name) => `react-syntax-highlighter/dist/esm/languages/prism/${name}`,
+    ),
+  },
+
   define: { __SAG_BUILD__: JSON.stringify(STAMP) },
   plugins: [react()],
   resolve: {

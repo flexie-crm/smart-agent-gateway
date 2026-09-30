@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 
+	"flexie.io/sag/internal/model"
 	"flexie.io/sag/internal/tool"
 	"flexie.io/sag/internal/tools/template"
 )
@@ -35,7 +36,7 @@ func TestCreateAndRunACustomQueryTool(t *testing.T) {
 			"database": "information_schema", "username": parsed.User, "password": parsed.Passwd,
 			"tls.mode": "disable",
 		},
-	})
+	}, nil, model.Nobody())
 	if err != nil {
 		t.Fatalf("create custom tool: %v", err)
 	}
@@ -60,7 +61,7 @@ func TestCreateAndRunACustomQueryTool(t *testing.T) {
 
 	// It resolves into a loadout (active + open to the workspace) with a bound
 	// handler and its deep guide from the template.
-	loadout, err := e.app.Loadout(ctx, e.ws.ID, user.ID, "", []string{"query_local"}, nil, nil, tool.OwnerOfAgent())
+	loadout, err := e.app.Loadout(ctx, e.ws.ID, user.ID, "", []string{"query_local"}, nil, nil, tool.OwnerOfAgent(), model.Nobody())
 	if err != nil {
 		t.Fatalf("loadout: %v", err)
 	}
@@ -126,7 +127,7 @@ func TestUpdateCustomToolKeepsSecret(t *testing.T) {
 			"database": "information_schema", "username": parsed.User, "password": parsed.Passwd,
 			"tls.mode": "disable",
 		},
-	})
+	}, nil, model.Nobody())
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -194,7 +195,7 @@ func TestUpdateCustomToolKeepsSecret(t *testing.T) {
 		Description:       "Now reads and writes.",
 		Guide:             "Both reads and writes are allowed.",
 		ParamDescriptions: map[string]string{"sql": "A statement against the schema."},
-	})
+	}, nil, model.Nobody())
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -223,7 +224,7 @@ func TestUpdateCustomToolKeepsSecret(t *testing.T) {
 
 	// The edited tool still binds and runs, proving the carried secret is usable.
 	user := e.user("dba2@acme.test")
-	loadout, err := e.app.Loadout(ctx, e.ws.ID, user.ID, "", []string{"query_edit_me"}, nil, nil, tool.OwnerOfAgent())
+	loadout, err := e.app.Loadout(ctx, e.ws.ID, user.ID, "", []string{"query_edit_me"}, nil, nil, tool.OwnerOfAgent(), model.Nobody())
 	if err != nil {
 		t.Fatalf("loadout: %v", err)
 	}
@@ -257,7 +258,7 @@ func TestUpdateCustomToolNoOpSucceeds(t *testing.T) {
 			"database": "information_schema", "username": parsed.User, "password": parsed.Passwd,
 			"tls.mode": "disable",
 		},
-	})
+	}, nil, model.Nobody())
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -275,10 +276,10 @@ func TestUpdateCustomToolNoOpSucceeds(t *testing.T) {
 		Settings: view.Settings, DisplayName: "Stable", Description: "Stable.",
 		Guide: "Stable.", ParamDescriptions: view.ParamDescriptions,
 	}
-	if _, err := e.app.UpdateCustomTool(ctx, e.ws.ID, created.ID, in); err != nil {
+	if _, err := e.app.UpdateCustomTool(ctx, e.ws.ID, created.ID, in, nil, model.Nobody()); err != nil {
 		t.Fatalf("first edit failed: %v", err)
 	}
-	if _, err := e.app.UpdateCustomTool(ctx, e.ws.ID, created.ID, in); err != nil {
+	if _, err := e.app.UpdateCustomTool(ctx, e.ws.ID, created.ID, in, nil, model.Nobody()); err != nil {
 		t.Fatalf("a no-op re-save read as not found: %v", err)
 	}
 }
@@ -306,7 +307,7 @@ func TestTestCustomToolEditCarriesSecret(t *testing.T) {
 			"database": "information_schema", "username": parsed.User, "password": parsed.Passwd,
 			"tls.mode": "disable",
 		},
-	})
+	}, nil, model.Nobody())
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -350,7 +351,7 @@ func TestCustomToolTestConnection(t *testing.T) {
 			"database": "information_schema", "username": parsed.User, "password": parsed.Passwd,
 			"tls.mode": "disable",
 		},
-	})
+	}, nil, model.Nobody())
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

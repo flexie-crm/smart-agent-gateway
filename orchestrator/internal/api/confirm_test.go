@@ -286,10 +286,18 @@ func TestReloadRestoresThePendingCard(t *testing.T) {
 	if card.Token == "" || card.Title == "" || len(card.Details) == 0 {
 		t.Fatalf("the restored card is missing token, title, or details: %+v", card)
 	}
-	// It is a fresh token (the original was never stored, only hashed), and it
-	// works: approving with it runs the action.
-	if card.Token == liveCard.Token {
-		t.Fatal("the reload reused the original token instead of minting a fresh one")
+	// It is the SAME token the stream handed over, and that is a deliberate
+	// reversal of what this asserted before.
+	//
+	// It used to demand a fresh one, on the reasoning that the original was
+	// never stored and so could not be reproduced. True at the time, and the
+	// cost was paid on the approval path: minting a fresh token REBOUND the
+	// park, which killed the token of the card already on the person's screen.
+	// Clicking Approve then answered 410 and nothing happened. The token is
+	// derived from a seed on the park now (agent.TokenFromSeed), so every
+	// delivery reproduces it and no delivery can invalidate another.
+	if card.Token != liveCard.Token {
+		t.Fatal("the reload handed over a different token, which kills the card already on screen")
 	}
 	resumed := env.streamTurn(token, map[string]any{"resume_token": card.Token, "resume_action": "approved"})
 	if fr := resumed[len(resumed)-1]; fr.Type != chat.FrameResult {
@@ -545,4 +553,78 @@ type gatedRunner struct{ gate chan struct{} }
 func (g *gatedRunner) Run(_ context.Context, _ agent.Turn, _ *chat.Stream) error {
 	<-g.gate
 	return nil
+}
+
+// A card on screen keeps working, however many times the conversation is read.
+//
+// This is the failure that reached a real installation: a person clicked
+// Approve, got 410, and nothing happened. A card's token used to be minted per
+// DELIVERY, and a history read is a delivery, so re-reading the conversation
+// rebound the park to a new token and killed the one already on screen. The
+// chat reads the conversation three times on a single page load, so the card in
+// front of somebody was holding a dead token within the same second.
+//
+// Approval is the one mechanism where a silent no-op is unacceptable: the
+// person allowed an action and it did not run, and nothing said so.
+func TestALiveCardSurvivesTheConversationBeingRead(t *testing.T) {
+	env := newTestEnv(t)
+	env.createUser("u@acme.test", "dev-Passw0rd!", model.PermSuperuser)
+	token, _ := env.login("u@acme.test", "dev-Passw0rd!")
+
+	placeholder := newFakeVendor(t)
+	modelID := env.registerModel(placeholder)
+	env.GatewayAgent()
+	env.pointModelAt(modelID, parkingVendor(t, modelID, "The model is now disabled."))
+
+	frames := env.streamTurn(token, map[string]any{"prompt": "disable that model", "model_id": modelID})
+	live := confirmRequest(t, frames[len(frames)-1])
+	chatID := chatIDOf(t, frames)
+
+	// Read it three times, exactly as one page load does.
+	for i := 0; i < 3; i++ {
+		rec := env.do(http.MethodPost, "/v1/chat/history", token, map[string]string{"chat_id": chatID})
+		env.expectStatus(rec, http.StatusOK)
+	}
+
+	// The card the person is looking at still answers.
+	resumed := env.streamTurn(token, map[string]any{
+		"resume_token": live.Token, "resume_action": "approved",
+	})
+	if fr := resumed[len(resumed)-1]; fr.Type != chat.FrameResult {
+		t.Fatalf("the live card could not be approved after the conversation was read: %+v", fr)
+	}
+	if m, _ := env.app.Store.AIModels().GetByID(context.Background(), env.ws.ID, modelID); m.Status != model.StatusDisabled {
+		t.Fatal("the approval was accepted but the action did not run")
+	}
+}
+
+// Every delivery of one card hands over the SAME token, which is what the
+// sentence above rests on: the stream's copy and the reload's copy are one
+// token, so answering either answers the card.
+func TestEveryDeliveryOfACardCarriesTheSameToken(t *testing.T) {
+	env := newTestEnv(t)
+	env.createUser("u@acme.test", "dev-Passw0rd!", model.PermSuperuser)
+	token, _ := env.login("u@acme.test", "dev-Passw0rd!")
+
+	placeholder := newFakeVendor(t)
+	modelID := env.registerModel(placeholder)
+	env.GatewayAgent()
+	env.pointModelAt(modelID, parkingVendor(t, modelID, "The model is now disabled."))
+
+	frames := env.streamTurn(token, map[string]any{"prompt": "disable that model", "model_id": modelID})
+	live := confirmRequest(t, frames[len(frames)-1])
+	chatID := chatIDOf(t, frames)
+
+	rec := env.do(http.MethodPost, "/v1/chat/history", token, map[string]string{"chat_id": chatID})
+	env.expectStatus(rec, http.StatusOK)
+	var resp historyResponse
+	env.decode(rec, &resp)
+	restored := resp.Messages[len(resp.Messages)-1].Confirm
+	if restored == nil {
+		t.Fatal("the pending card was not restored")
+	}
+	if restored.Token != live.Token {
+		t.Fatalf("a reload handed over a different token than the stream did, so one of the two cards is dead:\n live %q\n reload %q",
+			live.Token, restored.Token)
+	}
 }

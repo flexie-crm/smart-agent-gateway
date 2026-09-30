@@ -7,6 +7,7 @@ import (
 
 	"flexie.io/sag/internal/datasource"
 	"flexie.io/sag/internal/sqlguard"
+	"flexie.io/sag/internal/tools/template"
 )
 
 // Settings is one query tool instance, read from its stored configuration:
@@ -39,9 +40,6 @@ func ParseConfig(config json.RawMessage) (Settings, error) {
 		datasource.Config
 		Access Access          `json:"access"`
 		Policy sqlguard.Policy `json:"policy"`
-		// A declared setting arrives as a string, whatever its type: the form is
-		// one shape for all of them (template.FieldCheckbox).
-		ThroughChat string `json:"reach.chat"`
 		// The checkboxes, as the form stores them: one object, a key per
 		// capability. It is read as a map rather than as named fields because
 		// which capabilities exist is the DRIVER's answer, and a list here would
@@ -79,7 +77,7 @@ func ParseConfig(config json.RawMessage) (Settings, error) {
 	allowed := map[string]bool{}
 	if d, ok := datasource.Get(wire.Driver); ok {
 		for _, c := range d.Capabilities() {
-			if v, ok := wire.Allow[c.Key].(string); ok && truthy(v) {
+			if v, ok := wire.Allow[c.Key].(string); ok && template.Ticked(v) {
 				allowed[c.Key] = true
 			}
 		}
@@ -89,7 +87,7 @@ func ParseConfig(config json.RawMessage) (Settings, error) {
 		Connection:  wire.Config,
 		Access:      wire.Access,
 		Policy:      wire.Policy,
-		ThroughChat: truthy(wire.ThroughChat),
+		ThroughChat: template.ReachChat(config),
 		Allowed:     allowed,
 	}, nil
 }
@@ -97,11 +95,3 @@ func ParseConfig(config json.RawMessage) (Settings, error) {
 // truthy reads a checkbox's stored value. Anything a form can send for "on" is
 // on, and everything else is off: a setting that decides where a connection
 // goes must not depend on which of "true" or "1" a client happened to send.
-func truthy(value string) bool {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "true", "1", "yes", "on":
-		return true
-	default:
-		return false
-	}
-}

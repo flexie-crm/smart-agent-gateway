@@ -6,8 +6,8 @@
 // call site, every request the chat makes goes through here.
 
 export interface Session {
-  accessToken: string
-  user: { id: number; email: string; name: string }
+  accessToken: string;
+  user: { id: number; email: string; name: string };
 }
 
 /**
@@ -16,17 +16,19 @@ export interface Session {
  * build environment; in production the console is served from the same origin
  * and the base is empty.
  */
-const API_BASE: string = import.meta.env.VITE_SAG_API_URL ?? ''
+const API_BASE: string = import.meta.env.VITE_SAG_API_URL ?? "";
 
 /**
  * The origin the gateway is served from, which is where its OAuth callback page
  * lives. A popup message that does not come from here is not the gateway's, so
  * the console can ignore it. Empty base means same origin (production).
  */
-export const apiOrigin: string = API_BASE ? new URL(API_BASE).origin : window.location.origin
+export const apiOrigin: string = API_BASE
+  ? new URL(API_BASE).origin
+  : window.location.origin;
 
 function apiURL(path: string): string {
-  return `${API_BASE}${path}`
+  return `${API_BASE}${path}`;
 }
 
 // The session lives ONLY in memory. The access token is short-lived, and the
@@ -34,18 +36,18 @@ function apiURL(path: string): string {
 // browser keeps and JavaScript cannot read. So a reload starts with nothing here
 // and recovers the session from the cookie (see bootstrap), and there is no token
 // sitting in localStorage for a cross-site script to steal.
-let current: Session | null = null
+let current: Session | null = null;
 
 export function currentSession(): Session | null {
-  return current
+  return current;
 }
 
 export function setSession(session: Session | null): void {
-  current = session
+  current = session;
 }
 
 /** Signals that the session died mid-request, so the app can show sign-in. */
-export const SESSION_EXPIRED = 'sag:session-expired'
+export const SESSION_EXPIRED = "sag:session-expired";
 
 /**
  * What kind of installation this is.
@@ -60,14 +62,9 @@ export const SESSION_EXPIRED = 'sag:session-expired'
  * installation does not mean revisiting every screen.
  */
 export interface Posture {
-  single_user: boolean
-  local_sign_in: boolean
-  single_machine: boolean
-  /**
-   * Whether a model can run on hardware this installation owns, and therefore
-   * whether there is anything for the Inference screen to be about.
-   */
-  local_models: boolean
+  single_user: boolean;
+  local_sign_in: boolean;
+  single_machine: boolean;
 }
 
 /** A deployment, which is what anything unrecognised is treated as. */
@@ -75,28 +72,14 @@ export const SERVER_POSTURE: Posture = {
   single_user: false,
   local_sign_in: false,
   single_machine: false,
-  // A deployment always has this, on every platform: machines JOIN a server
-  // over the network rather than shipping inside it.
-  local_models: true,
-}
-
+};
 
 /** One person on their own computer. */
 export const PERSONAL_POSTURE: Posture = {
   single_user: true,
   local_sign_in: true,
   single_machine: true,
-  // The one capability a desktop does not always have, because here the fleet
-  // IS this computer and it can only run a model if an engine shipped with the
-  // application. The Windows installer carries none (KB/36), so its build sets
-  // this to 0 and the menu, the screen and the "add local model" button all go
-  // with it. macOS ships an engine and is unaffected.
-  //
-  // Decided by the build for the same reason the rest of the posture is: a
-  // bundle simply IS what it was compiled as, and asking at run time leaves a
-  // moment where the product does not know what it offers.
-  local_models: import.meta.env.VITE_SAG_LOCAL_MODELS !== '0',
-}
+};
 
 /**
  * Which one this build is.
@@ -112,7 +95,28 @@ export const PERSONAL_POSTURE: Posture = {
  * offer.
  */
 export const POSTURE: Posture =
-  import.meta.env.VITE_SAG_PERSONAL === '1' ? PERSONAL_POSTURE : SERVER_POSTURE
+  import.meta.env.VITE_SAG_PERSONAL === "1" ? PERSONAL_POSTURE : SERVER_POSTURE;
+
+/**
+ * Whether this build runs models on the computer it is installed on.
+ *
+ * NOT the same question as whether there is an Inference screen, and confusing
+ * the two is what hid that screen on Windows for a while. Any installation can
+ * have machines: a machine is a server with a graphics card in it, somewhere
+ * else, added by exchanging certificates with it. What varies is whether THIS
+ * computer is also one of them, which it is only where an engine shipped inside
+ * the application.
+ *
+ * Decided by the build, like the posture above and for the same reason: a bundle
+ * simply IS what it was compiled as. Set to "0" by the Windows build, which
+ * carries no engine (KB/36); unset, and therefore true, on macOS and on the web,
+ * so neither changes.
+ *
+ * It decides one sentence. The list decides the rest by what is in it, and the
+ * server does not send this computer at all where it cannot exist
+ * (app.Nodes, withoutAMachineThatCannotExistHere).
+ */
+export const LOCAL_ENGINE: boolean = import.meta.env.VITE_SAG_LOCAL_ENGINE !== '0'
 
 /**
  * Whether the server this page is talking to is somebody's working copy.
@@ -130,12 +134,12 @@ export const POSTURE: Posture =
  */
 export async function fetchServerIsDev(): Promise<boolean> {
   try {
-    const res = await fetch(apiURL('/v1/meta'), { credentials: 'include' })
-    if (!res.ok) return false
-    const body = (await res.json()) as { dev?: boolean }
-    return body.dev === true
+    const res = await reach(apiURL("/v1/meta"), { credentials: "include" });
+    if (!res.ok) return false;
+    const body = (await res.json()) as { dev?: boolean };
+    return body.dev === true;
   } catch {
-    return false
+    return false;
   }
 }
 
@@ -147,22 +151,23 @@ export async function fetchServerIsDev(): Promise<boolean> {
  * what is removed is the typing.
  */
 export async function signInLocally(): Promise<Session> {
-  const res = await fetch(apiURL('/v1/auth/local'), {
-    method: 'POST',
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
-  })
+  const res = await reach(apiURL("/v1/auth/local"), {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+  });
   if (!res.ok) {
-    const body = await res.json().catch(() => null)
+    const body = await res.json().catch(() => null);
     throw new Error(
-      (body && (body.error_description as string)) || 'This computer could not be signed in.',
-    )
+      (body && (body.error_description as string)) ||
+        "This computer could not be signed in.",
+    );
   }
   // keep(), exactly as signIn does, and forgetting it was a real bug rather
   // than an untidiness: the cookie was set and the access token thrown away, so
   // the very next request was unauthenticated, whoAmI answered "nobody", and
   // the console sat on "Signing in" forever having successfully signed in.
-  return keep(await res.json())
+  return keep(await res.json());
 }
 
 /**
@@ -170,25 +175,28 @@ export async function signInLocally(): Promise<Session> {
  * not asked to remember one. The server puts them back where they were, and the
  * switcher in the sidebar moves them.
  */
-export async function signIn(email: string, password: string): Promise<Session> {
-  const res = await fetch(apiURL('/v1/auth/login'), {
-    method: 'POST',
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
+export async function signIn(
+  email: string,
+  password: string,
+): Promise<Session> {
+  const res = await reach(apiURL("/v1/auth/login"), {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password }),
-  })
+  });
   if (!res.ok) {
     // A wrong password and an account nobody has placed in a workspace are
     // different problems, and sending the second one to check their password
     // would be sending them to fix the thing that works.
-    const body = await res.json().catch(() => null)
+    const body = await res.json().catch(() => null);
     throw new Error(
-      body?.error === 'no_workspace'
-        ? 'This account is not in any workspace yet. An administrator has to add it to one.'
-        : 'Invalid email or password.',
-    )
+      body?.error === "no_workspace"
+        ? "This account is not in any workspace yet. An administrator has to add it to one."
+        : "Invalid email or password.",
+    );
   }
-  return keep(await res.json())
+  return keep(await res.json());
 }
 
 /**
@@ -197,21 +205,21 @@ export async function signIn(email: string, password: string): Promise<Session> 
  * a pair that speaks for the new workspace, and the old refresh token dies.
  */
 export async function switchWorkspace(workspaceID: number): Promise<Session> {
-  const res = await apiFetch('/v1/auth/workspace', {
-    method: 'POST',
+  const res = await apiFetch("/v1/auth/workspace", {
+    method: "POST",
     body: JSON.stringify({ workspace_id: workspaceID }),
-  })
-  if (!res.ok) throw new Error('That workspace could not be opened.')
-  return keep(await res.json())
+  });
+  if (!res.ok) throw new Error("That workspace could not be opened.");
+  return keep(await res.json());
 }
 
-function keep(body: { access_token: string; user: Session['user'] }): Session {
+function keep(body: { access_token: string; user: Session["user"] }): Session {
   const session: Session = {
     accessToken: body.access_token,
     user: body.user,
-  }
-  setSession(session)
-  return session
+  };
+  setSession(session);
+  return session;
 }
 
 /**
@@ -225,33 +233,40 @@ function keep(body: { access_token: string; user: Session['user'] }): Session {
  * legitimately want the same list at the same moment; neither is a reason
  * to make the server say the same thing twice.
  */
-export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
-  const method = (init.method ?? 'GET').toUpperCase()
-  if (method !== 'GET') return dispatch(path, init)
+export async function apiFetch(
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const method = (init.method ?? "GET").toUpperCase();
+  if (method !== "GET") return dispatch(path, init);
 
-  let shared = inflight.get(path)
+  let shared = inflight.get(path);
   if (!shared) {
-    shared = dispatch(path, init).finally(() => inflight.delete(path))
-    inflight.set(path, shared)
+    shared = dispatch(path, init).finally(() => inflight.delete(path));
+    inflight.set(path, shared);
   }
   // Every caller reads a clone; the shared response itself stays unread, so
   // no caller can consume the body out from under another.
-  return (await shared).clone()
+  return (await shared).clone();
 }
 
-const inflight = new Map<string, Promise<Response>>()
+const inflight = new Map<string, Promise<Response>>();
 
 async function dispatch(path: string, init: RequestInit): Promise<Response> {
-  const session = currentSession()
-  const headers = new Headers(init.headers)
-  headers.set('Content-Type', 'application/json')
-  if (session) headers.set('Authorization', `Bearer ${session.accessToken}`)
+  const session = currentSession();
+  const headers = new Headers(init.headers);
+  headers.set("Content-Type", "application/json");
+  if (session) headers.set("Authorization", `Bearer ${session.accessToken}`);
 
   // credentials:include so the browser attaches the refresh cookie on the auth
   // endpoints (it is path-scoped, so it rides no other call) and can store a
   // rotated one from the response.
-  let res = await fetch(apiURL(path), { ...init, headers, credentials: 'include' })
-  if (res.status !== 401) return res
+  let res = await reach(apiURL(path), {
+    ...init,
+    headers,
+    credentials: "include",
+  });
+  if (res.status !== 401) return res;
 
   // The access token expired (or there was none): mint a fresh one from the
   // refresh cookie and retry once.
@@ -261,21 +276,21 @@ async function dispatch(path: string, init: RequestInit): Promise<Response> {
   // failed request and the session is left alone to be tried again. Treating
   // silence as a refusal is what signed somebody out every time the server
   // restarted underneath them.
-  let refreshed: Session | null
+  let refreshed: Session | null;
   try {
-    refreshed = await refresh()
+    refreshed = await refresh();
   } catch {
-    return res
+    return res;
   }
   if (!refreshed) {
-    setSession(null)
-    window.dispatchEvent(new CustomEvent(SESSION_EXPIRED))
-    return res
+    setSession(null);
+    window.dispatchEvent(new CustomEvent(SESSION_EXPIRED));
+    return res;
   }
 
-  headers.set('Authorization', `Bearer ${refreshed.accessToken}`)
-  res = await fetch(apiURL(path), { ...init, headers, credentials: 'include' })
-  return res
+  headers.set("Authorization", `Bearer ${refreshed.accessToken}`);
+  res = await reach(apiURL(path), { ...init, headers, credentials: "include" });
+  return res;
 }
 
 /**
@@ -290,9 +305,9 @@ async function dispatch(path: string, init: RequestInit): Promise<Response> {
 // looks exactly like an expired session.
 function refresh(): Promise<Session | null> {
   refreshing ??= refreshFromCookie().finally(() => {
-    refreshing = null
-  })
-  return refreshing
+    refreshing = null;
+  });
+  return refreshing;
 }
 
 /**
@@ -321,10 +336,10 @@ export async function bootstrap(): Promise<Session | null> {
       // twice) sent two refreshes of the same cookie at once. Rotation is
       // single-use: one won, one was refused, and the refusal signed the person
       // out. It was reported as "on 4-5 refreshes it randomly lands on login".
-      return await refresh()
+      return await refresh();
     } catch {
-      if (attempt >= BOOTSTRAP_WAITS.length) return null
-      await new Promise((done) => setTimeout(done, BOOTSTRAP_WAITS[attempt]))
+      if (attempt >= BOOTSTRAP_WAITS.length) return null;
+      await new Promise((done) => setTimeout(done, BOOTSTRAP_WAITS[attempt]));
     }
   }
 }
@@ -340,7 +355,9 @@ export async function bootstrap(): Promise<Session | null> {
  * It widens rather than polling flat, so a gateway that is properly gone is not
  * hammered a hundred times on the way to the same answer.
  */
-const BOOTSTRAP_WAITS = [250, 500, 1000, 2000, 3000, 4000, 5000, 5000, 5000, 5000]
+const BOOTSTRAP_WAITS = [
+  250, 500, 1000, 2000, 3000, 4000, 5000, 5000, 5000, 5000,
+];
 
 /**
  * refreshSession refreshes the access token, sharing the single-flight above
@@ -349,14 +366,14 @@ const BOOTSTRAP_WAITS = [250, 500, 1000, 2000, 3000, 4000, 5000, 5000, 5000, 500
  */
 export async function refreshSession(): Promise<boolean> {
   try {
-    return (await refresh()) !== null
+    return (await refresh()) !== null;
   } catch {
     // Silence is not a refusal: the socket reconnects and asks again.
-    return false
+    return false;
   }
 }
 
-let refreshing: Promise<Session | null> | null = null
+let refreshing: Promise<Session | null> | null = null;
 
 /**
  * Offline is the server not answering: it is down, restarting, or the network
@@ -370,27 +387,63 @@ let refreshing: Promise<Session | null> | null = null
  */
 export class Offline extends Error {
   constructor() {
-    super('the gateway did not answer')
-    this.name = 'Offline'
+    super("The gateway did not answer.");
+    this.name = "Offline";
+  }
+}
+
+/**
+ * Unreadable is an answer that ARRIVED and could not be understood.
+ *
+ * Different from silence, which is no answer at all, and from a refusal, which
+ * is the gateway saying no in words we wrote. This is a 200 whose body is not
+ * the JSON it claimed to be: a proxy's error page, a truncated response, a
+ * gateway that died mid-write. Naming it keeps it from being read as either of
+ * the other two.
+ */
+export class Unreadable extends Error {
+  constructor() {
+    super("The gateway's answer could not be read.");
+    this.name = "Unreadable";
+  }
+}
+
+/**
+ * reach is fetch with the browser's own failure NAMED.
+ *
+ * A rejected fetch is the only way a request says nothing at all: the server is
+ * down, restarting, or the network went away. The browser reports that as a
+ * bare TypeError, which is exactly what it also throws when OUR code has a bug
+ * (a property read off something undefined, a function that is not one). Left
+ * unnamed the two are indistinguishable, and every fault in the console reads
+ * as "the gateway did not answer" -- sending somebody to look at a server that
+ * is working perfectly, and burying the one stack trace that said what actually
+ * happened.
+ *
+ * So every request in this file goes through here, and after it an unnamed
+ * throw means the console, not the gateway.
+ */
+async function reach(url: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch {
+    throw new Offline();
   }
 }
 
 async function refreshFromCookie(): Promise<Session | null> {
   // What we held when this attempt began, so a refusal can be told from a race.
-  const before = currentSession()
-  let res: Response
-  try {
-    // No body: the refresh token is the HttpOnly cookie the browser sends on its
-    // own. The response mints a new access token and rotates the cookie.
-    res = await fetch(apiURL('/v1/auth/refresh'), {
-      method: 'POST',
-      credentials: 'include',
-    })
-  } catch {
-    // The server did not answer. That says nothing about whether the session is
-    // still good, so nothing is concluded and nothing is thrown away.
-    throw new Offline()
-  }
+  const before = currentSession();
+  // No body: the refresh token is the HttpOnly cookie the browser sends on its
+  // own. The response mints a new access token and rotates the cookie.
+  //
+  // reach turns a rejection into Offline: the server did not answer, which says
+  // nothing about whether the session is still good, so nothing is concluded
+  // and nothing is thrown away.
+  const res = await reach(apiURL("/v1/auth/refresh"), {
+    method: "POST",
+    credentials: "include",
+  });
   // A SERVER ERROR IS NOT A REFUSAL. Only the server saying no ends a session.
   //
   // Anything 5xx is the gateway (or whatever sits in front of it) failing to
@@ -399,7 +452,7 @@ async function refreshFromCookie(): Promise<Session | null> {
   // session is over" is the same bug as treating silence as a refusal, only
   // harder to see, because this time an answer really did come back. It signed
   // people out mid-sentence every time the server was restarted behind a proxy.
-  if (res.status >= 500) throw new Offline()
+  if (res.status >= 500) throw new Offline();
   if (!res.ok) {
     // REFUSED, but somebody else may have already succeeded.
     //
@@ -412,11 +465,11 @@ async function refreshFromCookie(): Promise<Session | null> {
     // The check is precise rather than forgiving: only a session that ARRIVED
     // while this attempt was in flight counts, so a genuinely expired cookie
     // still ends the session on the first answer.
-    const now = currentSession()
-    if (now && now !== before) return now
-    return null
+    const now = currentSession();
+    if (now && now !== before) return now;
+    return null;
   }
-  return keep(await res.json())
+  return keep(await res.json());
 }
 
 /**
@@ -435,52 +488,120 @@ export class ApiError extends Error {
     readonly description: string,
     readonly fields: Record<string, string> = {},
   ) {
-    super(description)
-    this.name = 'ApiError'
+    super(description);
+    this.name = "ApiError";
   }
 }
 
-async function refusal(res: Response, method: string, path: string): Promise<ApiError> {
+async function refusal(
+  res: Response,
+  method: string,
+  path: string,
+): Promise<ApiError> {
   const body = (await res.json().catch(() => null)) as {
-    error?: string
-    error_description?: string
-    fields?: Record<string, string>
-  } | null
+    error?: string;
+    error_description?: string;
+    fields?: Record<string, string>;
+  } | null;
   return new ApiError(
     res.status,
-    body?.error ?? 'unknown',
+    body?.error ?? "unknown",
     body?.error_description ?? `${method} ${path} failed (${res.status})`,
     body?.fields ?? {},
-  )
+  );
 }
 
 /** A request whose answer is a JSON body. A refusal throws the ApiError. */
-export async function json<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const res = await apiFetch(path, init)
-  if (!res.ok) throw await refusal(res, (init.method ?? 'GET').toUpperCase(), path)
-  return (await res.json()) as T
+export async function json<T>(
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
+  const res = await apiFetch(path, init);
+  if (!res.ok)
+    throw await refusal(res, (init.method ?? "GET").toUpperCase(), path);
+  try {
+    return (await res.json()) as T;
+  } catch {
+    // An answer arrived and is not what it said it was. That is neither a
+    // refusal nor silence, and reporting it as either would be a guess.
+    throw new Unreadable();
+  }
+}
+
+/**
+ * apiUpload sends files as multipart, with the session on it.
+ *
+ * Every file goes under the SAME field name, which is what a `multiple` file
+ * input posts and what the other end reads as a list.
+ *
+ * It is separate from apiFetch for two reasons, and the second is the one that
+ * bites. The Content-Type must NOT be set: the browser writes it itself,
+ * including the multipart boundary, and apiFetch sets application/json on every
+ * request, which makes the body unparseable at the other end.
+ *
+ * And the body has to be REBUILT for the retry. A FormData is consumed by the
+ * attempt that sends it, so replaying the same one after a 401 sends an empty
+ * body and the server reports no file. Here it is constructed per attempt from
+ * the Files, which can be read again. (The same trap the chat's uploader found;
+ * KB/12.)
+ */
+export async function apiUpload<T>(path: string, files: File[]): Promise<T> {
+  const attempt = () => {
+    const body = new FormData();
+    for (const file of files) body.append("file", file);
+    const headers = new Headers();
+    const session = currentSession();
+    if (session) headers.set("Authorization", `Bearer ${session.accessToken}`);
+    return reach(apiURL(path), {
+      method: "POST",
+      body,
+      headers,
+      credentials: "include",
+    });
+  };
+
+  let res = await attempt();
+  if (res.status === 401) {
+    // Exactly what dispatch does, and for the same reasons: a dead cookie ends
+    // the session, silence from the server says nothing about it.
+    let refreshed: Session | null;
+    try {
+      refreshed = await refresh();
+    } catch {
+      throw await refusal(res, "POST", path);
+    }
+    if (!refreshed) {
+      setSession(null);
+      window.dispatchEvent(new CustomEvent(SESSION_EXPIRED));
+      throw await refusal(res, "POST", path);
+    }
+    res = await attempt();
+  }
+  if (!res.ok) throw await refusal(res, "POST", path);
+  return (await res.json()) as T;
 }
 
 /** A request whose answer is only its status. A refusal throws the ApiError. */
 export async function nothing(path: string, init: RequestInit): Promise<void> {
-  const res = await apiFetch(path, init)
-  if (!res.ok) throw await refusal(res, (init.method ?? 'GET').toUpperCase(), path)
+  const res = await apiFetch(path, init);
+  if (!res.ok)
+    throw await refusal(res, (init.method ?? "GET").toUpperCase(), path);
 }
 
 export const send = (method: string, body: unknown): RequestInit => ({
   method,
   body: JSON.stringify(body),
-})
+});
 
 export async function signOut(): Promise<void> {
-  setSession(null)
+  setSession(null);
   try {
     // The refresh cookie carries the token: logout revokes the session and clears
     // the cookie server-side.
-    await fetch(apiURL('/v1/auth/logout'), {
-      method: 'POST',
-      credentials: 'include',
-    })
+    await reach(apiURL("/v1/auth/logout"), {
+      method: "POST",
+      credentials: "include",
+    });
   } catch {
     // The session is gone locally either way; a failed logout is not worth
     // blocking the user on.

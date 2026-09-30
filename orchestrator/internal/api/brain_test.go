@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"flexie.io/sag/internal/model"
@@ -138,11 +139,11 @@ func TestABrainFromAnotherWorkspaceIsNotThere(t *testing.T) {
 	token, _ := env.login("admin@acme.test", "dev-Passw0rd!")
 
 	other := &model.Workspace{Slug: "globex", Name: "Globex"}
-	if err := env.app.Store.Workspaces().Create(t.Context(), other); err != nil {
+	if err := env.app.Store.Workspaces().Create(t.Context(), other, model.Nobody()); err != nil {
 		t.Fatalf("create workspace: %v", err)
 	}
 	theirs := &model.Brain{WorkspaceID: other.ID, Name: "Theirs"}
-	if err := env.app.Store.Brains().CreateBrain(t.Context(), theirs); err != nil {
+	if err := env.app.Store.Brains().CreateBrain(t.Context(), theirs, model.Nobody()); err != nil {
 		t.Fatalf("create brain: %v", err)
 	}
 
@@ -334,4 +335,101 @@ func TestDocumentFieldErrors(t *testing.T) {
 	), http.StatusBadRequest, "invalid_request", map[string]string{
 		"title": "a document needs a title",
 	})
+}
+
+// A hit has to be OPENABLE.
+//
+// The console does not LIST hits, it narrows its three panes to them and opens
+// the best one, which it can only do by naming a brain, a category and a
+// document. A category NAME selects nothing, so the id travels with the hit.
+func TestBrainSearchSaysWhichCategoryAHitIsIn(t *testing.T) {
+	env := newTestEnv(t)
+	env.createUser("admin@acme.test", "dev-Passw0rd!", model.PermSuperuser)
+	token, _ := env.login("admin@acme.test", "dev-Passw0rd!")
+
+	rec := env.do(http.MethodPost, "/v1/brains", token, map[string]any{"name": "Manual"})
+	env.expectStatus(rec, http.StatusCreated)
+	var brain model.Brain
+	env.decode(rec, &brain)
+
+	billing := env.createCategory(token, brain.ID, "Billing")
+	shipping := env.createCategory(token, brain.ID, "Shipping")
+
+	// The same word in two categories of one brain, which is the case a name
+	// cannot answer: both hits say "a category", and only an id says which.
+	env.createDocument(token, billing.ID, "Refunds",
+		"A refund is possible within thirty days of purchase.", nil)
+	env.createDocument(token, shipping.ID, "Returns",
+		"A refund is paid once the parcel is back with us.", nil)
+
+	var hits []model.BrainHit
+	env.decode(env.do(http.MethodGet, "/v1/brains/search?q=refund", token, nil), &hits)
+	if len(hits) != 2 {
+		t.Fatalf("expected both documents to match: %+v", hits)
+	}
+
+	where := map[string]model.BrainHit{}
+	for _, hit := range hits {
+		where[hit.Title] = hit
+	}
+	if got := where["Refunds"]; got.CategoryID != billing.ID || got.BrainID != brain.ID {
+		t.Fatalf("the hit cannot be opened: brain %d, category %d, want %d and %d",
+			got.BrainID, got.CategoryID, brain.ID, billing.ID)
+	}
+	if got := where["Returns"]; got.CategoryID != shipping.ID {
+		t.Fatalf("both hits claim the same category, so the id is not the document's: %+v", hits)
+	}
+	// The name is still there, because it is what a person reads.
+	if where["Refunds"].Category != "Billing" || where["Returns"].Category != "Shipping" {
+		t.Fatalf("a hit stopped saying where it lives in words: %+v", hits)
+	}
+
+	// A caller says how many hits it can use, and gets that many.
+	env.decode(env.do(http.MethodGet, "/v1/brains/search?q=refund&limit=1", token, nil), &hits)
+	if len(hits) != 1 {
+		t.Fatalf("the limit was ignored: %+v", hits)
+	}
+}
+
+// The ceiling on a search, which is the whole reason the limit is a parameter
+// rather than whatever a caller fancies. It needs no database: it is a rule
+// about a query string.
+func TestSearchLimitIsHeldToItsCeiling(t *testing.T) {
+	for _, tc := range []struct {
+		query string
+		want  int
+	}{
+		{"", searchDefaultLimit},
+		{"limit=", searchDefaultLimit},
+		{"limit=abc", searchDefaultLimit},
+		{"limit=0", searchDefaultLimit},
+		{"limit=-5", searchDefaultLimit},
+		{"limit=1", 1},
+		{"limit=20", 20},
+		{"limit=50", searchMaxLimit},
+		// Above the ceiling is not clamped quietly to it, it is "not given":
+		// the same rule a mangled id gets, so a caller reading its own request
+		// back can tell it was not honoured.
+		{"limit=51", searchDefaultLimit},
+		{"limit=100000", searchDefaultLimit},
+	} {
+		r := httptest.NewRequest(http.MethodGet, "/v1/brains/search?q=x&"+tc.query, nil)
+		if got := searchLimit(r); got != tc.want {
+			t.Errorf("searchLimit(%q) = %d, want %d", tc.query, got, tc.want)
+		}
+	}
+}
+
+// createCategory is a category in a brain, the way the console makes one.
+func (e *testEnv) createCategory(token string, brainID int64, name string) model.BrainCategory {
+	e.t.Helper()
+	rec := e.do(http.MethodPost, fmt.Sprintf("/v1/brains/%d/categories", brainID), token,
+		map[string]any{"name": name})
+	e.expectStatus(rec, http.StatusCreated)
+
+	var category model.BrainCategory
+	if err := json.Unmarshal(rec.Body.Bytes(), &category); err != nil {
+		e.t.Fatalf("decode category: %v", err)
+	}
+	return category
 }

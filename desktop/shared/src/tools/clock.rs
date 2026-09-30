@@ -22,7 +22,10 @@ pub const NAME: &str = "current_time";
 pub const VERSION: i64 = 1;
 
 pub async fn run(_args: Value) -> Response {
-    Response::ok(now(chrono::Local::now(), iana_time_zone::get_timezone().ok()))
+    Response::ok(now(
+        chrono::Local::now(),
+        iana_time_zone::get_timezone().ok(),
+    ))
 }
 
 /// now describes one instant as the person's own computer sees it.

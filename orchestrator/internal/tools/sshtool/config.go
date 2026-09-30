@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"flexie.io/sag/internal/cmdpolicy"
+	"flexie.io/sag/internal/tools/template"
 )
 
 const (
@@ -63,9 +64,20 @@ type Config struct {
 	Limits  Limits           `json:"limits"`
 	Policy  cmdpolicy.Policy `json:"policy"`
 	// ThroughChat carries the connection through the chat application of
-	// whoever is using the tool, for a server this gateway cannot reach. It is a
-	// declared setting, so it arrives as a string like all of them.
-	ThroughChat string `json:"reach.chat"`
+	// whoever is using the tool, for a server this gateway cannot reach.
+	//
+	// Read by template.ReachChat rather than unmarshalled into a field of its
+	// own, because the form's dotted key is stored NESTED and a field named for
+	// the dotted spelling matches nothing.
+	ThroughChat bool `json:"-"`
+	// Reach is that nested shape, and it is here to be CARRIED: Config
+	// deliberately re-marshals this struct (to record defaults and drop what is
+	// not a setting), so a stored setting with no field here is discarded
+	// altogether, which is what happened to this one. Nothing reads it; the
+	// unmarshal fills it and the marshal writes it back.
+	Reach struct {
+		Chat string `json:"chat,omitempty"`
+	} `json:"reach,omitempty"`
 
 	// reach and reachKey are the caller's, filled in per call and never stored:
 	// unexported, so they cannot reach the database or a fingerprint by
@@ -136,6 +148,8 @@ func parseSettings(raw json.RawMessage) (Config, error) {
 		return Config{}, fmt.Errorf("the tool's configuration could not be read")
 	}
 
+	cfg.ThroughChat = template.ReachChat(raw)
+
 	cfg.Host = strings.TrimSpace(cfg.Host)
 	cfg.Username = strings.TrimSpace(cfg.Username)
 	cfg.HostKey = strings.TrimSpace(cfg.HostKey)
@@ -199,11 +213,3 @@ func (l Limits) validate() error {
 // truthy reads a checkbox's stored value. Anything a form can send for "on" is
 // on: a setting that decides where a connection goes must not depend on which
 // of "true" or "1" a client happened to send.
-func truthy(value string) bool {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "true", "1", "yes", "on":
-		return true
-	default:
-		return false
-	}
-}

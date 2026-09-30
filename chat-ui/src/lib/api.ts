@@ -417,7 +417,7 @@ export interface ToolCallField {
    * statement and a terminal's output are both text kept as it came, and they
    * sit on opposite halves of a call.
    */
-  as?: 'command' | 'text' | 'sql' | 'table' | 'body';
+  as?: 'command' | 'text' | 'sql' | 'javascript' | 'yaml' | 'table' | 'body';
 }
 
 export interface ToolCallRecord {

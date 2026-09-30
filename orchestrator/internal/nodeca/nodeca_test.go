@@ -8,6 +8,8 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"math/big"
+	"net"
 	"testing"
 	"time"
 )
@@ -437,5 +439,135 @@ func TestTwoCertificatesNeverShareASerial(t *testing.T) {
 			t.Fatalf("serial %s was issued twice", serial)
 		}
 		seen[serial] = true
+	}
+}
+
+// aSelfSignedMachine is a machine that enrolled by hand: it made its own key and
+// signed its own certificate, so nothing chains to it and the certificate itself
+// is the only thing that identifies it. That is the case ClientTLSPinned is for.
+func aSelfSignedMachine(t *testing.T) (addr, certPEM string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("key: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: "self-enrolled"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("self-sign: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyDER, _ := x509.MarshalECPrivateKey(key)
+	identity, err := tls.X509KeyPair(pemBytes,
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}))
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+
+	// The client's certificate is asked for and not judged: what is under test
+	// is the CLIENT's check of the machine, and a hand-enrolled machine holds no
+	// copy of our authority to judge it with.
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{identity},
+		ClientAuth:   tls.RequestClientCert,
+		MinVersion:   tls.VersionTLS13,
+	})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				buf := make([]byte, 5)
+				if _, err := conn.Read(buf); err == nil {
+					_, _ = conn.Write(buf)
+				}
+			}()
+		}
+	}()
+	return listener.Addr().String(), string(pemBytes)
+}
+
+// A resumed session does not skip the PIN either.
+//
+// The same trap as the test above, on the other client path and found the same
+// way: the check lived in VerifyPeerCertificate, which TLS does not call when a
+// session is resumed, so the pin was checked on the first connection to a
+// machine and absent on every one after it. Nothing here gives a client a
+// session cache, so nothing resumed and the pin always held in practice; this
+// test is what keeps that from being the reason it works.
+func TestResumingASessionDoesNotSkipCheckingThePinnedCertificate(t *testing.T) {
+	ca := authority(t)
+	ours, err := ca.IssueClient("sag-orchestrator", time.Now())
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	addr, theirs := aSelfSignedMachine(t)
+	// A second machine, so there is a real certificate to present that is not
+	// the pinned one.
+	_, somebodyElse := aSelfSignedMachine(t)
+
+	cache := tls.NewLRUClientSessionCache(4)
+	dial := func(pinned string) (*tls.Conn, error) {
+		cfg, err := ClientTLSPinned(ours, pinned)
+		if err != nil {
+			return nil, err
+		}
+		cfg.ClientSessionCache = cache
+		conn, err := tls.Dial("tcp", addr, cfg)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := conn.Write([]byte("hello")); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+		// TLS 1.3 sends its ticket after the handshake and a client only files
+		// one away while reading, so without this the cache stays empty and
+		// this test would prove nothing.
+		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		_, _ = conn.Read(make([]byte, 5))
+		_ = conn.SetReadDeadline(time.Time{})
+		return conn, nil
+	}
+
+	first, err := dial(theirs)
+	if err != nil {
+		t.Fatalf("the first connection to a pinned machine failed: %v", err)
+	}
+	_ = first.Close()
+
+	// The shortcut has to be really available, or the rest proves nothing.
+	second, err := dial(theirs)
+	if err != nil {
+		t.Fatalf("the second connection failed: %v", err)
+	}
+	resumed := second.ConnectionState().DidResume
+	_ = second.Close()
+	if !resumed {
+		t.Fatal("the session was not resumed, so this test cannot say anything")
+	}
+
+	// Now the same address, pinned to somebody else's certificate. It must be
+	// refused, and the point is that it must be refused on a handshake that
+	// never looks at the certificates.
+	if third, err := dial(somebodyElse); err == nil {
+		_ = third.Close()
+		t.Fatal("a resumed session was accepted against a certificate it was not pinned to")
 	}
 }

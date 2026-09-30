@@ -73,7 +73,7 @@ func (a *App) MachineCertificate(ctx context.Context) (certPEM, key string, err 
 // at which somebody has already done the work: they installed the node, copied
 // two things out of a terminal, and pressed a button. A refusal here has to be
 // about what they pasted, and it has to be specific enough to fix.
-func (a *App) AddPinnedMachine(ctx context.Context, name, address, certPEM, key string) (*model.InferenceNode, error) {
+func (a *App) AddPinnedMachine(ctx context.Context, name, address, certPEM, key string, by model.Actor) (*model.InferenceNode, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, fmt.Errorf("that machine needs a name")
@@ -115,7 +115,7 @@ func (a *App) AddPinnedMachine(ctx context.Context, name, address, certPEM, key 
 		CertExpiresAt: &expires,
 		PinnedCert:    &pinned,
 	}
-	if err := a.Store.Nodes().Create(ctx, node); err != nil {
+	if err := a.Store.Nodes().Create(ctx, node, by); err != nil {
 		return nil, err
 	}
 	a.Log.Info().Str("node", nodeID).Str("name", name).Str("at", baseURL).
@@ -239,7 +239,7 @@ func mintNodeKey() (string, error) {
 // reasons. An address changes when a mapping or a lease does, and the machine is
 // otherwise untouched. A certificate changes only when the machine made a new
 // one, which means somebody re-ran the installer.
-func (a *App) EditMachineByNodeID(ctx context.Context, nodeID, name, address, certPEM string) (*model.InferenceNode, error) {
+func (a *App) EditMachineByNodeID(ctx context.Context, nodeID, name, address, certPEM string, by model.Actor) (*model.InferenceNode, error) {
 	node, err := a.Store.Nodes().ByNodeID(ctx, nodeID)
 	if err != nil {
 		return nil, err
@@ -271,7 +271,7 @@ func (a *App) EditMachineByNodeID(ctx context.Context, nodeID, name, address, ce
 		expires := cert.NotAfter
 		node.CertExpiresAt = &expires
 	}
-	if err := a.Store.Nodes().Update(ctx, node); err != nil {
+	if err := a.Store.Nodes().Update(ctx, node, by); err != nil {
 		return nil, err
 	}
 	a.Log.Info().Str("node", node.NodeID).Str("at", node.BaseURL).Msg("machine changed")

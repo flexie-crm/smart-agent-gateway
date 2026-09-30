@@ -464,14 +464,14 @@ func TestModelCannotUseForeignVendor(t *testing.T) {
 
 	ctx := context.Background()
 	other := &model.Workspace{Slug: "globex", Name: "Globex"}
-	if err := env.app.Store.Workspaces().Create(ctx, other); err != nil {
+	if err := env.app.Store.Workspaces().Create(ctx, other, model.Nobody()); err != nil {
 		t.Fatalf("create workspace: %v", err)
 	}
 	foreignVendor := &model.AIVendor{
 		WorkspaceID: other.ID, VendorKey: model.VendorAnthropic,
 		Name: "Their Anthropic", Credentials: []byte("their-sealed-key"),
 	}
-	if err := env.app.Store.Vendors().Create(ctx, foreignVendor); err != nil {
+	if err := env.app.Store.Vendors().Create(ctx, foreignVendor, model.Nobody()); err != nil {
 		t.Fatalf("create foreign vendor: %v", err)
 	}
 
@@ -529,7 +529,7 @@ func TestUnreadableCredentialsAreReported(t *testing.T) {
 	}
 	// Corrupt the sealed value the way a lost key would look: unknown id.
 	stored.Credentials = append([]byte{1, 1, 'z'}, stored.Credentials[3:]...)
-	if err := env.app.Store.Vendors().Update(ctx, stored); err != nil {
+	if err := env.app.Store.Vendors().Update(ctx, stored, model.Nobody()); err != nil {
 		t.Fatalf("store corrupted credentials: %v", err)
 	}
 

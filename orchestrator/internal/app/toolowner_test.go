@@ -56,6 +56,7 @@ func (s *ownerSpy) Variants() []template.Variant {
 func (s *ownerSpy) Fields(string) ([]template.Section, error) { return nil, nil }
 func (s *ownerSpy) SecretPaths(string) []string               { return nil }
 func (s *ownerSpy) Params() []template.Param                  { return nil }
+func (s *ownerSpy) DefaultDescription() string                { return "" }
 func (s *ownerSpy) DefaultGuide() string                      { return "" }
 
 func (s *ownerSpy) Config(string, map[string]any) (json.RawMessage, error) {
@@ -99,7 +100,7 @@ func spyTool(t *testing.T, e *env, alias string) *ownerSpy {
 	e.app.Templates.Add(spy)
 	if _, err := e.app.CreateCustomTool(context.Background(), e.ws.ID, "ownerspy", template.Input{
 		Alias: alias, Variant: "spy",
-	}); err != nil {
+	}, nil, model.Nobody()); err != nil {
 		t.Fatalf("create spy tool: %v", err)
 	}
 	return spy
@@ -118,7 +119,7 @@ func TestEachAgentIsItsOwnAgent(t *testing.T) {
 	if err := e.app.Store.Agents().Create(ctx, &model.Agent{
 		WorkspaceID: e.ws.ID, Key: "sysadmin", Name: "Sysadmin",
 		Tools: []string{"ownerspy_one"}, Status: model.StatusActive,
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
 

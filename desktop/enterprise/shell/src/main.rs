@@ -159,7 +159,15 @@ fn main() {
             // Where this installation keeps its files, told once to the half
             // that remembers the chosen folder.
             if let Ok(dir) = server::state_dir() {
-                sag_desktop::workspace::use_state_dir(dir);
+                sag_desktop::workspace::use_state_dir(dir.clone());
+                // And the browser the assistant drives, FETCHED here and
+                // started by the first browser tool call. This edition's
+                // gateway is on somebody else's server, and the browser is
+                // still here: it reaches what only this computer can reach,
+                // which is the whole reason this is an application and not a
+                // page. See `bring_up` for why the fetch is eager and the
+                // start is not.
+                sag_desktop::browser::bring_up(dir);
             }
             // And where the SETTINGS file is, which is somewhere else: the store
             // plugin writes under the identifier, everything else here is under
@@ -222,8 +230,20 @@ fn main() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("the shell could not start");
+        .build(tauri::generate_context!())
+        .expect("the shell could not start")
+        .run(|_handle, event| {
+            // The browser goes when the application does.
+            //
+            // This edition had no exit handler at all, because it had nothing
+            // of its own to shut down: its gateway belongs to somebody else's
+            // server. A browser is the first child it owns, and a child nobody
+            // ends is several processes left holding a profile directory with
+            // nothing running that knows about them.
+            if let tauri::RunEvent::Exit = event {
+                tauri::async_runtime::block_on(sag_desktop::browser::supervise::stop());
+            }
+        });
 }
 
 /// The appearance, handed to every page a window loads, BEFORE any of them
@@ -499,7 +519,10 @@ mod permission_contract {
                 (!name.is_empty() && !name.starts_with("//")).then(|| name.to_string())
             })
             .collect();
-        assert!(!registered.is_empty(), "no commands were read from the handler list");
+        assert!(
+            !registered.is_empty(),
+            "no commands were read from the handler list"
+        );
 
         let permissions = super::PERMISSION_FILES.concat();
         let unpermitted: Vec<&String> = registered

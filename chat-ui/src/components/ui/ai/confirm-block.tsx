@@ -15,6 +15,7 @@ import type { ConfirmationRequest } from '@/lib/chat-types'
 import { t } from '@lib/utils'
 import { principalOf, secondaryOf, lookOf, type Accent, type RiskLook } from '@lib/confirm-proposal'
 import { StatusMark } from './status-mark'
+import { TIMELINE_CHEVRON } from './timeline-chevron'
 
 /**
  * Asking a person to approve something the assistant wants to do.
@@ -190,7 +191,7 @@ function Rest({ details, skip, lang }: { details: Record<string, unknown>; skip?
         onClick={() => setOpen((v) => !v)}
         className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
       >
-        <ChevronRight className={`size-3.5 transition-transform ${open ? 'rotate-90' : ''}`} />
+        <ChevronRight className={`${TIMELINE_CHEVRON} transition-transform ${open ? 'rotate-90' : ''}`} />
         {t('confirm_details', lang, 'Details')}
         <span className="text-muted-foreground/60">({rest.length})</span>
       </button>

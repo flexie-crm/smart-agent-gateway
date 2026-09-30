@@ -148,55 +148,30 @@ describe('adding a local model', () => {
 })
 
 /**
- * And the installation that has no machines at all.
+ * And the installation that ships no engine of its own.
  *
- * The Windows personal edition ships no engine (KB/36), so every model is
- * hosted. The button must be absent rather than present-and-failing: an
- * administrator holds `machines:view` there exactly as anywhere else, so a
- * permission check alone would still show it.
+ * The Windows personal edition carries none (KB/36), and for a while that hid
+ * this button, the Inference screen and its route. It was the wrong conclusion
+ * from a true fact: a machine is a server with a graphics card in it, added by
+ * exchanging certificates with it (Nodes.tsx), and on a personal installation
+ * that is the ONLY way in, because the gateway is on loopback and nothing can
+ * call it back. Hiding the screen took away the one kind of inference that
+ * works there.
  *
- * The page reads the posture at import time, so this case imports it fresh.
+ * So what is left deciding this button is the permission, and nothing else.
  */
 describe('an installation that carries no engine', () => {
-  async function pageWithoutAnEngine() {
-    vi.resetModules()
-    vi.doMock('@/lib/api', async () => {
-      const actual = await vi.importActual<typeof import('@/lib/api')>('@/lib/api')
-      return { ...actual, POSTURE: { ...actual.PERSONAL_POSTURE, local_models: false } }
-    })
-    // Both from the SAME fresh graph. Resetting the modules gives the page a new
-    // copy of every module it imports, auth included, and a provider from the
-    // old copy holds a context the new page cannot read: it fails with "useAuth
-    // must be used inside an AuthProvider" while looking correctly wrapped.
-    const { Models: Fresh } = await import('@/pages/Models')
-    const { render: renderFresh, screen: screenFresh } = await import('@/test-utils')
-    renderFresh(
+  it('still offers to add a model from a machine', async () => {
+    serve()
+    render(
       <StrictMode>
-        <Fresh />
+        <Models />
       </StrictMode>,
     )
-    return screenFresh
-  }
-
-  afterEach(() => vi.doUnmock('@/lib/api'))
-
-  it('does not offer to add a local model', async () => {
-    serve()
-    const page = await pageWithoutAnEngine()
     // Waited for rather than asserted immediately: the screen renders its
     // actions before its rows arrive, so a bare query would pass on an empty
     // page and prove nothing.
-    expect(await page.findByRole('button', { name: /add cloud model/i })).toBeInTheDocument()
-    expect(page.queryByRole('button', { name: /add local model/i })).not.toBeInTheDocument()
-  })
-
-  it('does not tell an empty screen to add one from a machine', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => new Response(JSON.stringify({ models: [], vendors: [] }), { status: 200 })),
-    )
-    const page = await pageWithoutAnEngine()
-    expect(await page.findByText(/Add a vendor first/)).toBeInTheDocument()
-    expect(page.queryByText(/from a machine of ours/)).not.toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /add cloud model/i })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /add local model/i })).toBeInTheDocument()
   })
 })

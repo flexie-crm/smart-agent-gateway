@@ -7,6 +7,11 @@
 //! how an outside address is opened, and how a shell that cannot start says so.
 
 pub mod appearance;
+// The headless browser the assistant drives. Public because the SHELLS call
+// into it: each edition's `RunEvent::Exit` ends it, the way it already ends the
+// gateway, and a browser that outlives the application holds its profile
+// directory against the next start.
+pub mod browser;
 pub mod device;
 pub mod environment;
 pub mod link;

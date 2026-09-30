@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"flexie.io/sag/internal/mcpclient"
 	"flexie.io/sag/internal/model"
+	"flexie.io/sag/internal/oauthclient"
 )
 
 // How a finished connection is reported to the console.
@@ -67,7 +67,7 @@ func TestAConnectionThatFoundNoToolsSaysThatInstead(t *testing.T) {
 // the answer; a generic failure printed over it is a step backwards.
 func TestARefusalIsReportedInTheRemotesOwnWords(t *testing.T) {
 	refused := fmt.Errorf("exchange: %w",
-		&mcpclient.RemoteOAuthError{Reason: "the user is not eligible for MCP access"})
+		&oauthclient.RemoteOAuthError{Reason: "the user is not eligible for MCP access"})
 	payload := notice(t, nil, model.MCPSyncResult{}, refused)
 
 	if payload["connected"] != false {
@@ -103,7 +103,7 @@ func TestAFailureWithNoReasonStillSaysWhatToDo(t *testing.T) {
 // An empty reason is not a reason. The remote said nothing usable, so the
 // person gets the words that at least tell them what to do.
 func TestAnEmptyRemoteReasonFallsBackRatherThanShowingNothing(t *testing.T) {
-	payload := notice(t, nil, model.MCPSyncResult{}, &mcpclient.RemoteOAuthError{Reason: ""})
+	payload := notice(t, nil, model.MCPSyncResult{}, &oauthclient.RemoteOAuthError{Reason: ""})
 
 	if payload["detail"] == "" {
 		t.Fatal("a refusal reported with no words at all")

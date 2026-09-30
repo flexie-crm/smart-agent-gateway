@@ -41,7 +41,7 @@ func TestEveryToolTheLoopAddsIsKnownAsOurs(t *testing.T) {
 		Name:        "House",
 		Tools:       e.app.DefaultTools(),
 		Status:      model.StatusActive,
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		t.Fatalf("create the gateway: %v", err)
 	}
 	// And an agent, so the delegation tools ride along too.
@@ -50,7 +50,7 @@ func TestEveryToolTheLoopAddsIsKnownAsOurs(t *testing.T) {
 		Key:         "researcher",
 		Name:        "Researcher",
 		Status:      model.StatusActive,
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		t.Fatalf("create an agent: %v", err)
 	}
 

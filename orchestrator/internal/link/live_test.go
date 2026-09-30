@@ -2,13 +2,15 @@ package link
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -19,6 +21,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+
+	"flexie.io/sag/internal/linktest"
 )
 
 // The two halves, against each other.
@@ -73,7 +77,7 @@ func TestTheRustClientAndThisServerAgree(t *testing.T) {
 	defer gateway.stop()
 
 	client := startRustClient(t, gateway.url, "a-real-looking-token")
-	defer client.stop()
+	defer client.Stop()
 
 	waitFor(t, "the real client to link", func() bool { return r.Online(5, 11, "the-laptop") })
 
@@ -379,9 +383,9 @@ func TestTheRustClientAndThisServerAgree(t *testing.T) {
 		}
 		go func() {
 			time.Sleep(time.Second)
-			client.quit()
+			client.Quit()
 			time.Sleep(2 * time.Second)
-			client.reopen() // the person opens it again
+			client.Reopen() // the person opens it again
 		}()
 
 		started := time.Now()
@@ -782,6 +786,196 @@ func TestTheRustClientAndThisServerAgree(t *testing.T) {
 		other := ask(`{"command":"echo [$SAG_LIVE_CHECK]","conversation":92}`)
 		if output, _ := other["output"].(string); strings.Contains(output, "carried") {
 			t.Fatalf("one conversation's terminal saw another's: %q", output)
+		}
+	})
+
+	// A big answer crosses the wire intact, which is a claim about the
+	// TRANSPORT rather than about the terminal.
+	//
+	// It is here because the opposite was nearly believed. The control socket
+	// keeps the websocket library's default read limit of 32768 bytes, and a
+	// message over it does not truncate: the connection is closed with
+	// StatusMessageTooBig. The Rust side caps one answer at 96 KiB. Two
+	// constants, a plain conflict, and a conclusion that a command printing
+	// between 32 and 96 KiB would kill the link.
+	//
+	// It would not, because a result never travels the control socket: the
+	// application dials back and the answer comes over a carried stream, which
+	// is created with SetReadLimit(-1) (conn.go). The control socket carries
+	// the open request out and a refusal back, and nothing else.
+	//
+	// So this test proves the transport rather than the reasoning, which is
+	// what was missing. Script output is about to make big answers ordinary.
+	t.Run("an answer far bigger than the control socket allows arrives whole", func(t *testing.T) {
+		if runs := r.Runs(5, 11, "the-laptop"); runs["terminal"] == 0 {
+			t.Skip("this build of the application has no terminal")
+		}
+		// Comfortably over the 32768 the control socket would refuse, and under
+		// the 96 KiB the far end trims to, so what comes back is the whole of
+		// what was printed rather than a trimmed tail.
+		const lines = 1200 // ~62 KB at 52 bytes a line
+		// MARSHALLED, not assembled. The first version of this built the object
+		// by hand, and the shell quoting inside the command produced JSON the
+		// encoder refused. That reads in the output as "a big answer did not
+		// cross the wire", which is a test bug wearing the costume of the thing
+		// under test.
+		args, err := json.Marshal(map[string]any{
+			"command": fmt.Sprintf(
+				`for i in $(seq 1 %d); do echo "line $i 0123456789012345678901234567890123456789"; done`,
+				lines),
+			"wait":         30,
+			"conversation": 93,
+		})
+		if err != nil {
+			t.Fatalf("the arguments could not be written: %v", err)
+		}
+		answer, err := r.Call(context.Background(), 5, 11, "the-laptop", "terminal", args, "a test")
+		if err != nil {
+			t.Fatalf("a big answer did not cross the wire: %v", err)
+		}
+		if !answer.OK {
+			t.Fatalf("the terminal refused: %s (%s)", answer.Message, answer.Kind)
+		}
+		var content struct {
+			Output string `json:"output"`
+		}
+		if err := json.Unmarshal(answer.Content, &content); err != nil {
+			t.Fatalf("the answer could not be read: %v", err)
+		}
+		if len(content.Output) <= 32768 {
+			t.Fatalf("the answer is %d bytes, which does not test the limit at all",
+				len(content.Output))
+		}
+		// Both ends of it, so a truncation anywhere shows.
+		if !strings.Contains(content.Output, "line 1 0123456789") {
+			t.Error("the start of the answer is missing")
+		}
+		if !strings.Contains(content.Output, fmt.Sprintf("line %d 0123456789", lines)) {
+			t.Errorf("the end of the answer is missing (%d bytes arrived)", len(content.Output))
+		}
+		// And the link is still there afterwards, which is the failure this
+		// would have been: a closed connection, not a short answer.
+		if !r.Online(5, 11, "the-laptop") {
+			t.Error("the link went down carrying it")
+		}
+	})
+
+	// The two calls a skill is run with, spelled rather than imported: this
+	// file is `package link` and tools/machine imports link, so naming them
+	// from there would be a cycle. Both halves are held to these strings by the
+	// contract test over desktop/link-tools.json.
+	const (
+		skillInstall = "skill_install"
+		skillRun     = "skill_run"
+	)
+
+	// A SKILL, end to end and across the language boundary: a version this
+	// computer has never seen is asked for, sent, and run.
+	//
+	// The Go half decides what to send and the Rust half decides what to keep
+	// and how to run it, and the two were written against a document rather
+	// than against each other. This is the only thing that says they agree.
+	t.Run("a skill is sent to the computer and its script runs", func(t *testing.T) {
+		if runs := r.Runs(5, 11, "the-laptop"); runs[skillRun] == 0 {
+			t.Skip("this build of the application does not run skills")
+		}
+		const version = 9001
+		hashed := func(body string) string {
+			sum := sha256.Sum256([]byte(body))
+			return hex.EncodeToString(sum[:])
+		}
+		// A script that imports a sibling and echoes its arguments, so one run
+		// proves the tree went down whole AND that nothing was expanded on the
+		// way.
+		helper := "VALUE = 'the sibling'\n"
+		main := "import sys, helper\nprint(helper.VALUE, '|'.join(sys.argv[1:]))\n"
+		manifest := "# A skill\n"
+
+		call := func(name string, args map[string]any) Result {
+			t.Helper()
+			raw, err := json.Marshal(args)
+			if err != nil {
+				t.Fatalf("the arguments could not be written: %v", err)
+			}
+			answer, err := r.Call(context.Background(), 5, 11, "the-laptop", name, raw, "a test")
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+			return answer
+		}
+
+		// 1. It does not have it, and says so as a KIND. This is what the
+		//    gateway's own handler reads to decide to send the package.
+		missing := call(skillRun, map[string]any{
+			"skill": "pdf-processing", "version": version, "script": "scripts/main.py",
+		})
+		if missing.OK {
+			t.Fatal("it claims to have a version it has never been sent")
+		}
+		if missing.Kind != "skill_missing" {
+			t.Fatalf("it answered %q/%q, want the kind the gateway reads",
+				missing.Kind, missing.Message)
+		}
+
+		// 2. Sent.
+		put := call(skillInstall, map[string]any{
+			"skill": "pdf-processing", "version": version,
+			"files": []map[string]any{
+				{"path": "SKILL.md", "text": manifest, "sha256": hashed(manifest)},
+				{"path": "helper.py", "text": helper, "sha256": hashed(helper)},
+				{"path": "scripts/main.py", "text": main, "sha256": hashed(main)},
+			},
+		})
+		if !put.OK {
+			t.Fatalf("the install was refused: %s", put.Message)
+		}
+
+		// 3. And now it runs, with its arguments untouched by any shell.
+		ran := call(skillRun, map[string]any{
+			"skill": "pdf-processing", "version": version, "script": "scripts/main.py",
+			"args": []string{"*.pdf", "two words"},
+		})
+		if !ran.OK {
+			if strings.Contains(ran.Message, "needs Python 3") {
+				t.Skip("no Python on this machine, so there is nothing to run")
+			}
+			t.Fatalf("the script did not run: %s", ran.Message)
+		}
+		var said struct {
+			Output   string `json:"output"`
+			ExitCode int    `json:"exit_code"`
+		}
+		if err := json.Unmarshal(ran.Content, &said); err != nil {
+			t.Fatalf("the answer is unreadable: %v (%s)", err, ran.Content)
+		}
+		if !strings.Contains(said.Output, "the sibling") {
+			t.Errorf("the script could not import what came with it: %q", said.Output)
+		}
+		if !strings.Contains(said.Output, "*.pdf|two words") {
+			t.Errorf("the arguments were expanded or split somewhere: %q", said.Output)
+		}
+		if said.ExitCode != 0 {
+			t.Errorf("exit code %d", said.ExitCode)
+		}
+
+		// 4. A hash that does not match keeps NOTHING, so a truncated script
+		//    can never run as a shorter script.
+		const other = 9002
+		bad := call(skillInstall, map[string]any{
+			"skill": "pdf-processing", "version": other,
+			"files": []map[string]any{
+				{"path": "scripts/main.py", "text": main, "sha256": hashed("something else")},
+			},
+		})
+		if bad.OK {
+			t.Fatal("a package that did not arrive intact was kept")
+		}
+		after := call(skillRun, map[string]any{
+			"skill": "pdf-processing", "version": other, "script": "scripts/main.py",
+		})
+		if after.Kind != "skill_missing" {
+			t.Errorf("after a refused install it answers %q/%q, want missing",
+				after.Kind, after.Message)
 		}
 	})
 
@@ -1226,13 +1420,13 @@ func (s *restartableServer) stop() {
 }
 
 // rustClient is the shipped client, running as its own process.
-type rustClient struct {
-	cmd *exec.Cmd
-	// What it was started with, so it can be started AGAIN the way a person
-	// reopening the application starts it: same folder, same state, same
-	// identity.
-	start func() *exec.Cmd
-}
+//
+// The launcher lives in internal/linktest rather than here, because the skills
+// gate needs the same real application and a copy of forty lines that starts a
+// process is the kind of duplication that drifts silently: one suite gains an
+// environment variable and the other does not, and the difference shows up as a
+// behaviour nobody changed.
+type rustClient = linktest.Client
 
 // startRustClientRenewing is the same client, given the credential it should
 // ask for when the gateway says the first one is nearly out, and watched.
@@ -1273,7 +1467,11 @@ func (s *said) Write(p []byte) (int, error) {
 	for _, line := range strings.Split(strings.TrimRight(string(p), "\n"), "\n") {
 		s.lines = append(s.lines, heard{at: now, line: line})
 	}
-	os.Stderr.Write(p) // and still visible when a test fails
+	// Echoed so a failing test shows what was said, and DELIBERATELY not
+	// propagated: the recording above is what this writer promises, and a
+	// stderr that would not take the copy must not be reported as a failure to
+	// record. Stated with the assignment rather than left to be wondered about.
+	_, _ = os.Stderr.Write(p)
 	return len(p), nil
 }
 
@@ -1305,70 +1503,14 @@ func (s *said) all() string {
 }
 
 func startRustClient(t *testing.T, base, token string) *rustClient {
-	return startRustClientSaying(t, base, token, nil)
+	return linktest.Start(t, base, token)
 }
 
 func startRustClientSaying(t *testing.T, base, token string, heard *said) *rustClient {
-	t.Helper()
-	root, err := filepath.Abs("../../..")
-	if err != nil {
-		t.Fatalf("find the repository: %v", err)
+	if heard == nil {
+		return linktest.Start(t, base, token)
 	}
-	binary := filepath.Join(root, "desktop", "target", "debug", "examples", "link_client")
-	if _, err := os.Stat(binary); err != nil {
-		t.Fatalf("the client has not been built (%v); make link-e2e builds it", err)
-	}
-
-	// A folder for it to work in, and somewhere to remember it. In the
-	// application a person chooses one with their own folder dialog; a test
-	// cannot open a dialog, so it is given.
-	state := t.TempDir()
-	folder := t.TempDir()
-	cmd := exec.Command(binary)
-	cmd.Env = append(os.Environ(),
-		"SAG_LINK_URL="+base, "SAG_LINK_TOKEN="+token,
-		"SAG_LINK_STATE="+state, "SAG_LINK_FOLDER="+folder)
-	var out io.Writer = os.Stderr // its own words, where a failing test shows them
-	if heard != nil {
-		out = heard
-	}
-	cmd.Stdout = out
-	cmd.Stderr = out
-	start := func() *exec.Cmd {
-		again := exec.Command(binary)
-		again.Env = cmd.Env
-		again.Stdout = out
-		again.Stderr = out
-		if err := again.Start(); err != nil {
-			t.Fatalf("start the client: %v", err)
-		}
-		return again
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start the client: %v", err)
-	}
-	return &rustClient{cmd: cmd, start: start}
-}
-
-// quit ends the application the way quitting it does, and reopen starts it
-// again. Together they are the most common interruption there is: somebody
-// closing the chat application, or a new version being installed.
-func (c *rustClient) quit() {
-	if c.cmd.Process != nil {
-		_ = c.cmd.Process.Kill()
-		_, _ = c.cmd.Process.Wait()
-	}
-}
-
-func (c *rustClient) reopen() {
-	c.cmd = c.start()
-}
-
-func (c *rustClient) stop() {
-	if c.cmd.Process != nil {
-		_ = c.cmd.Process.Kill()
-		_ = c.cmd.Wait()
-	}
+	return linktest.StartSaying(t, base, token, heard)
 }
 
 // liveEcho is a service that sends back whatever it is sent.

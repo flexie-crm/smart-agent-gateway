@@ -52,15 +52,20 @@ pub struct Environment {
     pub missing: Vec<String>,
 }
 
+/// How long somebody's shell may take to say what its PATH is, in seconds.
+///
+/// Only the POSIX `shell_dirs` below asks a shell anything, so on Windows this
+/// is compiled and never read, which warns on every build of the crate there.
+/// The cfg matches that function's, so macOS reads exactly what it reads today.
+#[cfg(not(target_os = "windows"))]
+const SHELL_PATIENCE: u64 = 3;
+
 /// The programs worth asking about.
 ///
 /// Chosen by one test: does knowing change what the assistant would write?
 /// `python3` against `python` does, and so does `rg` against `grep`. A library
 /// it would never invoke from a command line does not, and every name costs a
 /// line in every system prompt for the rest of the conversation.
-/// How long somebody's shell may take to say what its PATH is, in seconds.
-const SHELL_PATIENCE: u64 = 3;
-
 const PROBE: &[&str] = &[
     // Shells and runtimes.
     "bash", "zsh", "pwsh", "powershell", "python3", "python", "node", "deno", "bun", "ruby",
@@ -161,10 +166,44 @@ fn home() -> Option<PathBuf> {
 /// Windows needs none of this: a program started from Explorer inherits the
 /// system and user PATH already.
 fn path_dirs() -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|raw| std::env::split_paths(&raw).collect())
-        .unwrap_or_default();
-    for dir in login_path() {
+    // THE PERSON'S OWN DIRECTORIES FIRST, then this process's.
+    //
+    // The order is the whole point, and it was the other way round. An
+    // application opened from the Finder is started by launchd with
+    // `/usr/bin:/bin:/usr/sbin:/sbin`, and the person's directories were
+    // APPENDED to that, so the system's copy of a program was always found
+    // first. Measured on a Mac with two Pythons: `python3` was
+    // /usr/bin/python3, version 3.9.6, while the same command in the same
+    // person's terminal was /usr/local/bin/python3, version 3.13.1. A skill's
+    // script then ran on a Python they do not use, and `pip install` put the
+    // library somewhere their own Python cannot see.
+    //
+    // Which is exactly the thing this function exists to prevent, one step
+    // further along: it was written because `node -v` failed inside the
+    // application and worked in the terminal. Finding a DIFFERENT node is the
+    // same bug wearing a disguise, and it is worse, because nothing fails.
+    //
+    // Still ADDED rather than substituted, which is the safety the append was
+    // for: a login shell that hangs, fails or says nothing leaves this as the
+    // process's own PATH and the behaviour we had before, never an empty one.
+    ordered(
+        login_path(),
+        std::env::var_os("PATH")
+            .map(|raw| std::env::split_paths(&raw).collect())
+            .unwrap_or_default(),
+    )
+}
+
+/// ordered is the rule itself, with nothing read from the machine.
+///
+/// Separated so it can be TESTED. The first version of that test read the real
+/// PATH and the real login shell, which under `cargo test` are the same list,
+/// so it returned early and passed on the old order as happily as on the new
+/// one. A rule about order has to be given two different lists to have an order
+/// at all.
+fn ordered(mine: Vec<PathBuf>, theirs: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut dirs = mine;
+    for dir in theirs {
         if !dirs.contains(&dir) {
             dirs.push(dir);
         }
@@ -377,5 +416,76 @@ mod tests {
         assert_eq!(env.shell, crate::tools::terminal::shell());
         assert_eq!(env.path_separator, if cfg!(windows) { "\\" } else { "/" });
         assert_eq!(env.line_ending, if cfg!(windows) { "\r\n" } else { "\n" });
+    }
+}
+
+#[cfg(test)]
+mod run_path_order {
+    use super::*;
+
+    /// THE PERSON'S DIRECTORIES COME FIRST.
+    ///
+    /// Driven with two fabricated lists, because the rule is about ORDER and
+    /// the machine cannot supply one: under `cargo test` the process's PATH and
+    /// the login shell's are the same list, so the first version of this test
+    /// had nothing to compare and passed on the old order too.
+    ///
+    /// What the old order cost, measured on a Mac with two Pythons: `python3`
+    /// inside the application was /usr/bin/python3, 3.9.6, while the same
+    /// command in the same person's terminal was /usr/local/bin/python3,
+    /// 3.13.1. Nothing failed to say so. A skill's script ran on a language
+    /// version nobody chose, and `pip install` put the library where their own
+    /// Python could not see it.
+    #[test]
+    fn what_the_person_has_is_searched_first() {
+        let mine = vec![PathBuf::from("/usr/local/bin"), PathBuf::from("/opt/homebrew/bin")];
+        let launchd = vec![
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/bin"),
+            PathBuf::from("/usr/sbin"),
+        ];
+
+        let dirs = ordered(mine.clone(), launchd.clone());
+        assert_eq!(
+            dirs.first(),
+            Some(&PathBuf::from("/usr/local/bin")),
+            "the system's directories are searched first ({dirs:?}): a program with two copies \
+             on this machine resolves to the one the person does not use"
+        );
+        let system_at = dirs.iter().position(|d| d == &PathBuf::from("/usr/bin")).unwrap();
+        for dir in &mine {
+            assert!(
+                dirs.iter().position(|d| d == dir).unwrap() < system_at,
+                "{dir:?} is searched after /usr/bin"
+            );
+        }
+
+        // Nothing is dropped, and nothing is repeated: this is a search path,
+        // and a duplicate entry is a directory read twice for every program.
+        for dir in mine.iter().chain(launchd.iter()) {
+            assert_eq!(dirs.iter().filter(|d| *d == dir).count(), 1, "{dir:?}");
+        }
+        assert_eq!(dirs.len(), mine.len() + launchd.len());
+    }
+
+    /// The safety the old order was for, kept. A login shell that hangs, fails
+    /// or says nothing leaves the PATH this process already had, never an empty
+    /// one: what it reports is ADDED, not substituted.
+    #[test]
+    fn a_shell_that_says_nothing_leaves_a_working_path() {
+        let launchd = vec![PathBuf::from("/usr/bin"), PathBuf::from("/bin")];
+        assert_eq!(ordered(Vec::new(), launchd.clone()), launchd);
+    }
+
+    /// And the real thing is wired to the rule, so the test above is about the
+    /// code that runs rather than about a function beside it.
+    #[test]
+    fn the_run_path_is_built_from_that_rule() {
+        let dirs = path_dirs();
+        assert!(!dirs.is_empty(), "there is no PATH at all");
+        for dir in login_path() {
+            assert!(dirs.contains(&dir), "{dir:?} is missing from the run path");
+        }
+        assert_eq!(run_path().is_some(), !dirs.is_empty());
     }
 }

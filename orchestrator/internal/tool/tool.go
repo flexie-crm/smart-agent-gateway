@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -52,6 +53,29 @@ func OwnerOfAgent() Owner {
 	return Owner("agent:" + strconv.FormatInt(agentInstances.Add(1), 10))
 }
 
+// Instance is the number this owner was minted with, and whether it belongs to
+// an agent at all.
+//
+// A tool that keeps state on the person's own COMPUTER needs that state filed
+// per agent, exactly as a tool keeping it here does, and the far side of the
+// link identifies a set of terminals by a number. This is that number. It is
+// parsed rather than stored because the format is written three lines up: one
+// place writes it, one place reads it.
+//
+// False for the Gateway's owner, which is a conversation and is already a
+// number of its own.
+func (o Owner) Instance() (int64, bool) {
+	rest, found := strings.CutPrefix(string(o), "agent:")
+	if !found {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(rest, 10, 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
 // Display is a tool's own account of what is worth reading in one of its calls.
 //
 // It is OURS and not the model's: only Name, Description and InputSchema reach
@@ -80,6 +104,20 @@ type Display struct {
 	// them. A field on neither list is not shown.
 	Sent     []Shown
 	Answered []Shown
+	// Attached is what the TOOL itself put on the call, read from the result
+	// and shown on the request side beside what was asked for.
+	//
+	// It is its own list rather than a fallback on Sent, because Sent is read
+	// from the ARGUMENTS and a field the tool computed is a different claim: a
+	// silent fallback to the result would start showing result fields on the
+	// request side of every tool that happens to answer with a name it also
+	// takes as an argument.
+	//
+	// What it exists for: an administrator configures an account header and a
+	// version parameter, and nothing on the call says whether they went. They
+	// did. Now it says so, with the values masked where they came from a
+	// credential.
+	Attached []Shown
 }
 
 // Shown is one field, and what it is rather than what it is called.
@@ -104,6 +142,8 @@ const (
 	ShownCommand ShownAs = "command"
 	ShownText    ShownAs = "text"
 	ShownSQL     ShownAs = "sql"
+	ShownJS      ShownAs = "javascript"
+	ShownYAML    ShownAs = "yaml"
 	ShownTable   ShownAs = "table"
 	ShownBody    ShownAs = "body"
 )
@@ -133,6 +173,21 @@ func Text(name string) Shown    { return Shown{Field: name, As: ShownText} }
 // its names, told apart the way a database client tells them apart.
 func SQL(name string) Shown { return Shown{Field: name, As: ShownSQL} }
 
+// YAML is a nested structure, and it reads as one: the keys told from the
+// values, and the indentation visible as shape rather than as spaces. What
+// answers in it here is the browser's page outline, which is Playwright's
+// ariaSnapshot: a tree of roles and names that a person scans for the one line
+// they want. Flat, it is a paragraph of identifiers.
+func YAML(name string) Shown { return Shown{Field: name, As: ShownYAML} }
+
+// JavaScript is a snippet somebody is going to run, and it reads as code for
+// the reason a statement does: a person approving it has to be able to SEE
+// what it does, and an unbroken wall of one colour is the shape that gets
+// waved through. Named for the language the way SQL is, rather than a generic
+// "code" kind carrying a language beside it: there is one language here, and a
+// kind that has to be told which one is a kind that can be told the wrong one.
+func JavaScript(name string) Shown { return Shown{Field: name, As: ShownJS} }
+
 // Table names the field holding the rows, and the one holding their column
 // names, which is how a database tool answers.
 func Table(rows, columns string) Shown {
@@ -145,6 +200,17 @@ func Table(rows, columns string) Shown {
 func Body(body, contentType string) Shown {
 	return Shown{Field: body, As: ShownBody, With: contentType}
 }
+
+// Payload is a structure whose type nobody has to name: an object the model
+// sent, read as the JSON it is. The same rendering as Body and without the
+// content type, because what a model passed as an argument is JSON by
+// construction and there is no service to ask.
+//
+// It exists because a request BODY was shown to nobody. A tool that posts an
+// invoice showed the verb and the path and stopped, so the one thing somebody
+// debugging needs to see (what was actually sent) was the one thing missing,
+// and it read as a body that had never been sent at all. Reported that way.
+func Payload(name string) Shown { return Shown{Field: name, As: ShownBody} }
 
 // Kind separates the four tool sources. All obey the same contract; the
 // kind drives visibility and admin grouping only.
@@ -209,7 +275,24 @@ type Schema struct {
 
 	InputSchema json.RawMessage `json:"input_schema"`
 	Kind        Kind            `json:"kind"`
-	Risk        RiskLevel       `json:"risk"`
+	// Service is the connected service a PROJECTED tool came from, and is empty
+	// for everything we ship or an administrator created. RemoteName is what
+	// that service calls the tool: our name carries a prefix so two services
+	// can both offer a "search" (KB/20), and the service itself has never heard
+	// of that prefix.
+	//
+	// Both are stored on the tools row and were being recovered afterwards by
+	// cutting ", on " out of the approval title, in two packages independently.
+	// A fact worth reading twice is worth carrying, and the title is prose
+	// written for a person to read on a card.
+	//
+	// RemoteName matters to a MODEL, not only to our dispatch: a service that
+	// projects a documentation tool of its own expects its own names as
+	// arguments, so a model told only our name would ask NLI about "nli_query"
+	// when NLI calls it "query".
+	Service    string    `json:"service,omitempty"`
+	RemoteName string    `json:"remote_name,omitempty"`
+	Risk       RiskLevel `json:"risk"`
 	// RequiresApproval routes the call through confirmation
 	// park-and-resume. Pre-park validation contract applies: approval
 	// must equal success (KB/02 §confirmation).
@@ -366,8 +449,17 @@ type Call struct {
 	// are sitting at, and a person may be signed in on two. Empty from a
 	// browser, and from anything with no person in front of it.
 	DeviceID string
-	Name     string
-	Args     json.RawMessage
+	// Owner is the agent this call belongs to, when an agent is making it.
+	//
+	// It is here for one reason, and it is the reason Owner exists at all: a
+	// tool that keeps STATE on the person's computer has to keep it per agent.
+	// Keying that state on the conversation puts the Gateway and every agent it
+	// started on one entry, and one of them ends up typing into another's
+	// program. Bound per turn where the loadout is built, because that is where
+	// an agent's identity is minted.
+	Owner Owner
+	Name  string
+	Args  json.RawMessage
 	// NoConfirm is set by non-interactive callers (worker, MCP, CLI);
 	// an approval-requiring tool must then be pre-authorized by policy.
 	NoConfirm bool
@@ -477,6 +569,16 @@ type Loadout struct {
 	// Validators are the per-tool pre-park checks, bound per turn like Handlers.
 	// Only tools that have one appear here; the rest need no pre-check.
 	Validators map[string]Validator
+	// Skills are the ids of the written procedures this turn can reach BECAUSE
+	// a tool in it names them, on top of whatever the agent itself was
+	// assigned.
+	//
+	// A tool's skills are its documentation: which paths an API has, what its
+	// codes mean. An agent that holds the tool can read them, because whoever
+	// granted the tool granted the instructions for using it, and a guide that
+	// named a skill the agent could not then open would be a signpost to a
+	// locked door.
+	Skills []int64
 }
 
 // Schema returns the schema for a tool by name, if the turn has it: offered or
@@ -540,6 +642,12 @@ func (r *Registry) LookupTopic(id string) (Topic, string, bool) {
 	}
 	return Topic{}, "", false
 }
+
+// Owner is empty for every tool in the process registry: it holds the tools the
+// code ships, which belong to nobody in particular. It exists so the registry
+// satisfies the same contract a turn's own tool table does, where a tool CAN
+// belong to one of the Gateway's agents (tools.BindToolGuide).
+func (r *Registry) Owner(string) string { return "" }
 
 // All returns every registered tool, so the workspace's tool table can be
 // reconciled with what the code actually offers. Internal tools are excluded:

@@ -2,31 +2,39 @@ package provider
 
 import "encoding/json"
 
-// TrimToBudget reduces a transcript to fit a token budget without ever
-// producing a message list a vendor will reject.
+// TrimToBudget reduces a transcript to fit a budget: the system messages stay,
+// then the newest messages, as many as fit, going back in time. Everything
+// older than the first one that does not fit is dropped, whatever it is:
+// something said, thinking, a tool call or what a tool answered.
 //
-// The naive approach (drop the oldest messages, keep the system prompt and
-// the last few) is wrong, and wrong in a way that only shows up mid tool
-// loop: at that moment the newest message is a tool result, and dropping
-// the assistant turn that requested it leaves an orphaned tool message that
-// every vendor rejects. So the rules are:
+// It used to protect everything from the last user message onward and only
+// shorten tool results in there. One question followed by a long run of tool
+// steps is all one such turn, so its tool-call arguments and its thinking could
+// never be dropped, and a request stayed the same size whatever the window was
+// set to. Oldest goes first, with no exceptions for where a turn began.
 //
-//  1. Anchor on the last user message. Everything from it to the end is the
-//     active turn and is load bearing: it is never dropped.
-//  2. Drop the oldest history before the anchor, and sweep any tool message
-//     left orphaned at the front.
-//  3. If the active turn alone still exceeds the budget, truncate the
-//     largest tool results in place rather than dropping messages, which
-//     preserves the assistant/tool pairing.
+// The one thing it will not do is separate a tool call from its answer. Every
+// vendor rejects a tool result with no call before it, so an assistant message
+// and the tool results that follow it go or stay together. When even the
+// newest of those does not fit on its own, its tool results are cut short
+// until it does, which is the only way left to fit without breaking the pair.
 //
-// The budget is expressed in characters of serialized JSON, which is a
-// deliberate approximation: it is cheap, monotonic in real token count, and
-// never needs a tokenizer per vendor. Callers derive it from the model's
-// context window (see CharsPerToken).
+// The budget is expressed in characters of serialized JSON, which is what can
+// be counted here without a tokenizer per vendor. Callers derive it from the
+// model's context window, which is in the model's own tokens, at the rate the
+// model's own counts have shown (CharsPerToken).
 const (
-	// CharsPerToken is a conservative average across English text, code, and
-	// JSON. Underestimating tokens would be dangerous, so this errs low.
-	CharsPerToken = 3
+	// GuessCharsPerToken is the rate for a model that has not reported a count
+	// yet: its first call, or one whose vendor never says. On the safe side of
+	// every model measured (3.5 to 4.4 characters a token), because the two
+	// ways of being wrong are not alike: too low trims a little early, and too
+	// high sends a request the model refuses.
+	GuessCharsPerToken = 2.0
+
+	// contextMargin is the share of the window kept free below what the rate
+	// says fits, because the rate is learned from the calls before this one
+	// and what a conversation holds shifts it a little.
+	contextMargin = 0.05
 
 	// truncationNotice marks a tool result that was cut, so the model can
 	// tell the difference between a short result and a truncated one.
@@ -37,51 +45,72 @@ const (
 	minToolResultChars = 200
 )
 
-// BudgetChars converts a context window in tokens into a character budget,
-// reserving room for the response itself.
-func BudgetChars(contextWindow, reserveTokens int) int {
+// BudgetChars converts a context window in tokens into a character budget at
+// charsPerToken, reserving room for the response itself and keeping the margin
+// free.
+func BudgetChars(contextWindow, reserveTokens int, charsPerToken float64) int {
 	usable := contextWindow - reserveTokens
 	if usable < 0 {
 		usable = 0
 	}
-	return usable * CharsPerToken
+	return int(float64(usable) * charsPerToken * (1 - contextMargin))
 }
 
 // TrimToBudget returns the messages to send. It never mutates the input.
 func TrimToBudget(messages []Message, budgetChars int) []Message {
-	if budgetChars <= 0 || len(messages) <= 2 || size(messages) <= budgetChars {
+	if budgetChars <= 0 || size(messages) <= budgetChars {
 		return messages
 	}
 
 	// System messages are always kept, wherever they sit.
 	systems, rest := splitSystem(messages)
+	room := budgetChars - size(systems)
 
-	anchor := lastUserIndex(rest)
-	if anchor < 0 {
-		// No user message at all: the whole thing is one turn, so the only
-		// safe reduction is truncating tool results.
-		return append(systems, truncateToolResults(rest, budgetChars-size(systems))...)
+	// The newest steps that fit, counted back from the end.
+	units := steps(rest)
+	start, used := len(units), 0
+	for start > 0 && used+size(units[start-1]) <= room {
+		start--
+		used += size(units[start])
+	}
+	// A tool result whose call was left behind cannot be sent.
+	for start < len(units) && units[start][0].Role == RoleTool {
+		start++
 	}
 
-	history, active := rest[:anchor], rest[anchor:]
-	budget := budgetChars - size(systems) - size(active)
-
-	// Drop history oldest first until what remains fits the leftover budget.
-	for len(history) > 0 && (budget < 0 || size(history) > budget) {
-		history = history[1:]
-		history = dropLeadingOrphanTools(history)
-	}
-
-	out := make([]Message, 0, len(systems)+len(history)+len(active))
+	out := make([]Message, 0, len(messages))
 	out = append(out, systems...)
-	out = append(out, history...)
-
-	if budget < 0 {
-		// The active turn alone is over budget: truncate its tool results
-		// rather than break the assistant/tool pairing.
-		active = truncateToolResults(active, budgetChars-size(systems))
+	if start == len(units) {
+		// Not even the newest step fits by itself. Keep it, with what its
+		// tools answered cut down to the room there is.
+		if newest := len(units) - 1; newest >= 0 && units[newest][0].Role != RoleTool {
+			out = append(out, truncateToolResults(units[newest], room)...)
+		}
+		return out
 	}
-	return append(out, active...)
+	for _, unit := range units[start:] {
+		out = append(out, unit...)
+	}
+	return out
+}
+
+// steps groups messages into what can be dropped as one: a message on its own,
+// or an assistant message together with the tool results that answer it. A
+// tool result with no assistant message before it stays a unit of its own, so
+// it can be recognised and never sent first.
+func steps(messages []Message) [][]Message {
+	var units [][]Message
+	for _, m := range messages {
+		if m.Role == RoleTool && len(units) > 0 {
+			last := units[len(units)-1]
+			if first := last[0].Role; first == RoleAssistant || first == RoleTool {
+				units[len(units)-1] = append(last, m)
+				continue
+			}
+		}
+		units = append(units, []Message{m})
+	}
+	return units
 }
 
 func splitSystem(messages []Message) (systems, rest []Message) {
@@ -93,24 +122,6 @@ func splitSystem(messages []Message) (systems, rest []Message) {
 		rest = append(rest, m)
 	}
 	return systems, rest
-}
-
-func lastUserIndex(messages []Message) int {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == RoleUser {
-			return i
-		}
-	}
-	return -1
-}
-
-// dropLeadingOrphanTools removes tool results left at the front with no
-// assistant message requesting them.
-func dropLeadingOrphanTools(messages []Message) []Message {
-	for len(messages) > 0 && messages[0].Role == RoleTool {
-		messages = messages[1:]
-	}
-	return messages
 }
 
 // truncateToolResults shrinks the largest tool results first, which frees

@@ -23,7 +23,7 @@ func TestAPointerAtAMachineIsNotOfferedAsAVendor(t *testing.T) {
 		"GET /node/models/u-1": strings.Trim(nodeModelsBody, "[]"),
 	})
 	machine := env.aMachine("gpu-1", node.url, "node-key")
-	if _, err := env.app.AttachNodeModel(context.Background(), machine.ID, env.ws.ID, "u-1"); err != nil {
+	if _, err := env.app.AttachNodeModel(context.Background(), machine.ID, env.ws.ID, "u-1", model.Nobody()); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
 

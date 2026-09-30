@@ -381,3 +381,80 @@ it('says so when a call answered with nothing', async () => {
   // And not a heading with a void under it, which is what looked broken.
   expect(view.container.textContent).not.toContain('Answered')
 })
+
+describe('a script somebody has to read before allowing it', () => {
+  // The browser's exec_js sends JavaScript, and it arrived as `text`: one
+  // colour, no tokens, an unbroken wall. A person approving a snippet has to
+  // be able to see what it does, and a wall of one colour is the shape that
+  // gets waved through.
+  it('is painted as code, not left as one colour', async () => {
+    answers({
+      name: 'browser',
+      friendly_name: 'Browser',
+      status: 'completed',
+      duration_ms: 29,
+      sent: [
+        { name: 'action', value: 'exec_js' },
+        {
+          name: 'script',
+          as: 'javascript',
+          value: "return {w: window.innerWidth, title: document.title};",
+        },
+      ],
+      answered: [{ name: 'js_result', value: '{"w":1280}' }],
+    })
+    const view = render(
+      <ToolRow
+        tool={{ id: '9', name: 'browser', friendly_name: 'Browser', status: 'completed', duration_ms: 29 }}
+      />
+    )
+    fireEvent.click(view.getByRole('button'))
+    await waitFor(() => expect(view.container.textContent).toContain('window.innerWidth'))
+
+    // Every character of it is still there to read.
+    expect(view.container.textContent).toContain('return {w: window.innerWidth, title: document.title};')
+
+    // And it went through the highlighter, which is what puts the words in
+    // elements of their own. As ONE span it is the wall this fixes, so the
+    // count is what tells the two apart.
+    //
+    // Waited for, because a grammar is fetched on demand (code-language.ts):
+    // the first render is deliberately unhighlighted and the tokens arrive
+    // when the language does.
+    const pre = view.container.querySelector('pre')
+    expect(pre).not.toBeNull()
+    await waitFor(() => expect(pre!.querySelectorAll('span').length).toBeGreaterThan(3))
+  })
+  it('paints the page outline as the structure it is', async () => {
+    // Playwright's ariaSnapshot answers in YAML: a tree of roles and names.
+    // Flat it is a paragraph of identifiers, and the shape is the whole point
+    // of it, because a person scans the indentation for the one line they
+    // want.
+    answers({
+      name: 'browser',
+      friendly_name: 'Browser',
+      status: 'completed',
+      duration_ms: 12,
+      sent: [{ name: 'action', value: 'snapshot' }],
+      answered: [
+        {
+          name: 'snapshot',
+          as: 'yaml',
+          value: '- generic [ref=e3]:\n  - banner [ref=e4]:\n    - link "Flexie" [ref=e6]',
+        },
+      ],
+    })
+    const view = render(
+      <ToolRow
+        tool={{ id: '11', name: 'browser', friendly_name: 'Browser', status: 'completed', duration_ms: 12 }}
+      />
+    )
+    fireEvent.click(view.getByRole('button'))
+    await waitFor(() => expect(view.container.textContent).toContain('banner'))
+
+    expect(view.container.textContent).toContain('link "Flexie"')
+    const pre = view.container.querySelector('pre')
+    expect(pre).not.toBeNull()
+    await waitFor(() => expect(pre!.querySelectorAll('span').length).toBeGreaterThan(3))
+  })
+})

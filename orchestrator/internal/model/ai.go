@@ -48,16 +48,13 @@ var VendorCatalog = []VendorInfo{
 	{Key: VendorZAI, Name: "Z.ai"},
 	{Key: VendorMistral, Name: "Mistral"},
 	{Key: VendorAzureOpenAI, Name: "Azure OpenAI"},
-	// Named for the server most people point it at, not for the protocol.
-	//
-	// It was "Local", and that stopped being true: OUR local story is a machine
-	// that joins itself and appears under Machines, and a model from one is
-	// added from Machines or from the models screen. What is left here is
-	// somebody ELSE's server, which has no control plane and cannot join, so
-	// typing an address and a key is the only way in. It accepts any server
-	// speaking the same protocol (vLLM, LM Studio, llama.cpp), and the form's
-	// hint says so.
-	{Key: VendorOpenAICompatible, Name: "Ollama"},
+	// Named for the PROTOCOL: any server speaking the OpenAI API, whoever runs
+	// it (Ollama, vLLM, LM Studio, llama.cpp, a hosted gateway). It was
+	// "Local", then "Ollama", and both named one kind of server for what is a
+	// standard. Our own machines are not added here: they join themselves and
+	// appear under Machines. What is left is somebody ELSE's server, which
+	// cannot join, so an address and a key are the only way in.
+	{Key: VendorOpenAICompatible, Name: "OpenAI compatible"},
 }
 
 // KnownVendorKeys is what validation checks against. It is DERIVED from the
@@ -110,6 +107,11 @@ type AIVendor struct {
 	UpdatedAt   time.Time
 	// Settings are chosen values for keys this vendor's dialect declares.
 	Settings Settings
+	// Who made it and who last changed it (model.Actor): the ids go to NULL
+	// when the person is deleted and the names are frozen, so the record reads
+	// afterwards.
+	Authored
+	Edited
 }
 
 // HasCredentials reports whether a secret is stored, without revealing it.
@@ -172,6 +174,11 @@ type InferenceNode struct {
 	PinnedCert *string
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
+	// Who made it and who last changed it (model.Actor): the ids go to NULL
+	// when the person is deleted and the names are frozen, so the record reads
+	// afterwards.
+	Authored
+	Edited
 }
 
 // AIModel is a model a workspace may route to. Pricing is stored per
@@ -191,9 +198,21 @@ type AIModel struct {
 	Status           string
 	// Settings are chosen values for keys the model may be configured with
 	// (provider.SettingsForModel). Anything not declared there is ignored.
-	Settings  Settings
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	Settings Settings
+	// MeasuredChars and MeasuredTokens are running totals of what was sent to
+	// this model and what it said that was in its own tokens, decaying a little
+	// with every call. One divided by the other is how many of our characters
+	// one of its tokens is (provider.CharsPerToken). Zero is a model that has
+	// not reported yet. Written by the running gateway, never by a person.
+	MeasuredChars  float64
+	MeasuredTokens float64
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	// Who made it and who last changed it (model.Actor): the ids go to NULL
+	// when the person is deleted and the names are frozen, so the record reads
+	// afterwards.
+	Authored
+	Edited
 }
 
 // CallCost is the dollar cost of one model call, derived from its token counts

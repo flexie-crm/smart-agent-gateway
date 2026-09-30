@@ -61,20 +61,14 @@ func (s *Server) Handler() http.Handler {
 	// The files. `os.Root` confines every open to the directory, enforced by
 	// the operating system rather than by a check written here, which is the
 	// same rule the gateway's copy of this follows.
-	root, err := os.OpenRoot(s.dir)
-	var files http.Handler
-	if err == nil {
-		files = http.StripPrefix(downloadPath, http.FileServerFS(root.FS()))
-	} else {
-		files = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			http.Error(w, "downloads are not available", http.StatusInternalServerError)
-		})
-	}
-	mux.Handle(downloadPath+"/", noIndex(files))
-
-	// The archives themselves, from the same confined root: `os.Root` keeps
-	// every open inside the directory, enforced by the operating system rather
-	// than by a check written here.
+	//
+	// Opened PER REQUEST and closed with it, which is the shape
+	// api/inferencedist.go already uses. A root opened once and kept is an open
+	// directory handle for the life of the process, and on Windows an open
+	// handle is precisely why a directory cannot be removed: seven tests in this
+	// package failed on `t.TempDir()` cleanup, on that platform only, for
+	// exactly that reason, while passing everywhere else. The cost is one
+	// syscall per request on a host that then sends a hundred megabytes.
 	//
 	// A handler per directory, each rooted AT that directory.
 	//
@@ -86,17 +80,29 @@ func (s *Server) Handler() http.Handler {
 	// claimed was one level looser than the one the code had. Rooting each
 	// prefix at its own subtree makes the claim true, and keeps it true the day
 	// something lands here that is not for everybody.
-	sub := func(name string) http.Handler {
-		if err != nil {
-			return nil
-		}
-		inner, subErr := fs.Sub(root.FS(), name)
-		if subErr != nil {
-			return nil
-		}
-		return http.StripPrefix("/"+name+"/", http.FileServerFS(inner))
+	served := func(strip, name string) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			root, err := os.OpenRoot(s.dir)
+			if err != nil {
+				http.Error(w, "downloads are not available", http.StatusInternalServerError)
+				return
+			}
+			defer func() { _ = root.Close() }()
+			tree := root.FS()
+			if name != "" {
+				inner, subErr := fs.Sub(tree, name)
+				if subErr != nil {
+					http.NotFound(w, r)
+					return
+				}
+				tree = inner
+			}
+			http.StripPrefix(strip, http.FileServerFS(tree)).ServeHTTP(w, r)
+		})
 	}
-	updateFiles, desktopFiles := sub(updatesDir), sub(desktopDir)
+	mux.Handle(downloadPath+"/", noIndex(served(downloadPath, "")))
+	updateFiles, desktopFiles := served(updatePath, updatesDir), served("/"+desktopDir+"/", desktopDir)
+	browserFiles := served("/"+browserDir+"/", browserDir)
 
 	// The installer at the root, because that is what a person pastes. It is the
 	// same file the download path serves; there is one copy on disk.
@@ -111,9 +117,14 @@ func (s *Server) Handler() http.Handler {
 	// archives above, which are what an installation fetches for itself. Not
 	// stripped, for the same reason those are not: /desktop/x.dmg is
 	// <dir>/desktop/x.dmg.
-	if desktopFiles != nil {
-		mux.Handle("GET /"+desktopDir+"/", noIndex(desktopFiles))
-	}
+	mux.Handle("GET /"+desktopDir+"/", noIndex(desktopFiles))
+
+	// The browser each desktop application fetches for itself on first use.
+	// Rooted at its own subtree like the two above, which is not tidiness: the
+	// comment on `served` records that `%2e%2e` survives routing and is decoded
+	// afterwards, so a handler rooted one level up would serve the whole
+	// directory through any of its prefixes.
+	mux.Handle("GET /"+browserDir+"/", noIndex(browserFiles))
 	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/assets/favicon-32.png", http.StatusFound)
 	})
@@ -129,9 +140,7 @@ func (s *Server) Handler() http.Handler {
 	// avoid. The specific pattern wins for the question; the prefix serves the
 	// files.
 	mux.HandleFunc("GET /updates/{edition}/{target}/{arch}/{version}", s.handleUpdate)
-	if updateFiles != nil {
-		mux.Handle("GET "+updatePath, noIndex(updateFiles))
-	}
+	mux.Handle("GET "+updatePath, noIndex(updateFiles))
 
 	// What a machine being installed asks us.
 	mux.HandleFunc("GET /v1/ip", s.handleIP)

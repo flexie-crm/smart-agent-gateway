@@ -6,7 +6,6 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Field, Modal } from '@/components/ui/modal'
 import { NativeSelect } from '@/components/ui/native-select'
-import { POSTURE } from '@/lib/api'
 import { useFormErrors } from '@/lib/form'
 import { useNotify } from '@/lib/notify'
 import { api, useResource } from '@/lib/resources'
@@ -212,17 +211,14 @@ function VendorForm({
           label="Endpoint"
           hint={
             kind === SELF_HOSTED_KIND
-              ? // Named for the server most people point it at, but it is the
-                // generic protocol, so the ones that are not Ollama are said
-                // here rather than left to be discovered.
-                // The last sentence sends the reader to a screen, so it is said
-                // only where that screen exists. An installation with no engine
-                // has no machines, and naming one is worse than saying nothing:
-                // it describes a way of doing this that is not there.
-                'The address of the server. Anything speaking the same protocol works: Ollama, vLLM, LM Studio.' +
-                (POSTURE.local_models
-                  ? ' Our own machines are not added here, they appear under Inference.'
-                  : '')
+              ? // The kind is named for the protocol, so the servers that speak it
+                // are named here rather than left to be discovered.
+                // The last sentence sends the reader to a screen, and that screen
+                // is now on every installation: a machine of ours is a server
+                // with a graphics card in it, not something running inside this
+                // application, so even a build that ships no engine has one.
+                'The address of a server speaking the OpenAI API: Ollama, vLLM, LM Studio, or any other.' +
+                ' Our own machines are not added here, they appear under Inference.'
               : 'The address of your endpoint.'
           }
           error={errors.fields.base_url}

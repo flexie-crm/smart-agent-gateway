@@ -61,17 +61,17 @@ func testToolSync(t *testing.T, st store.Store) {
 	// An administrator switches one off, restricts the other to a group, and
 	// adds friction to the one that had none.
 	group := &model.Group{WorkspaceID: ws.ID, Name: "finance"}
-	if err := st.Groups().Create(ctx, group); err != nil {
+	if err := st.Groups().Create(ctx, group, model.Nobody()); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 	clock, invoice := tools[0], tools[1]
 	clock.RequiresApproval = true
-	if err := st.Tools().Update(ctx, clock); err != nil {
+	if err := st.Tools().Update(ctx, clock, model.Nobody()); err != nil {
 		t.Fatalf("update tool: %v", err)
 	}
 	invoice.Status = model.StatusDisabled
 	invoice.Grants = []int64{group.ID}
-	if err := st.Tools().Update(ctx, invoice); err != nil {
+	if err := st.Tools().Update(ctx, invoice, model.Nobody()); err != nil {
 		t.Fatalf("update tool: %v", err)
 	}
 
@@ -119,7 +119,7 @@ func testToolGrants(t *testing.T, st store.Store) {
 	clock, invoice := tools[0], tools[1]
 
 	finance := &model.Group{WorkspaceID: ws.ID, Name: "finance"}
-	if err := st.Groups().Create(ctx, finance); err != nil {
+	if err := st.Groups().Create(ctx, finance, model.Nobody()); err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 	insider := mustUser(t, st, ws.ID, "insider@acme.test")
@@ -142,7 +142,7 @@ func testToolGrants(t *testing.T, st store.Store) {
 
 	// The first grant makes the list exclusive.
 	invoice.Grants = []int64{finance.ID}
-	if err := st.Tools().Update(ctx, invoice); err != nil {
+	if err := st.Tools().Update(ctx, invoice, model.Nobody()); err != nil {
 		t.Fatalf("grant: %v", err)
 	}
 
@@ -163,7 +163,7 @@ func testToolGrants(t *testing.T, st store.Store) {
 
 	// A disabled tool is gone for everyone, grant or no grant.
 	clock.Status = model.StatusDisabled
-	if err := st.Tools().Update(ctx, clock); err != nil {
+	if err := st.Tools().Update(ctx, clock, model.Nobody()); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
 	allowed, err = st.Tools().ListForUser(ctx, ws.ID, insider.ID)
@@ -173,6 +173,86 @@ func testToolGrants(t *testing.T, st store.Store) {
 	if len(allowed) != 1 || allowed[0].Name != "send_invoice" {
 		t.Fatalf("a disabled tool survived: %+v", allowed)
 	}
+}
+
+// Who configured an agent, and who last changed it.
+//
+// The same pair the brains carry, for the same reason one step removed: an
+// agent is set up by a person today, and an agent that writes its own
+// sub-agents is the shape this is heading for (KB/27).
+func testAgentRecordsWhoConfiguredIt(t *testing.T, st store.Store) {
+	ws := mustWorkspace(t, st, "acme")
+	author := model.Actor{UserID: mustUser(t, st, ws.ID, "author@acme.test").ID, Name: "An Author"}
+
+	agent := &model.Agent{WorkspaceID: ws.ID, Key: "helper", Name: "Helper"}
+	if err := st.Agents().Create(ctx(), agent, author); err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	stored, err := st.Agents().GetByID(ctx(), ws.ID, agent.ID)
+	if err != nil {
+		t.Fatalf("read agent: %v", err)
+	}
+	if stored.CreatedBy != author.UserID || stored.CreatedByName != "An Author" {
+		t.Fatalf("created by %d/%q", stored.CreatedBy, stored.CreatedByName)
+	}
+	if stored.UpdatedByName != "An Author" {
+		t.Errorf("updated by %q on a create", stored.UpdatedByName)
+	}
+
+	// Somebody else changes it.
+	other := model.Actor{UserID: mustUser(t, st, ws.ID, "other@acme.test").ID, Name: "Somebody Else"}
+	stored.Name = "Helper, revised"
+	if err := st.Agents().Update(ctx(), stored, other); err != nil {
+		t.Fatalf("update agent: %v", err)
+	}
+	after, err := st.Agents().GetByID(ctx(), ws.ID, agent.ID)
+	if err != nil {
+		t.Fatalf("read agent: %v", err)
+	}
+	// Who CONFIGURED it is not rewritten by an edit.
+	if after.CreatedBy != author.UserID || after.CreatedByName != "An Author" {
+		t.Errorf("the creator changed to %d/%q", after.CreatedBy, after.CreatedByName)
+	}
+	if after.UpdatedBy != other.UserID || after.UpdatedByName != "Somebody Else" {
+		t.Errorf("last changed by %d/%q", after.UpdatedBy, after.UpdatedByName)
+	}
+
+	// The list carries it too, so a screen can show it without a read per row.
+	listed, err := st.Agents().List(ctx(), ws.ID)
+	if err != nil {
+		t.Fatalf("list agents: %v", err)
+	}
+	found := false
+	for _, a := range listed {
+		if a.ID != agent.ID {
+			continue
+		}
+		found = true
+		if a.CreatedByName != "An Author" || a.UpdatedByName != "Somebody Else" {
+			t.Errorf("the listed agent says %q / %q", a.CreatedByName, a.UpdatedByName)
+		}
+	}
+	if !found {
+		t.Fatal("the agent is not in the list")
+	}
+
+	// The author leaves: the id goes, the name stays.
+	if err := st.Users().Delete(ctx(), author.UserID); err != nil {
+		t.Fatalf("delete the author: %v", err)
+	}
+	orphaned, err := st.Agents().GetByID(ctx(), ws.ID, agent.ID)
+	if err != nil {
+		t.Fatalf("read agent: %v", err)
+	}
+	if orphaned.CreatedBy != 0 || orphaned.CreatedByName != "An Author" {
+		t.Errorf("after the author left, the agent says %d/%q", orphaned.CreatedBy, orphaned.CreatedByName)
+	}
+}
+
+// actorOf is the person a test is acting as, so a write records somebody and
+// the row can be asserted on.
+func actorOf(u *model.User) model.Actor {
+	return model.Actor{UserID: u.ID, Name: u.Name}
 }
 
 func testAgents(t *testing.T, st store.Store) {
@@ -211,7 +291,7 @@ func testAgents(t *testing.T, st store.Store) {
 		Tools:             []string{"current_time", "send_invoice"},
 		ConfirmTools:      []string{"send_invoice"},
 	}
-	if err := st.Agents().Create(ctx, agent); err != nil {
+	if err := st.Agents().Create(ctx, agent, model.Nobody()); err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
 
@@ -244,7 +324,7 @@ func testAgents(t *testing.T, st store.Store) {
 	// The tool list is replaced, not merged.
 	loaded.Tools = []string{"send_invoice"}
 	loaded.ModelID = nil
-	if err := st.Agents().Update(ctx, loaded); err != nil {
+	if err := st.Agents().Update(ctx, loaded, model.Nobody()); err != nil {
 		t.Fatalf("update agent: %v", err)
 	}
 	loaded, err = st.Agents().GetByID(ctx, ws.ID, loaded.ID)
@@ -265,7 +345,7 @@ func testAgents(t *testing.T, st store.Store) {
 	// Clearing the confirm set to empty is a real configuration, and it is
 	// replaced wholesale, not merged.
 	loaded.ConfirmTools = []string{}
-	if err := st.Agents().Update(ctx, loaded); err != nil {
+	if err := st.Agents().Update(ctx, loaded, model.Nobody()); err != nil {
 		t.Fatalf("update agent: %v", err)
 	}
 	loaded, err = st.Agents().GetByID(ctx, ws.ID, loaded.ID)
@@ -280,7 +360,7 @@ func testAgents(t *testing.T, st store.Store) {
 	// is configuration and the registry is code, so configuration may lag a
 	// deploy: it must not become a dangling row that comes alive later.
 	loaded.Tools = []string{"send_invoice", "a_tool_this_build_does_not_have"}
-	if err := st.Agents().Update(ctx, loaded); err != nil {
+	if err := st.Agents().Update(ctx, loaded, model.Nobody()); err != nil {
 		t.Fatalf("update agent: %v", err)
 	}
 	loaded, err = st.Agents().GetByID(ctx, ws.ID, loaded.ID)
@@ -294,14 +374,14 @@ func testAgents(t *testing.T, st store.Store) {
 	// An agent created with no key gets one derived from its name; a second
 	// of the same name is disambiguated rather than rejected.
 	sub := &model.Agent{WorkspaceID: ws.ID, Name: "Data Analyst"}
-	if err := st.Agents().Create(ctx, sub); err != nil {
+	if err := st.Agents().Create(ctx, sub, model.Nobody()); err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
 	if sub.Key != "data-analyst" {
 		t.Fatalf("the key was not derived from the name: %q", sub.Key)
 	}
 	twin := &model.Agent{WorkspaceID: ws.ID, Name: "Data Analyst"}
-	if err := st.Agents().Create(ctx, twin); err != nil {
+	if err := st.Agents().Create(ctx, twin, model.Nobody()); err != nil {
 		t.Fatalf("create twin agent: %v", err)
 	}
 	if twin.Key != "data-analyst-2" {
@@ -318,7 +398,7 @@ func testAgents(t *testing.T, st store.Store) {
 		t.Fatalf("unset run bounds did not round-trip as nil: iter=%v timeout=%v", got.MaxIterations, got.BackgroundTimeout)
 	}
 	pinned := &model.Agent{WorkspaceID: ws.ID, Name: "Fetcher", DelegationMode: model.DelegationModeBackground}
-	if err := st.Agents().Create(ctx, pinned); err != nil {
+	if err := st.Agents().Create(ctx, pinned, model.Nobody()); err != nil {
 		t.Fatalf("create pinned agent: %v", err)
 	}
 	if got, _ := st.Agents().GetByKey(ctx, ws.ID, pinned.Key); got.DelegationMode != model.DelegationModeBackground {
@@ -347,8 +427,8 @@ func testWorkflowVersions(t *testing.T, st store.Store) {
 	ws := mustWorkspace(t, st, "workflows")
 	author := mustUser(t, st, ws.ID, "author@acme.test")
 
-	wf := &model.Workflow{WorkspaceID: ws.ID, Name: "Support", CreatedBy: author.ID}
-	if err := st.Workflows().Create(ctx, wf); err != nil {
+	wf := &model.Workflow{WorkspaceID: ws.ID, Name: "Support"}
+	if err := st.Workflows().Create(ctx, wf, actorOf(author)); err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
 	if wf.Status != model.WorkflowDraft {
@@ -361,9 +441,8 @@ func testWorkflowVersions(t *testing.T, st store.Store) {
 		v := &model.WorkflowVersion{
 			WorkflowID: wf.ID,
 			Definition: json.RawMessage(`{"kind":"profile","profile":{"reasoning":true}}`),
-			CreatedBy:  author.ID,
 		}
-		if err := st.Workflows().CreateVersion(ctx, ws.ID, v); err != nil {
+		if err := st.Workflows().CreateVersion(ctx, ws.ID, v, actorOf(author)); err != nil {
 			t.Fatalf("create version: %v", err)
 		}
 		if v.Version != i+1 {
@@ -390,13 +469,13 @@ func testWorkflowVersions(t *testing.T, st store.Store) {
 	}
 
 	// Publishing promotes exactly one version, and publishes the workflow.
-	if err := st.Workflows().Publish(ctx, ws.ID, wf.ID, versions[1].ID); err != nil {
+	if err := st.Workflows().Publish(ctx, ws.ID, wf.ID, versions[1].ID, model.Nobody()); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 	assertOnePublished(t, st, ws.ID, wf.ID, versions[1].ID)
 
 	// Publishing another demotes the first. There is never a moment with two.
-	if err := st.Workflows().Publish(ctx, ws.ID, wf.ID, versions[2].ID); err != nil {
+	if err := st.Workflows().Publish(ctx, ws.ID, wf.ID, versions[2].ID, model.Nobody()); err != nil {
 		t.Fatalf("republish: %v", err)
 	}
 	assertOnePublished(t, st, ws.ID, wf.ID, versions[2].ID)
@@ -468,8 +547,8 @@ func testWorkflowAssignmentReplacement(t *testing.T, st store.Store) {
 	ws := mustWorkspace(t, st, "assignments")
 	author := mustUser(t, st, ws.ID, "author@acme.test")
 
-	wf := &model.Workflow{WorkspaceID: ws.ID, Name: "Sales", CreatedBy: author.ID}
-	if err := st.Workflows().Create(ctx, wf); err != nil {
+	wf := &model.Workflow{WorkspaceID: ws.ID, Name: "Sales"}
+	if err := st.Workflows().Create(ctx, wf, actorOf(author)); err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
 

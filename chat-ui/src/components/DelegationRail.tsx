@@ -26,7 +26,7 @@ import { isTerminalDelegation } from '@lib/delegations'
  * front of somebody who asked what the price of gold was.
  */
 
-function formatElapsed(createdAt: number, until: number): string {
+export function formatElapsed(createdAt: number, until: number): string {
   const total = Math.max(0, Math.floor(until - createdAt))
   if (total < 60) return `${total}s`
   const minutes = Math.floor(total / 60)
@@ -37,7 +37,7 @@ function formatElapsed(createdAt: number, until: number): string {
 
 // abbrev keeps big token counts short so a whole spend line fits the chip:
 // 940 → "940", 12_310 → "12.3k", 1_850_000 → "1.85M".
-function abbrev(n: number): string {
+export function abbrev(n: number): string {
   if (n < 1000) return `${n}`
   if (n < 1_000_000) {
     const k = n / 1000
@@ -47,7 +47,7 @@ function abbrev(n: number): string {
 }
 
 // formatCost shows more precision for the small sums a single task runs up.
-function formatCost(dollars: number): string {
+export function formatCost(dollars: number): string {
   return `$${dollars < 1 ? dollars.toFixed(3) : dollars.toFixed(2)}`
 }
 
@@ -72,24 +72,29 @@ function isFleet(d: Delegation): boolean {
  * five agents each doing a different job finish at five different moments, and
  * the only honest thing to draw is how many are back.
  */
-function FleetBar({ done, agents }: { done: number; agents: number }) {
+export function FleetBar({ done, agents }: { done: number; agents: number }) {
   const proportion = agents > 0 ? Math.min(1, done / agents) : 0
+  // Spans drawn as blocks, because the chip that holds it is a button and a
+  // button holds phrasing content only.
   return (
-    <div className="h-1 w-full overflow-hidden rounded-full bg-muted">
-      <div
-        className="h-full rounded-full bg-foreground/40 transition-[width] duration-500"
+    <span className="block h-1 w-full overflow-hidden rounded-full bg-muted">
+      <span
+        className="block h-full rounded-full bg-foreground/40 transition-[width] duration-500"
         style={{ width: `${proportion * 100}%` }}
       />
-    </div>
+    </span>
   )
 }
 
 export function DelegationRail({
   delegations,
   onCancel,
+  onOpen,
 }: {
   delegations: Delegation[]
   onCancel?: (d: Delegation) => void
+  /** Opens the agent, or the batch, to read what it was asked and has done. */
+  onOpen?: (d: Delegation) => void
 }) {
   const [showAll, setShowAll] = useState(false)
 
@@ -120,13 +125,13 @@ export function DelegationRail({
     // Hidden below md (~768px), where the chat needs the whole width.
     <aside className="hidden w-64 shrink-0 flex-col gap-1.5 overflow-y-auto p-3 md:flex">
       {running.map((d) => (
-        <RunningCard key={d.id} d={d} now={now} onCancel={onCancel} />
+        <RunningCard key={d.id} d={d} now={now} onCancel={onCancel} onOpen={onOpen} />
       ))}
 
       {running.length > 0 && done.length > 0 && <div className="my-1 border-t border-border/60" />}
 
       {visible.map((d) => (
-        <DoneRow key={d.id} d={d} />
+        <DoneRow key={d.id} d={d} onOpen={onOpen} />
       ))}
 
       {folded > 0 && (
@@ -157,10 +162,12 @@ function RunningCard({
   d,
   now,
   onCancel,
+  onOpen,
 }: {
   d: Delegation
   now: number
   onCancel?: (d: Delegation) => void
+  onOpen?: (d: Delegation) => void
 }) {
   const waiting = d.status === 'waiting_approval'
   const p = d.progress
@@ -179,48 +186,57 @@ function RunningCard({
       // difference between the feature working and the bug we shipped. The
       // shapes differ in every visible way and in nothing a test can hold on to.
       data-chip-state="running"
-      className="flex flex-col gap-1 rounded-lg border bg-background p-3 text-sm shadow-sm"
+      className="flex items-start rounded-lg border bg-background text-sm shadow-sm"
     >
-      <div className="flex min-w-0 items-center gap-2">
-        <StatusMark status={d.status} size={5} />
-        <span className="min-w-0 flex-1 truncate font-medium">{d.name}</span>
-        {d.created_at ? (
-          <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">
-            {formatElapsed(d.created_at, now)}
-          </span>
-        ) : null}
-        {onCancel ? (
-          <button
-            type="button"
-            onClick={() => onCancel(d)}
-            aria-label={fleet ? 'Stop these agents' : 'Stop this agent'}
-            title={fleet ? 'Stop these agents' : 'Stop this agent'}
-            className="shrink-0 cursor-pointer rounded p-0.5 text-muted-foreground/60 hover:bg-muted hover:text-foreground"
-          >
-            <StopMark />
-          </button>
-        ) : null}
-      </div>
-      <span className="truncate text-xs text-muted-foreground">
-        {fleet
-          ? `${d.done ?? 0} of ${d.agents ?? 0} finished`
-          : waiting
-            ? 'Waiting for your approval'
-            : p?.activity || 'Working…'}
-      </span>
-      {fleet ? <FleetBar done={d.done ?? 0} agents={d.agents ?? 0} /> : null}
-      {typeof tokens === 'number' ? (
-        <div className="flex items-baseline justify-between gap-2 font-mono text-[11px] tabular-nums text-muted-foreground/80">
-          <span className="min-w-0 truncate">
-            {abbrev(tokens)} tok
-            {typeof tin === 'number' && typeof tout === 'number' ? (
-              <span className="text-muted-foreground/60"> ↑{abbrev(tin)} ↓{abbrev(tout)}</span>
+      {/* The card's body is the button that opens it, and stopping is a
+          button BESIDE it: one inside the other is two controls that cannot
+          be told apart by a keyboard, and invalid besides. */}
+      <button
+        type="button"
+        onClick={() => onOpen?.(d)}
+        className="flex min-w-0 flex-1 cursor-pointer flex-col gap-1 rounded-lg p-3 text-left hover:bg-muted/30"
+      >
+        <span className="flex min-w-0 items-center gap-2">
+          <StatusMark status={d.status} size={5} />
+          <span className="min-w-0 flex-1 truncate font-medium">{d.name}</span>
+          {d.created_at ? (
+            <span className="shrink-0 font-mono text-[11px] tabular-nums text-muted-foreground">
+              {formatElapsed(d.created_at, now)}
+            </span>
+          ) : null}
+        </span>
+        <span className="truncate text-xs text-muted-foreground">
+          {fleet
+            ? `${d.done ?? 0} of ${d.agents ?? 0} finished`
+            : waiting
+              ? 'Waiting for your approval'
+              : p?.activity || 'Working…'}
+        </span>
+        {fleet ? <FleetBar done={d.done ?? 0} agents={d.agents ?? 0} /> : null}
+        {typeof tokens === 'number' ? (
+          <span className="flex items-baseline justify-between gap-2 font-mono text-[11px] tabular-nums text-muted-foreground/80">
+            <span className="min-w-0 truncate">
+              {abbrev(tokens)} tok
+              {typeof tin === 'number' && typeof tout === 'number' ? (
+                <span className="text-muted-foreground/60"> ↑{abbrev(tin)} ↓{abbrev(tout)}</span>
+              ) : null}
+            </span>
+            {typeof cost === 'number' && cost > 0 ? (
+              <span className="shrink-0 text-muted-foreground">{formatCost(cost)}</span>
             ) : null}
           </span>
-          {typeof cost === 'number' && cost > 0 ? (
-            <span className="shrink-0 text-muted-foreground">{formatCost(cost)}</span>
-          ) : null}
-        </div>
+        ) : null}
+      </button>
+      {onCancel ? (
+        <button
+          type="button"
+          onClick={() => onCancel(d)}
+          aria-label={fleet ? 'Stop these agents' : 'Stop this agent'}
+          title={fleet ? 'Stop these agents' : 'Stop this agent'}
+          className="mr-2 mt-3.5 shrink-0 cursor-pointer rounded p-0.5 text-muted-foreground/60 hover:bg-muted hover:text-foreground"
+        >
+          <StopMark />
+        </button>
       ) : null}
     </div>
   )
@@ -250,18 +266,20 @@ function StopMark() {
  * What it says is who ran and how long it took. What it did is the Gateway's to
  * tell.
  */
-function DoneRow({ d }: { d: Delegation }) {
+function DoneRow({ d, onOpen }: { d: Delegation; onOpen?: (d: Delegation) => void }) {
   const took = d.created_at && d.completed_at ? formatElapsed(d.created_at, d.completed_at) : null
   const fleet = isFleet(d)
   return (
     // px-3 to match the running card, so the marks and the names line up down
     // the column: the chips differ in HEIGHT, which is the point, and agree on
     // every other edge, which is what stops that reading as untidiness.
-    <div
+    <button
+      type="button"
+      onClick={() => onOpen?.(d)}
       data-chip={fleet ? 'fleet' : 'agent'}
       data-chip-id={d.id}
       data-chip-state="done"
-      className="flex min-w-0 items-center gap-2 rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-xs"
+      className="flex min-w-0 cursor-pointer items-center gap-2 rounded-lg border border-border/60 bg-muted/20 px-3 py-2 text-left text-xs hover:bg-muted/40"
     >
       <StatusMark status={d.status} />
       <span className="min-w-0 flex-1 truncate text-muted-foreground">{d.name}</span>
@@ -275,6 +293,6 @@ function DoneRow({ d }: { d: Delegation }) {
           {took}
         </span>
       ) : null}
-    </div>
+    </button>
   )
 }

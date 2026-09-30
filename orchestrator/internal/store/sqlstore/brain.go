@@ -25,7 +25,7 @@ type brainStore struct{ db *sqldb.DB }
 
 // --- brains ---------------------------------------------------------------------
 
-func (s *brainStore) CreateBrain(ctx context.Context, b *model.Brain) error {
+func (s *brainStore) CreateBrain(ctx context.Context, b *model.Brain, by model.Actor) error {
 	now := time.Now().UTC()
 	b.CreatedAt, b.UpdatedAt = now, now
 	if b.Slug == "" {
@@ -37,17 +37,24 @@ func (s *brainStore) CreateBrain(ctx context.Context, b *model.Brain) error {
 	}
 
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO brains (workspace_id, name, slug, description, is_locked, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		b.WorkspaceID, b.Name, b.Slug, nullString(b.Description), b.Locked, b.CreatedAt, b.UpdatedAt)
+		`INSERT INTO brains
+		   (workspace_id, name, slug, description, is_locked,
+		    created_by, created_by_name, updated_by, updated_by_name,
+		    created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		b.WorkspaceID, b.Name, b.Slug, nullString(b.Description), b.Locked,
+		nullID(by.UserID), by.Name, nullID(by.UserID), by.Name,
+		b.CreatedAt, b.UpdatedAt)
 	if err != nil {
 		return wrapWriteErr("insert brain", err)
 	}
+	b.CreatedBy, b.CreatedByName = by.UserID, by.Name
+	b.UpdatedBy, b.UpdatedByName = by.UserID, by.Name
 	b.ID, err = res.LastInsertId()
 	return err
 }
 
-func (s *brainStore) UpdateBrain(ctx context.Context, b *model.Brain) error {
+func (s *brainStore) UpdateBrain(ctx context.Context, b *model.Brain, by model.Actor) error {
 	if err := requireExists(ctx, s.db, "update brain",
 		`SELECT 1 FROM brains WHERE id = ? AND workspace_id = ?`, b.ID, b.WorkspaceID); err != nil {
 		return err
@@ -62,9 +69,11 @@ func (s *brainStore) UpdateBrain(ctx context.Context, b *model.Brain) error {
 	}
 
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE brains SET name = ?, slug = ?, description = ?, is_locked = ?, updated_at = ?
+		`UPDATE brains SET name = ?, slug = ?, description = ?, is_locked = ?,
+		        updated_by = ?, updated_by_name = ?, updated_at = ?
 		 WHERE id = ? AND workspace_id = ?`,
-		b.Name, b.Slug, nullString(b.Description), b.Locked, b.UpdatedAt, b.ID, b.WorkspaceID)
+		b.Name, b.Slug, nullString(b.Description), b.Locked,
+		nullID(by.UserID), by.Name, b.UpdatedAt, b.ID, b.WorkspaceID)
 	if err != nil {
 		return wrapWriteErr("update brain", err)
 	}
@@ -87,6 +96,8 @@ func (s *brainStore) DeleteBrain(ctx context.Context, workspaceID, id int64) err
 func (s *brainStore) Brains(ctx context.Context, workspaceID int64) ([]*model.Brain, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT b.id, b.workspace_id, b.name, b.slug, b.description, b.is_locked,
+		        COALESCE(b.created_by, 0), b.created_by_name,
+		        COALESCE(b.updated_by, 0), b.updated_by_name,
 		        b.created_at, b.updated_at,
 		        (SELECT COUNT(*) FROM brain_categories c WHERE c.brain_id = b.id),
 		        (SELECT COUNT(*) FROM brain_documents d WHERE d.brain_id = b.id)
@@ -103,6 +114,7 @@ func (s *brainStore) Brains(ctx context.Context, workspaceID int64) ([]*model.Br
 		b := &model.Brain{}
 		var description sql.NullString
 		if err := rows.Scan(&b.ID, &b.WorkspaceID, &b.Name, &b.Slug, &description, &b.Locked,
+			&b.CreatedBy, &b.CreatedByName, &b.UpdatedBy, &b.UpdatedByName,
 			&b.CreatedAt, &b.UpdatedAt, &b.Categories, &b.Documents); err != nil {
 			return nil, fmt.Errorf("scan brain: %w", err)
 		}
@@ -117,11 +129,14 @@ func (s *brainStore) Brain(ctx context.Context, workspaceID, id int64) (*model.B
 	var description sql.NullString
 	err := s.db.QueryRowContext(ctx,
 		`SELECT b.id, b.workspace_id, b.name, b.slug, b.description, b.is_locked,
+		        COALESCE(b.created_by, 0), b.created_by_name,
+		        COALESCE(b.updated_by, 0), b.updated_by_name,
 		        b.created_at, b.updated_at,
 		        (SELECT COUNT(*) FROM brain_categories c WHERE c.brain_id = b.id),
 		        (SELECT COUNT(*) FROM brain_documents d WHERE d.brain_id = b.id)
 		 FROM brains b WHERE b.id = ? AND b.workspace_id = ?`, id, workspaceID).
 		Scan(&b.ID, &b.WorkspaceID, &b.Name, &b.Slug, &description, &b.Locked,
+			&b.CreatedBy, &b.CreatedByName, &b.UpdatedBy, &b.UpdatedByName,
 			&b.CreatedAt, &b.UpdatedAt, &b.Categories, &b.Documents)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
@@ -140,7 +155,10 @@ func (s *brainStore) Brain(ctx context.Context, workspaceID, id int64) (*model.B
 // theirs by knowing its id.
 func (s *brainStore) Categories(ctx context.Context, workspaceID, brainID int64) ([]*model.BrainCategory, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT c.id, c.brain_id, c.name, c.description, c.weight, c.created_at, c.updated_at,
+		`SELECT c.id, c.brain_id, c.name, c.description, c.weight,
+		        COALESCE(c.created_by, 0), c.created_by_name,
+		        COALESCE(c.updated_by, 0), c.updated_by_name,
+		        c.created_at, c.updated_at,
 		        (SELECT COUNT(*) FROM brain_documents d WHERE d.category_id = c.id)
 		 FROM brain_categories c
 		 JOIN brains b ON b.id = c.brain_id
@@ -156,6 +174,7 @@ func (s *brainStore) Categories(ctx context.Context, workspaceID, brainID int64)
 		c := &model.BrainCategory{}
 		var description sql.NullString
 		if err := rows.Scan(&c.ID, &c.BrainID, &c.Name, &description, &c.Weight,
+			&c.CreatedBy, &c.CreatedByName, &c.UpdatedBy, &c.UpdatedByName,
 			&c.CreatedAt, &c.UpdatedAt, &c.Documents); err != nil {
 			return nil, fmt.Errorf("scan category: %w", err)
 		}
@@ -165,7 +184,7 @@ func (s *brainStore) Categories(ctx context.Context, workspaceID, brainID int64)
 	return categories, rows.Err()
 }
 
-func (s *brainStore) CreateCategory(ctx context.Context, workspaceID int64, c *model.BrainCategory) error {
+func (s *brainStore) CreateCategory(ctx context.Context, workspaceID int64, c *model.BrainCategory, by model.Actor) error {
 	if err := s.requireBrain(ctx, workspaceID, c.BrainID); err != nil {
 		return err
 	}
@@ -173,17 +192,24 @@ func (s *brainStore) CreateCategory(ctx context.Context, workspaceID int64, c *m
 	c.CreatedAt, c.UpdatedAt = now, now
 
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO brain_categories (brain_id, name, description, weight, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		c.BrainID, c.Name, nullString(c.Description), c.Weight, c.CreatedAt, c.UpdatedAt)
+		`INSERT INTO brain_categories
+		   (brain_id, name, description, weight,
+		    created_by, created_by_name, updated_by, updated_by_name,
+		    created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		c.BrainID, c.Name, nullString(c.Description), c.Weight,
+		nullID(by.UserID), by.Name, nullID(by.UserID), by.Name,
+		c.CreatedAt, c.UpdatedAt)
 	if err != nil {
 		return wrapWriteErr("insert category", err)
 	}
+	c.CreatedBy, c.CreatedByName = by.UserID, by.Name
+	c.UpdatedBy, c.UpdatedByName = by.UserID, by.Name
 	c.ID, err = res.LastInsertId()
 	return err
 }
 
-func (s *brainStore) UpdateCategory(ctx context.Context, workspaceID int64, c *model.BrainCategory) error {
+func (s *brainStore) UpdateCategory(ctx context.Context, workspaceID int64, c *model.BrainCategory, by model.Actor) error {
 	if err := requireExists(ctx, s.db, "update category",
 		`SELECT 1 FROM brain_categories c JOIN brains b ON b.id = c.brain_id
 		 WHERE c.id = ? AND b.workspace_id = ?`, c.ID, workspaceID); err != nil {
@@ -192,9 +218,11 @@ func (s *brainStore) UpdateCategory(ctx context.Context, workspaceID int64, c *m
 	c.UpdatedAt = time.Now().UTC()
 
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE brain_categories SET name = ?, description = ?, weight = ?, updated_at = ?
+		`UPDATE brain_categories SET name = ?, description = ?, weight = ?,
+		        updated_by = ?, updated_by_name = ?, updated_at = ?
 		 WHERE id = ?`,
-		c.Name, nullString(c.Description), c.Weight, c.UpdatedAt, c.ID)
+		c.Name, nullString(c.Description), c.Weight,
+		nullID(by.UserID), by.Name, c.UpdatedAt, c.ID)
 	if err != nil {
 		return wrapWriteErr("update category", err)
 	}
@@ -222,7 +250,10 @@ func (s *brainStore) DeleteCategory(ctx context.Context, workspaceID, id int64) 
 // it, which is the difference between a list that renders and a list that hangs.
 func (s *brainStore) Documents(ctx context.Context, workspaceID, categoryID int64) ([]*model.BrainDocument, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT d.id, d.brain_id, d.category_id, d.title, d.weight, d.created_at, d.updated_at
+		`SELECT d.id, d.brain_id, d.category_id, d.title, d.weight,
+		        COALESCE(d.created_by, 0), d.created_by_name,
+		        COALESCE(d.updated_by, 0), d.updated_by_name,
+		        d.created_at, d.updated_at
 		 FROM brain_documents d
 		 JOIN brains b ON b.id = d.brain_id
 		 WHERE b.workspace_id = ? AND d.category_id = ?
@@ -236,6 +267,7 @@ func (s *brainStore) Documents(ctx context.Context, workspaceID, categoryID int6
 	for rows.Next() {
 		d := &model.BrainDocument{}
 		if err := rows.Scan(&d.ID, &d.BrainID, &d.CategoryID, &d.Title, &d.Weight,
+			&d.CreatedBy, &d.CreatedByName, &d.UpdatedBy, &d.UpdatedByName,
 			&d.CreatedAt, &d.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan document: %w", err)
 		}
@@ -254,11 +286,14 @@ func (s *brainStore) Document(ctx context.Context, workspaceID, id int64) (*mode
 	var content sql.NullString
 	err := s.db.QueryRowContext(ctx,
 		`SELECT d.id, d.brain_id, d.category_id, d.title, d.content, d.weight,
+		        COALESCE(d.created_by, 0), d.created_by_name,
+		        COALESCE(d.updated_by, 0), d.updated_by_name,
 		        d.created_at, d.updated_at
 		 FROM brain_documents d
 		 JOIN brains b ON b.id = d.brain_id
 		 WHERE b.workspace_id = ? AND d.id = ?`, workspaceID, id).
 		Scan(&d.ID, &d.BrainID, &d.CategoryID, &d.Title, &content, &d.Weight,
+			&d.CreatedBy, &d.CreatedByName, &d.UpdatedBy, &d.UpdatedByName,
 			&d.CreatedAt, &d.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
@@ -283,12 +318,17 @@ func (s *brainStore) Document(ctx context.Context, workspaceID, id int64) (*mode
 func (s *brainStore) DocumentByTitle(ctx context.Context, workspaceID, categoryID int64, title string) (*model.BrainDocument, error) {
 	d := &model.BrainDocument{}
 	err := s.db.QueryRowContext(ctx,
-		`SELECT d.id, d.brain_id, d.category_id, d.title, d.weight, d.created_at, d.updated_at
+		`SELECT d.id, d.brain_id, d.category_id, d.title, d.weight,
+		        COALESCE(d.created_by, 0), d.created_by_name,
+		        COALESCE(d.updated_by, 0), d.updated_by_name,
+		        d.created_at, d.updated_at
 		 FROM brain_documents d
 		 JOIN brains b ON b.id = d.brain_id
 		 WHERE b.workspace_id = ? AND d.category_id = ? AND d.title = ?`,
 		workspaceID, categoryID, title).
-		Scan(&d.ID, &d.BrainID, &d.CategoryID, &d.Title, &d.Weight, &d.CreatedAt, &d.UpdatedAt)
+		Scan(&d.ID, &d.BrainID, &d.CategoryID, &d.Title, &d.Weight,
+			&d.CreatedBy, &d.CreatedByName, &d.UpdatedBy, &d.UpdatedByName,
+			&d.CreatedAt, &d.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -301,7 +341,7 @@ func (s *brainStore) DocumentByTitle(ctx context.Context, workspaceID, categoryI
 // SaveDocument writes a document and its links, atomically.
 //
 // An id of zero creates. Anything else updates.
-func (s *brainStore) SaveDocument(ctx context.Context, workspaceID int64, d *model.BrainDocument, related []int64) error {
+func (s *brainStore) SaveDocument(ctx context.Context, workspaceID int64, d *model.BrainDocument, related []int64, by model.Actor) error {
 	// The category decides the brain. A document whose brain_id disagreed with
 	// its category's would be reachable from a search and invisible in the tree.
 	brainID, err := s.brainOfCategory(ctx, workspaceID, d.CategoryID)
@@ -342,9 +382,12 @@ func (s *brainStore) SaveDocument(ctx context.Context, workspaceID int64, d *mod
 		if d.ID == 0 {
 			res, err := tx.ExecContext(ctx,
 				`INSERT INTO brain_documents
-				  (brain_id, category_id, title, content, weight, created_at, updated_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				  (brain_id, category_id, title, content, weight,
+				   created_by, created_by_name, updated_by, updated_by_name,
+				   created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				d.BrainID, d.CategoryID, d.Title, nullString(d.Content), d.Weight,
+				nullID(by.UserID), by.Name, nullID(by.UserID), by.Name,
 				d.CreatedAt, d.UpdatedAt)
 			if err != nil {
 				return wrapWriteErr("insert document", err)
@@ -352,21 +395,27 @@ func (s *brainStore) SaveDocument(ctx context.Context, workspaceID int64, d *mod
 			if d.ID, err = res.LastInsertId(); err != nil {
 				return err
 			}
+			d.CreatedBy, d.CreatedByName = by.UserID, by.Name
 		} else {
 			if err := requireExists(ctx, tx, "update document",
 				`SELECT 1 FROM brain_documents d JOIN brains b ON b.id = d.brain_id
 				 WHERE d.id = ? AND b.workspace_id = ?`, d.ID, workspaceID); err != nil {
 				return err
 			}
+			// created_by is deliberately not touched: an edit records who made
+			// it, and rewriting who WROTE the document would lose the one fact
+			// an edit cannot change.
 			if _, err := tx.ExecContext(ctx,
 				`UPDATE brain_documents
-				 SET brain_id = ?, category_id = ?, title = ?, content = ?, weight = ?, updated_at = ?
+				 SET brain_id = ?, category_id = ?, title = ?, content = ?, weight = ?,
+				     updated_by = ?, updated_by_name = ?, updated_at = ?
 				 WHERE id = ?`,
 				d.BrainID, d.CategoryID, d.Title, nullString(d.Content), d.Weight,
-				d.UpdatedAt, d.ID); err != nil {
+				nullID(by.UserID), by.Name, d.UpdatedAt, d.ID); err != nil {
 				return wrapWriteErr("update document", err)
 			}
 		}
+		d.UpdatedBy, d.UpdatedByName = by.UserID, by.Name
 		return syncLinks(ctx, tx, d.ID, d.BrainID, related)
 	})
 }
@@ -534,8 +583,8 @@ func (s *brainStore) Search(ctx context.Context, workspaceID int64, brainIDs []i
 	for rows.Next() {
 		var hit model.BrainHit
 		var content sql.NullString
-		if err := rows.Scan(&hit.DocumentID, &hit.BrainID, &hit.Brain, &hit.Category,
-			&hit.Title, &content, &hit.Score); err != nil {
+		if err := rows.Scan(&hit.DocumentID, &hit.BrainID, &hit.Brain,
+			&hit.CategoryID, &hit.Category, &hit.Title, &content, &hit.Score); err != nil {
 			return nil, fmt.Errorf("scan hit: %w", err)
 		}
 		hit.Snippet = snippet(content.String, query)
@@ -549,7 +598,7 @@ func (s *brainStore) Search(ctx context.Context, workspaceID int64, brainIDs []i
 // query is ever assembled from a caller's ids (KB/14). The full-text index
 // drives the query, so the list is a filter over the hits rather than a scan.
 const searchDocumentsStmt = `
-	SELECT d.id, d.brain_id, b.name, c.name, d.title, d.content,
+	SELECT d.id, d.brain_id, b.name, d.category_id, c.name, d.title, d.content,
 	       MATCH(d.title, d.content) AGAINST (? IN BOOLEAN MODE) AS score
 	FROM brain_documents d
 	JOIN brains b ON b.id = d.brain_id

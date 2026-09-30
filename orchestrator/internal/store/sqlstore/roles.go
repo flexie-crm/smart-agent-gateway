@@ -13,10 +13,16 @@ import (
 
 type roleStore struct{ db *sqldb.DB }
 
-func (s *roleStore) Create(ctx context.Context, r *model.Role) error {
+func (s *roleStore) Create(ctx context.Context, r *model.Role, by model.Actor) error {
+	r.Made(by)
+	r.Changed(by)
 	return s.db.Tx(ctx, func(ctx context.Context, tx *sqldb.Tx) error {
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO roles (workspace_id, name) VALUES (?, ?)`, r.WorkspaceID, r.Name)
+			`INSERT INTO roles
+			   (workspace_id, name, created_by, created_by_name, updated_by, updated_by_name)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			r.WorkspaceID, r.Name,
+			nullID(r.CreatedBy), r.CreatedByName, nullID(r.UpdatedBy), r.UpdatedByName)
 		if err != nil {
 			return wrapWriteErr("insert role", err)
 		}
@@ -30,8 +36,10 @@ func (s *roleStore) Create(ctx context.Context, r *model.Role) error {
 func (s *roleStore) GetByID(ctx context.Context, workspaceID, id int64) (*model.Role, error) {
 	r := &model.Role{}
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, workspace_id, name FROM roles WHERE id = ? AND workspace_id = ?`,
-		id, workspaceID).Scan(&r.ID, &r.WorkspaceID, &r.Name)
+		`SELECT id, workspace_id, name, `+authoredColumns+
+			` FROM roles WHERE id = ? AND workspace_id = ?`,
+		id, workspaceID).Scan(&r.ID, &r.WorkspaceID, &r.Name,
+		&r.CreatedBy, &r.CreatedByName, &r.UpdatedBy, &r.UpdatedByName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -47,7 +55,8 @@ func (s *roleStore) GetByID(ctx context.Context, workspaceID, id int64) (*model.
 
 func (s *roleStore) List(ctx context.Context, workspaceID int64) ([]*model.Role, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, workspace_id, name FROM roles WHERE workspace_id = ? ORDER BY id`, workspaceID)
+		`SELECT id, workspace_id, name, `+authoredColumns+
+			` FROM roles WHERE workspace_id = ? ORDER BY id`, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("list roles: %w", err)
 	}
@@ -56,7 +65,8 @@ func (s *roleStore) List(ctx context.Context, workspaceID int64) ([]*model.Role,
 	roles := []*model.Role{}
 	for rows.Next() {
 		r := &model.Role{}
-		if err := rows.Scan(&r.ID, &r.WorkspaceID, &r.Name); err != nil {
+		if err := rows.Scan(&r.ID, &r.WorkspaceID, &r.Name,
+			&r.CreatedBy, &r.CreatedByName, &r.UpdatedBy, &r.UpdatedByName); err != nil {
 			return nil, fmt.Errorf("scan role: %w", err)
 		}
 		roles = append(roles, r)
@@ -74,7 +84,7 @@ func (s *roleStore) List(ctx context.Context, workspaceID int64) ([]*model.Role,
 
 // Update replaces the name and the whole permission set in one transaction:
 // a partially applied permission change must never be observable.
-func (s *roleStore) Update(ctx context.Context, r *model.Role) error {
+func (s *roleStore) Update(ctx context.Context, r *model.Role, by model.Actor) error {
 	return s.db.Tx(ctx, func(ctx context.Context, tx *sqldb.Tx) error {
 		// Existence is checked inside the transaction (and locked) because a
 		// name-only no-op UPDATE reports zero affected rows on MySQL.
@@ -82,8 +92,11 @@ func (s *roleStore) Update(ctx context.Context, r *model.Role) error {
 			`SELECT 1 FROM roles WHERE id = ? AND workspace_id = ? FOR UPDATE`, r.ID, r.WorkspaceID); err != nil {
 			return err
 		}
+		r.Changed(by)
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE roles SET name = ? WHERE id = ? AND workspace_id = ?`, r.Name, r.ID, r.WorkspaceID); err != nil {
+			`UPDATE roles SET name = ?, updated_by = ?, updated_by_name = ?
+			 WHERE id = ? AND workspace_id = ?`,
+			r.Name, nullID(r.UpdatedBy), r.UpdatedByName, r.ID, r.WorkspaceID); err != nil {
 			return wrapWriteErr("update role", err)
 		}
 		return replacePermissions(ctx, tx, r.ID, r.Permissions)

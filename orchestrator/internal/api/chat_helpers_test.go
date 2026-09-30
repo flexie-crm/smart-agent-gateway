@@ -25,7 +25,7 @@ func (e *testEnv) pointModelAt(modelID int64, f *fakeVendor) {
 		e.t.Fatalf("get vendor: %v", err)
 	}
 	vendor.BaseURL = f.server.URL
-	if err := e.app.Store.Vendors().Update(ctx, vendor); err != nil {
+	if err := e.app.Store.Vendors().Update(ctx, vendor, model.Nobody()); err != nil {
 		e.t.Fatalf("update vendor: %v", err)
 	}
 }
@@ -95,14 +95,14 @@ func (e *testEnv) registerReasoningModel(f *fakeVendor) int64 {
 		Name:        "Fake thinker",
 		BaseURL:     f.server.URL,
 	}
-	if err := e.app.Store.Vendors().Create(ctx, vendor); err != nil {
+	if err := e.app.Store.Vendors().Create(ctx, vendor, model.Nobody()); err != nil {
 		e.t.Fatalf("create vendor: %v", err)
 	}
 	m := &model.AIModel{
 		WorkspaceID: e.ws.ID, VendorID: vendor.ID, ModelKey: "fake-thinker",
 		Type: model.ModelTypeChat, ContextWindow: 100_000,
 	}
-	if err := e.app.Store.AIModels().Create(ctx, m); err != nil {
+	if err := e.app.Store.AIModels().Create(ctx, m, model.Nobody()); err != nil {
 		e.t.Fatalf("create model: %v", err)
 	}
 	if err := e.app.Store.Agents().Create(ctx, &model.Agent{
@@ -111,7 +111,7 @@ func (e *testEnv) registerReasoningModel(f *fakeVendor) int64 {
 		Name:        "Thinker",
 		Reasoning:   true,
 		Tools:       e.app.DefaultTools(),
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		e.t.Fatalf("configure reasoning: %v", err)
 	}
 	return m.ID
@@ -126,7 +126,7 @@ func (e *testEnv) GatewayAgent() {
 	if err := e.app.Store.Agents().Create(context.Background(), &model.Agent{
 		WorkspaceID: e.ws.ID, Key: model.DefaultAgentKey, Name: "Assistant",
 		Tools: e.app.DefaultTools(),
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		e.t.Fatalf("create Gateway agent: %v", err)
 	}
 }
@@ -143,14 +143,14 @@ func (e *testEnv) registerModelAt(baseURL string) int64 {
 		Name:        "Fake",
 		BaseURL:     baseURL,
 	}
-	if err := e.app.Store.Vendors().Create(ctx, vendor); err != nil {
+	if err := e.app.Store.Vendors().Create(ctx, vendor, model.Nobody()); err != nil {
 		e.t.Fatalf("create vendor: %v", err)
 	}
 	m := &model.AIModel{
 		WorkspaceID: e.ws.ID, VendorID: vendor.ID, ModelKey: "fake-1",
 		Type: model.ModelTypeChat, ContextWindow: 100_000,
 	}
-	if err := e.app.Store.AIModels().Create(ctx, m); err != nil {
+	if err := e.app.Store.AIModels().Create(ctx, m, model.Nobody()); err != nil {
 		e.t.Fatalf("create model: %v", err)
 	}
 	return m.ID

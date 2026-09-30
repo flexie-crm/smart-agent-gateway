@@ -186,9 +186,11 @@ func listTools(held Held, service string) (tool.Result, error) {
 		})
 	}
 	if len(out) == 0 {
-		return toolkit.Failed(fmt.Sprintf(
-			"no connected service called %q is available to you; call this with operation \"services\" to see what is",
-			service))
+		// An answer, not a fault, and the same rule tool_guide follows: a name
+		// that is not here is the question answered, and the answer carries
+		// what IS here.
+		return nothingBy(held, fmt.Sprintf(
+			"No connected service called %q is available to you.", service))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i]["tool"].(string) < out[j]["tool"].(string) })
 	return toolkit.Success(map[string]any{
@@ -210,13 +212,43 @@ func describe(held Held, name string) (tool.Result, error) {
 			"tool":      s.Name,
 			"service":   serviceOf(s),
 			"does":      s.Description,
-			"arguments": json.RawMessage(s.InputSchema),
+			"arguments": s.InputSchema,
 			"next":      "call this again with operation \"call\", this tool, and those arguments",
 		})
 	}
-	return toolkit.Failed(fmt.Sprintf(
-		"no tool called %q is available to you; call this with operation \"tools\" and a service to see what is",
-		name))
+	// This is the one drawing red rows in real conversations. Discovery is the
+	// ONLY way in to a service's tools, so a model hunting for one guessed at
+	// names (nli_search, nli_report, nli_docs, nli_tool_guide) and every guess
+	// reported a broken tool, though nothing had broken and the reply it needed
+	// was the list of what it can actually reach.
+	//
+	// And note what "available to you" means, because it is the reason the list
+	// is the whole answer: a service can project thirty tools and an
+	// administrator allow the agent two, so a tool existing in the workspace is
+	// not a tool this turn can call. Naming the reachable ones is the only
+	// useful reply, and it is also the honest one.
+	return nothingBy(held, fmt.Sprintf("No tool called %q is available to you.", name))
+}
+
+// nothingBy is what a lookup that found nothing answers with: the miss, and
+// every tool this turn can actually reach, by its exact callable name.
+//
+// Exact, prefix and all, because that is the name a call takes. The names are
+// the whole point: they are what turns a guess into a correction on the next
+// step instead of another guess.
+func nothingBy(held Held, why string) (tool.Result, error) {
+	schemas := heldSchemas(held)
+	names := make([]string, 0, len(schemas))
+	for _, s := range schemas {
+		names = append(names, s.Name)
+	}
+	sort.Strings(names)
+	return toolkit.Success(map[string]any{
+		"found":     false,
+		"message":   why,
+		"available": names,
+		"next":      "call this with operation \"describe\" and one of those exact names, and never a name that is not in that list",
+	})
 }
 
 func heldSchemas(held Held) []tool.Schema {
@@ -226,14 +258,11 @@ func heldSchemas(held Held) []tool.Schema {
 	return held()
 }
 
-// serviceOf is which service a tool came from. The approval title is written
-// where the tool is projected and carries the service's name, which is the one
-// place it is recorded per tool.
+// serviceOf is which service a tool came from, and is empty for one of ours.
+// Read off the schema, which carries it from the projection; it used to be cut
+// back out of the approval title, in this package and in app independently.
 func serviceOf(s tool.Schema) string {
-	if _, after, found := strings.Cut(s.ApprovalTitle, ", on "); found {
-		return strings.TrimSpace(after)
-	}
-	return ""
+	return s.Service
 }
 
 // belongsTo matches a service by its name or by the alias its tools carry, so

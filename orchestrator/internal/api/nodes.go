@@ -162,8 +162,14 @@ func (h *nodeHandlers) edit(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+
 	updated, err := h.app.EditMachineByNodeID(r.Context(), chi.URLParam(r, "nodeID"),
-		body.Name, body.Address, body.Certificate)
+		body.Name, body.Address, body.Certificate, by)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "not_changed", err.Error())
 		return
@@ -197,7 +203,12 @@ func (h *nodeHandlers) addByCertificate(w http.ResponseWriter, r *http.Request) 
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	node, err := h.app.AddPinnedMachine(r.Context(), body.Name, body.Address, body.Certificate, body.Key)
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	node, err := h.app.AddPinnedMachine(r.Context(), body.Name, body.Address, body.Certificate, body.Key, by)
 	if err != nil {
 		// What a person pasted is what is usually wrong here, and they can only
 		// fix what they are told, so the reason is passed through rather than
@@ -590,9 +601,14 @@ func (h *nodeHandlers) share(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, h.app, err)
 		return
 	}
+	sharer, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
 	for _, ws := range workspaces {
 		if wanted[ws.ID] {
-			if _, err := h.app.AttachNodeModel(r.Context(), nodeID, ws.ID, uid); err != nil {
+			if _, err := h.app.AttachNodeModel(r.Context(), nodeID, ws.ID, uid, sharer); err != nil {
 				h.fail(w, err)
 				return
 			}

@@ -78,6 +78,11 @@ type Config struct {
 	// as a stolen token (SAG_REFRESH_REUSE_GRACE). Zero restores strict reuse
 	// detection: every replay revokes the whole rotation family.
 	RefreshReuseGrace time.Duration
+	// ContextWarnPercent is how full a conversation's context window has to be
+	// before the chat shows how full it is and offers to compact it
+	// (SAG_CONTEXT_WARN_PERCENT, 1 to 100). Zero, as in a config built by hand,
+	// means DefaultContextWarnPercent.
+	ContextWarnPercent int
 	// EncryptionKeysGenerated reports that no key was configured and a
 	// per-boot one is in use. Anything sealed then is unreadable after a
 	// restart, so this is a development-only fallback.
@@ -174,12 +179,6 @@ type Config struct {
 	// start without them rather than serving a button that fails.
 	DevSignInEmail    string
 	DevSignInPassword string
-	// PersonalAccelerated and PersonalAcceleratorReason say which inference build
-	// this computer is actually running and why, so the Machines screen can show
-	// the reality rather than the intention. A model that answers a hundred
-	// times slower than expected should not be a mystery.
-	PersonalAccelerated       bool
-	PersonalAcceleratorReason string
 	// PersonalStateDir is where a desktop installation keeps its data
 	// (SAG_PERSONAL_STATE): the database, its key, its logs. Empty means the
 	// user's own application-data directory, and never inside the application.
@@ -200,6 +199,10 @@ const (
 	defaultShutdownGrace = time.Minute
 	maxShutdownGrace     = 10 * time.Minute
 )
+
+// DefaultContextWarnPercent is where the chat starts showing how full a
+// conversation is, with the offer to compact it.
+const DefaultContextWarnPercent = 80
 
 // How long a spent refresh token still answers for the client that spent it.
 // Long enough to cover a restart and the reload that follows (a development
@@ -232,6 +235,7 @@ func Load() (*Config, error) {
 		ApprovalTTL:        model.DefaultApprovalTTL,
 		ShutdownGrace:      defaultShutdownGrace,
 		RefreshReuseGrace:  defaultRefreshReuseGrace,
+		ContextWarnPercent: DefaultContextWarnPercent,
 		LogLevel:           envOr("SAG_LOG_LEVEL", "info"),
 		LogFormat:          envOr("SAG_LOG_FORMAT", "console"),
 	}
@@ -257,6 +261,14 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("SAG_SHUTDOWN_GRACE must be between 0 and %s", maxShutdownGrace)
 		}
 		cfg.ShutdownGrace = grace
+	}
+
+	if raw := os.Getenv("SAG_CONTEXT_WARN_PERCENT"); raw != "" {
+		percent, err := strconv.Atoi(raw)
+		if err != nil || percent < 1 || percent > 100 {
+			return nil, fmt.Errorf("SAG_CONTEXT_WARN_PERCENT must be a whole number from 1 to 100, got %q", raw)
+		}
+		cfg.ContextWarnPercent = percent
 	}
 
 	if raw := os.Getenv("SAG_REFRESH_REUSE_GRACE"); raw != "" {

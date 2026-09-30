@@ -7,6 +7,7 @@ CREATE TABLE `agent_steps` (
   `model` varchar(128) DEFAULT NULL,
   `agent_key` varchar(64) DEFAULT NULL,
   `parent_tool_call_id` varchar(64) DEFAULT NULL,
+  `delegation_id` bigint(20) unsigned DEFAULT NULL,
   `is_partial` tinyint(1) NOT NULL DEFAULT 0,
   `attachments` json DEFAULT NULL,
   `created_at` datetime(3) NOT NULL,
@@ -15,5 +16,7 @@ CREATE TABLE `agent_steps` (
   UNIQUE KEY `uniq_session_seq` (`session_id`,`seq`),
   KEY `idx_session` (`session_id`),
   KEY `idx_parent_call` (`session_id`,`parent_tool_call_id`),
+  KEY `fk_step_delegation` (`delegation_id`),
+  CONSTRAINT `fk_step_delegation` FOREIGN KEY (`delegation_id`) REFERENCES `agent_delegations` (`id`) ON DELETE SET NULL,
   CONSTRAINT `fk_step_session` FOREIGN KEY (`session_id`) REFERENCES `agent_sessions` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

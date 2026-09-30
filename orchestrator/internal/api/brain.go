@@ -141,7 +141,12 @@ func (h *brainHandlers) createBrain(w http.ResponseWriter, r *http.Request) {
 		Description: body.Description,
 		Locked:      body.Locked,
 	}
-	if err := h.app.Store.Brains().CreateBrain(r.Context(), brain); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.Brains().CreateBrain(r.Context(), brain, by); err != nil {
 		writeSaveError(w, h.app, err, "name", "another brain already has this name")
 		return
 	}
@@ -169,7 +174,12 @@ func (h *brainHandlers) updateBrain(w http.ResponseWriter, r *http.Request) {
 		Description: body.Description,
 		Locked:      body.Locked,
 	}
-	if err := h.app.Store.Brains().UpdateBrain(r.Context(), brain); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.Brains().UpdateBrain(r.Context(), brain, by); err != nil {
 		writeSaveError(w, h.app, err, "name", "another brain already has this name")
 		return
 	}
@@ -229,7 +239,12 @@ func (h *brainHandlers) createCategory(w http.ResponseWriter, r *http.Request) {
 		Description: body.Description,
 		Weight:      body.Weight,
 	}
-	if err := h.app.Store.Brains().CreateCategory(r.Context(), claimsFrom(r).WorkspaceID, category); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.Brains().CreateCategory(r.Context(), claimsFrom(r).WorkspaceID, category, by); err != nil {
 		writeStoreError(w, h.app, err)
 		return
 	}
@@ -256,7 +271,12 @@ func (h *brainHandlers) updateCategory(w http.ResponseWriter, r *http.Request) {
 		Description: body.Description,
 		Weight:      body.Weight,
 	}
-	if err := h.app.Store.Brains().UpdateCategory(r.Context(), claimsFrom(r).WorkspaceID, category); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.Brains().UpdateCategory(r.Context(), claimsFrom(r).WorkspaceID, category, by); err != nil {
 		writeStoreError(w, h.app, err)
 		return
 	}
@@ -337,8 +357,13 @@ func (h *brainHandlers) createDocument(w http.ResponseWriter, r *http.Request) {
 		Content:    body.Content,
 		Weight:     body.Weight,
 	}
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
 	if err := h.app.Store.Brains().SaveDocument(r.Context(), claimsFrom(r).WorkspaceID,
-		document, body.Related); err != nil {
+		document, body.Related, by); err != nil {
 		writeSaveError(w, h.app, err, "title", "this category already has a document with this title")
 		return
 	}
@@ -382,7 +407,12 @@ func (h *brainHandlers) updateDocument(w http.ResponseWriter, r *http.Request) {
 		Weight:     body.Weight,
 		CreatedAt:  existing.CreatedAt,
 	}
-	if err := h.app.Store.Brains().SaveDocument(ctx, workspaceID, document, body.Related); err != nil {
+	by, err := h.app.Acting(ctx, claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.Brains().SaveDocument(ctx, workspaceID, document, body.Related, by); err != nil {
 		if errors.Is(err, store.ErrWrongBrain) {
 			writeInvalidFields(w, fieldErrors{"category_id": "a document cannot move to another brain"})
 			return
@@ -452,10 +482,30 @@ func (h *brainHandlers) search(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	hits, err := h.app.Store.Brains().Search(ctx, workspaceID, brainIDs, query, 20)
+	hits, err := h.app.Store.Brains().Search(ctx, workspaceID, brainIDs, query, searchLimit(r))
 	if err != nil {
 		writeStoreError(w, h.app, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, hits)
+}
+
+// How many hits one search answers with.
+//
+// The console does not list the hits, it NARROWS its three panes to them, so a
+// cap that is too low hides a brain that does have a match. A caller says what
+// it can use and is held to the ceiling: anything above it, and anything that is
+// not a number, gets the default, and the caller comparing what came back with
+// what it asked for is how it knows the list was cut off.
+const (
+	searchDefaultLimit = 20
+	searchMaxLimit     = 50
+)
+
+func searchLimit(r *http.Request) int {
+	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+	if err != nil || limit < 1 || limit > searchMaxLimit {
+		return searchDefaultLimit
+	}
+	return limit
 }

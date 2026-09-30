@@ -241,3 +241,74 @@ func TestNotifyReachesEveryTab(t *testing.T) {
 	_ = tabA.Close(websocket.StatusNormalClosure, "")
 	_ = tabB.Close(websocket.StatusNormalClosure, "")
 }
+
+// awaitWatching polls the hub until a person's subscription to a topic has, or
+// has not, landed on the hub goroutine.
+func awaitWatching(t *testing.T, h *Hub, ws, user int64, topic string, want bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if h.Watching(ws, user, topic) == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("user %d watching %q never became %v", user, topic, want)
+}
+
+// A topic that belongs to somebody reaches that person and nobody else, even a
+// colleague who subscribed to the same name. The colleague's subscription is
+// shown to be live by an ordinary broadcast reaching it first, so its silence
+// under BroadcastTo is the filter and not a subscription that never landed.
+func TestATopicCanBeKeptToOnePerson(t *testing.T) {
+	h, url := startHub(t)
+	const topic = "agent:7"
+
+	owner := dial(t, url, "u1w1")
+	colleague := dial(t, url, "u2w1")
+	ownersOtherTab := dial(t, url, "u1w1") // open, but not watching this agent
+	for _, c := range []*websocket.Conn{owner, colleague} {
+		if err := wsjson.Write(context.Background(), c, Envelope{Type: TypeSubscribe, Topic: topic}); err != nil {
+			t.Fatalf("subscribe: %v", err)
+		}
+	}
+	awaitWatching(t, h, 1, 1, topic, true)
+	awaitWatching(t, h, 1, 2, topic, true)
+	if h.Watching(1, 3, topic) {
+		t.Fatal("somebody with no socket at all is reported as watching")
+	}
+	if h.Watching(2, 1, topic) {
+		t.Fatal("a subscription in one workspace is reported in another")
+	}
+
+	// The control first: the colleague's subscription is live, and an
+	// ordinary broadcast reaches it. (Read before the silence below, because a
+	// read that times out closes the socket.)
+	h.Broadcast(1, topic, map[string]string{"step": "everyone"})
+	for _, c := range []*websocket.Conn{owner, colleague} {
+		if env := readEnvelope(t, c); !strings.Contains(string(env.Payload), `"everyone"`) {
+			t.Fatalf("a subscription was never live: %s", env.Payload)
+		}
+	}
+
+	h.BroadcastTo(1, 1, topic, map[string]string{"step": "mine"})
+	env := readEnvelope(t, owner)
+	if env.Type != TypeTopic || env.Topic != topic || !strings.Contains(string(env.Payload), `"mine"`) {
+		t.Fatalf("the owner did not get their own topic: %+v %s", env, env.Payload)
+	}
+	for name, c := range map[string]*websocket.Conn{"a colleague": colleague, "an unsubscribed tab": ownersOtherTab} {
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		var got Envelope
+		err := wsjson.Read(ctx, c, &got)
+		cancel()
+		if err == nil {
+			t.Fatalf("%s received somebody's topic: %s", name, got.Payload)
+		}
+	}
+
+	// Leaving the topic ends the watch.
+	if err := wsjson.Write(context.Background(), owner, Envelope{Type: TypeUnsubscribe, Topic: topic}); err != nil {
+		t.Fatalf("unsubscribe: %v", err)
+	}
+	awaitWatching(t, h, 1, 1, topic, false)
+}

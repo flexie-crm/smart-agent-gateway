@@ -52,6 +52,11 @@ func mountChat(r chi.Router, a *app.App) {
 	// Stop a background delegation (Mode C): a long task the person no longer
 	// wants. Distinct from cancelling the current turn.
 	r.Post("/chat/delegation/cancel", h.cancelDelegation)
+	// One agent opened from its chip, and a whole batch: what it was asked and
+	// everything it has done so far. What happens next arrives on the socket
+	// while it is open (app/agentwatch.go).
+	r.Post("/chat/delegation", h.agentWork)
+	r.Post("/chat/fleet", h.fleetRuns)
 	// History reloads a conversation the user owns. Its metadata carries the
 	// conversation's approval mode and the background agents still running, so
 	// one read gives the chat everything it needs to render, chips included.
@@ -216,7 +221,7 @@ func (h *chatHandlers) stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	show := h.maySee(ctx, claims.UserID)
+	show := h.app.MaySee(ctx, claims.UserID)
 
 	// Which computer this turn came from, and therefore which machine tools are
 	// in it. Logged because a turn with no device and a turn whose device is not
@@ -284,6 +289,10 @@ func (h *chatHandlers) stream(w http.ResponseWriter, r *http.Request) {
 	}
 	if errors.Is(err, run.ErrBusy) {
 		writeError(w, http.StatusConflict, "busy", "this conversation is already answering")
+		return
+	}
+	if errors.Is(err, run.ErrHeld) {
+		writeError(w, http.StatusConflict, "compacting", compactingNotice)
 		return
 	}
 	if err != nil {
@@ -617,6 +626,19 @@ func (h *chatHandlers) resume(w http.ResponseWriter, r *http.Request, req stream
 		return
 	}
 
+	// The computer the call was PREPARED for, not the one answering the card.
+	//
+	// Measured: approving with a different device ran the approved write
+	// against that device instead, which is not connected, so the file was
+	// never written. Where a command runs was part of what was approved, so it
+	// comes off the snapshot. A park with none (a tool that needs no computer,
+	// or a row written before this was stored) falls back to the request, which
+	// is what every one of them had.
+	on := app.Computer{DeviceID: req.DeviceID, Folder: req.WorkingFolder, Env: req.Machine}
+	if snapshot.DeviceID != "" {
+		on.DeviceID = snapshot.DeviceID
+	}
+
 	// The profile is resolved again rather than restored from the snapshot: an
 	// administrator who revoked a tool while the card was on screen has
 	// revoked it, and approving the card is not a way around that. The model
@@ -625,9 +647,9 @@ func (h *chatHandlers) resume(w http.ResponseWriter, r *http.Request, req stream
 	profile, loadout, err := h.app.Resolve(ctx, app.ProfileRequest{
 		WorkspaceID:      workspaceID,
 		UserID:           userID,
-		DeviceID:         req.DeviceID,
-		WorkingFolder:    req.WorkingFolder,
-		Machine:          req.Machine,
+		DeviceID:         on.DeviceID,
+		WorkingFolder:    on.Folder,
+		Machine:          on.Env,
 		Channel:          model.ChannelChat,
 		PreferredModelID: snapshot.ModelID,
 		SessionID:        snapshot.SessionID,
@@ -655,7 +677,7 @@ func (h *chatHandlers) resume(w http.ResponseWriter, r *http.Request, req stream
 		return
 	}
 
-	resumeShow := h.maySee(ctx, userID)
+	resumeShow := h.app.MaySee(ctx, userID)
 	turn := agent.Turn{
 		WorkspaceID: workspaceID,
 		UserID:      userID,
@@ -668,7 +690,7 @@ func (h *chatHandlers) resume(w http.ResponseWriter, r *http.Request, req stream
 		// something they can see; the alternative is remembering the asking
 		// device on the park row, which is a migration and a decision about a
 		// case nobody has had yet.
-		DeviceID:        req.DeviceID,
+		DeviceID:        on.DeviceID,
 		Show:            &resumeShow,
 		ModelID:         snapshot.ModelID,
 		SystemPrompt:    profile.SystemPrompt,
@@ -678,7 +700,7 @@ func (h *chatHandlers) resume(w http.ResponseWriter, r *http.Request, req stream
 		MaxIterations:   profile.MaxIterations,
 		MaxFleetAgents:  profile.MaxFleetAgents,
 		AutoApprove:     autoApprove,
-		Agent:           h.agentResolver(workspaceID, userID, app.Computer{DeviceID: req.DeviceID, Folder: req.WorkingFolder, Env: req.Machine}),
+		Agent:           h.agentResolver(workspaceID, userID, on),
 		StartBackground: h.app.StartBackground,
 		StartFleet:      h.app.StartFleet,
 		// The turn that parked could not name the conversation: it had no answer
@@ -715,6 +737,10 @@ func (h *chatHandlers) resume(w http.ResponseWriter, r *http.Request, req stream
 		}
 		if errors.Is(err, run.ErrBusy) {
 			writeError(w, http.StatusConflict, "busy", "this conversation is already answering")
+			return
+		}
+		if errors.Is(err, run.ErrHeld) {
+			writeError(w, http.StatusConflict, "compacting", compactingNotice)
 			return
 		}
 		h.app.Log.Error().Err(err).Int64("session_id", snapshot.SessionID).Msg("start run")
@@ -869,7 +895,16 @@ type historyMeta struct {
 	// is opened and never at any other time, so it was a second load request
 	// beside this one, for a screen that had already asked its question.
 	Accepts chatAcceptsResponse `json:"accepts"`
+	// Context is how full the conversation is and whether it is being
+	// compacted, so the meter above the message box, and a chat frozen while a
+	// summary is written, are there the moment the conversation opens.
+	Context app.ContextMeter `json:"context"`
 }
+
+// compactingNotice is the answer to a message sent while the conversation is
+// being compacted. The chat is frozen then, so this is for a second tab or a
+// client that did not hear.
+const compactingNotice = "This conversation is being compacted. Send that again when it is done."
 
 // delegationChip is one background delegation as the right-rail card renders it:
 // the agent by name, what state it is in, when it started (for an elapsed
@@ -880,51 +915,14 @@ type historyMeta struct {
 // cannot drift into three spellings of the same keys.
 type delegationChip = app.Chip
 
-// historyMessage is a past turn, in the shape the chat renders. It is the same
-// timeline the live stream produces, rebuilt from what was persisted, so a
-// reloaded conversation and a live one render through one code path.
-type historyMessage struct {
-	ID        string          `json:"id"`
-	Role      string          `json:"role"`
-	Content   string          `json:"content"`
-	Reasoning string          `json:"reasoning,omitempty"`
-	Tools     []historyTool   `json:"tools,omitempty"`
-	Confirm   *historyConfirm `json:"confirmation,omitempty"`
-	// Attachments are the files sent with this message, so a reloaded
-	// conversation still shows what was attached rather than a question with no
-	// visible reason for the answer it got.
-	Attachments []historyAttachment `json:"attachments,omitempty"`
-}
-
-// historyAttachment is a file as the chat shows it back: enough to draw the
-// card, and the id to fetch the bytes with. The account of what it contained is
-// not here, being for the model rather than for the person.
-type historyAttachment struct {
-	ID        string `json:"id"`
-	FileName  string `json:"file_name"`
-	FileType  string `json:"file_type"`
-	SizeBytes int64  `json:"size_bytes"`
-}
-
-type historyTool struct {
-	// ID names this call, so the chat can ask what it carried when somebody
-	// opens it.
-	ID                string `json:"id"`
-	Name              string `json:"name"`
-	FriendlyName      string `json:"friendly_name"`
-	Status            string `json:"status"`
-	DurationMS        int64  `json:"duration_ms"`
-	RequestedApproval bool   `json:"requested_approval,omitempty"`
-}
-
-type historyConfirm struct {
-	Token       string          `json:"token"`
-	Title       string          `json:"title"`
-	Description string          `json:"description"`
-	Severity    string          `json:"severity"`
-	Details     json.RawMessage `json:"details,omitempty"`
-	Status      string          `json:"status"`
-}
+// The history's messages are the app's timeline, defined once so a reloaded
+// conversation, one agent's work opened from its chip, and a step pushed while
+// somebody watches that agent all draw the same thing (app/timeline.go).
+type (
+	historyMessage = app.ChatMessage
+	historyTool    = app.ChatTool
+	historyConfirm = app.ChatConfirm
+)
 
 // history returns a conversation. An empty session id means a fresh chat,
 // which has no history rather than an error.
@@ -939,7 +937,7 @@ func (h *chatHandlers) history(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims := claimsFrom(r)
-	show := h.maySee(r.Context(), claims.UserID)
+	show := h.app.MaySee(r.Context(), claims.UserID)
 	// A fresh or not-yet-owned conversation has no history and the default
 	// (manual) approval mode.
 	// A draft conversation still has a composer, so it still needs to know what
@@ -984,69 +982,12 @@ func (h *chatHandlers) history(w http.ResponseWriter, r *http.Request) {
 	}
 
 	out := make([]historyMessage, 0, len(steps))
+	// The page is the conversation's own steps only: an agent's are not replayed
+	// inline, and are left out of the page itself rather than counted into it
+	// and hidden here (TranscriptPage says why).
 	for _, step := range steps {
-		// An agent's inner steps are durable now, but a reloaded conversation
-		// shows a delegation the way the live one did: as the Gateway's `agent`
-		// chip and its result, not the agent's own steps replayed inline.
-		if step.AgentKey != "" {
-			continue
-		}
-		message := historyMessage{
-			ID:      itoa64(step.ID),
-			Role:    step.Kind,
-			Content: step.Text,
-		}
-		// The same rule the live stream applies, applied again here. A person
-		// who was not shown the thinking while it happened must not find it by
-		// reloading, and the transcript keeps it either way: what this decides
-		// is who is shown the record, not whether it is kept.
-		if show.Reasoning {
-			message.Reasoning = step.Reasoning
-		}
-		// The same rule again, for what the assistant DID. A person the live
-		// stream withheld the tool rows from must not find them by opening the
-		// conversation again: the frames and this answer say the same thing, or
-		// the permission is a delay rather than a decision.
-		for _, call := range step.ToolCalls {
-			if !show.Tools {
-				break
-			}
-			// The row, and the id to open it with. What it was sent and what it
-			// answered are not here: they are the largest thing in a
-			// conversation and the one thing a person may not be allowed to
-			// see, so they are fetched when somebody asks (`/chat/tool-call`).
-			//
-			// No id on an INTERNAL tool, so it cannot be opened at all. Looking
-			// up an ability, handing work to an agent, keeping a note: these are
-			// how the assistant is put together, not work it did for somebody,
-			// and their arguments are our own plumbing. Withholding the id is
-			// structural — there is nothing to open rather than a panel that
-			// refuses.
-			message.Tools = append(message.Tools, historyTool{
-				ID:                openableID(h.app, call),
-				Name:              call.ToolName,
-				FriendlyName:      call.FriendlyName,
-				Status:            call.Status,
-				DurationMS:        call.DurationMS,
-				RequestedApproval: call.RequestedApproval,
-			})
-		}
-		for _, id := range step.Attachments {
-			at, err := h.app.Store.Attachments().ByID(ctx, claims.WorkspaceID, id)
-			if err != nil {
-				// A file that has been cleaned up is not a reason to lose the
-				// message it came with.
-				continue
-			}
-			message.Attachments = append(message.Attachments, historyAttachment{
-				ID: at.PublicID, FileName: at.FileName,
-				FileType: at.FileType, SizeBytes: at.SizeBytes,
-			})
-		}
-		if message.Content == "" && len(message.Tools) == 0 && message.Reasoning == "" &&
-			len(message.Attachments) == 0 {
-			// An empty step is the wreckage of an interrupted turn. There is
-			// nothing to show and nothing worth explaining.
+		message, ok := h.app.ShownStep(ctx, claims.WorkspaceID, step, show)
+		if !ok {
 			continue
 		}
 		out = append(out, message)
@@ -1079,8 +1020,15 @@ func (h *chatHandlers) history(w http.ResponseWriter, r *http.Request) {
 		live = active.UID
 	}
 
+	meter, err := h.app.ContextMeterFor(ctx, claims.WorkspaceID, session.ID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+
 	writeJSON(w, http.StatusOK, historyResponse{
 		Meta: historyMeta{
+			Context:            meter,
 			ApprovalMode:       session.ApprovalMode,
 			RunningDelegations: h.delegationChips(ctx, claims.WorkspaceID, session.ID, running),
 			LiveRun:            live,
@@ -1224,6 +1172,18 @@ func withoutTrailingPartial(steps []*model.AgentStep) []*model.AgentStep {
 	return steps
 }
 
+// cardToken is the token this card is answered with, derived from the park.
+//
+// Empty for a park written before the seed existed: that card still has the
+// token it was minted with, which this cannot reproduce, so it is left alone
+// rather than rebound to something the person does not have.
+func (h *chatHandlers) cardToken(park *model.ParkSnapshot) string {
+	if park.TokenSeed == "" {
+		return ""
+	}
+	return agent.TokenFromSeed(h.app.Config.SessionSecret, park.TokenSeed)
+}
+
 // restorePendingCard rebuilds the confirmation card a session is waiting on, so
 // a reloaded conversation can still be answered. The card is not in the
 // transcript (it is a live frame), so it is rebuilt from the park: the display
@@ -1231,21 +1191,61 @@ func withoutTrailingPartial(steps []*model.AgentStep) []*model.AgentStep {
 // yields no card), and a FRESH token is minted, because the original was never
 // stored, only hashed. Returns nil when nothing is pending or the tool is gone.
 func (h *chatHandlers) restorePendingCard(ctx context.Context, claims *auth.Claims, session *model.AgentSession) *historyMessage {
+	// Walk the queue until something can actually be drawn.
+	//
+	// A live card that cannot be drawn used to end this function, and it kept
+	// its place: a conversation shows one card at a time, so every later card
+	// queued behind one nobody could see, silently, for as long as the park
+	// lived. What makes a card undrawable is its tool failing to resolve (it
+	// was revoked while the card waited, or it runs on a computer that is not
+	// linked just now), which is often temporary, so the card is passed over
+	// rather than destroyed: it loses its place and nothing else.
+	//
+	// Bounded by how many are waiting, and each turn of the loop passes exactly
+	// one card over, so it cannot spin.
+	waiting, err := h.app.Store.Agent().CountWaitingParks(ctx, session.ID)
+	if err != nil {
+		return nil
+	}
+	for attempt := 0; attempt < waiting; attempt++ {
+		card := h.drawPendingCard(ctx, claims, session)
+		if card != nil {
+			return card
+		}
+	}
+	return nil
+}
+
+// drawPendingCard draws this conversation's live card, or passes it over and
+// reports nothing so the caller can try the next one.
+func (h *chatHandlers) drawPendingCard(ctx context.Context, claims *auth.Claims, session *model.AgentSession) *historyMessage {
 	park, err := h.app.Store.Agent().PendingPark(ctx, session.ID)
 	if err != nil {
 		return nil // nothing pending (ErrNotFound), or a read error: no card
 	}
 	schema, ok := h.parkedToolSchema(ctx, claims, park)
 	if !ok {
-		return nil // the tool can no longer be resolved; the card cannot be honoured
-	}
-	token, tokenHash, err := agent.NewToken()
-	if err != nil {
-		h.app.Log.Error().Err(err).Msg("mint reload card token")
+		// The tool cannot be resolved right now. Let the next card have its
+		// turn rather than holding the conversation shut.
+		if _, err := h.app.Store.Agent().PassOverPark(ctx, park.ID); err != nil {
+			h.app.Log.Error().Err(err).Int64("park", park.ID).Msg("pass over a card that cannot be drawn")
+		}
 		return nil
 	}
-	if err := h.app.Store.Agent().RotateParkToken(ctx, park.ID, tokenHash); err != nil {
-		return nil // another request resolved it first: no card to show
+	// DERIVED, not minted. A reload used to mint a fresh token and rebind the
+	// park to it, which killed the token of the card already on screen: the
+	// chat reads the conversation several times on one page load, so a person
+	// looking at a card was holding a dead token within the same second and
+	// their click answered 410 with nothing to show for it.
+	token := h.cardToken(park)
+	if token == "" {
+		// Written before tokens were derived: its own token cannot be
+		// reproduced, so this card can never be drawn again. Pass it over, or
+		// it holds the conversation shut until it expires.
+		if _, err := h.app.Store.Agent().PassOverPark(ctx, park.ID); err != nil {
+			h.app.Log.Error().Err(err).Int64("park", park.ID).Msg("pass over a card with no token")
+		}
+		return nil
 	}
 	return &historyMessage{
 		ID:   "confirm_" + park.ToolCallID,
@@ -1266,11 +1266,18 @@ func (h *chatHandlers) restorePendingCard(ctx context.Context, claims *auth.Clai
 // an administrator revoked while the card waited yields nothing, and the card is
 // not restored, matching how a resume re-checks permissions.
 func (h *chatHandlers) parkedToolSchema(ctx context.Context, claims *auth.Claims, park *model.ParkSnapshot) (tool.Schema, bool) {
+	// The computer the call was prepared for, not the one reading the page.
+	//
+	// It looked like it needed none: nothing is RUN here, only a schema read to
+	// decide whether the card can still be drawn. But a tool that runs on
+	// somebody's machine is only IN a loadout when there is a machine to run it
+	// on (machine.Offers), so resolving with no computer found no schema and
+	// drew no card: a terminal waiting for approval vanished on a refresh and
+	// the park sat unresolved until it expired. A tool needing no computer came
+	// back fine, which is how the two were told apart.
+	on := app.Computer{DeviceID: park.DeviceID}
 	if park.AgentKey != "" {
-		// No computer: this only reads the parked tool's schema, to decide
-		// whether the card can still be drawn. Nothing is run, so nothing needs
-		// to reach anywhere.
-		sub, err := h.app.ResolveAgent(ctx, claims.WorkspaceID, claims.UserID, app.Computer{}, park.AgentKey)
+		sub, err := h.app.ResolveAgent(ctx, claims.WorkspaceID, claims.UserID, on, park.AgentKey)
 		if err != nil {
 			return tool.Schema{}, false
 		}
@@ -1280,6 +1287,7 @@ func (h *chatHandlers) parkedToolSchema(ctx context.Context, claims *auth.Claims
 		WorkspaceID:      claims.WorkspaceID,
 		UserID:           claims.UserID,
 		Channel:          model.ChannelChat,
+		DeviceID:         park.DeviceID,
 		PreferredModelID: park.ModelID,
 		SessionID:        park.SessionID,
 	})
@@ -1318,35 +1326,6 @@ func (h *chatHandlers) resolveAttachments(w http.ResponseWriter, r *http.Request
 		}
 	}
 	return ids, true
-}
-
-// maySee is what this person may be told of HOW an answer was reached.
-//
-// Asked live, per request, like every other permission here: somebody whose
-// role changed this morning sees the change on their next message rather than
-// when their token expires.
-//
-// A failure to ask is a refusal, not a pass. This is the one direction that is
-// safe to be wrong in: showing less than somebody is entitled to is a support
-// question, and showing more is a disclosure.
-func (h *chatHandlers) maySee(ctx context.Context, userID int64) chat.Show {
-	show := chat.Show{}
-	for _, allowed := range []struct {
-		permission string
-		field      *bool
-	}{
-		{model.PermChatsSeeReasoning, &show.Reasoning},
-		{model.PermChatsSeeTools, &show.Tools},
-	} {
-		ok, err := h.app.Authorize(ctx, userID, allowed.permission)
-		if err != nil {
-			h.app.Log.Error().Err(err).Int64("user_id", userID).
-				Str("permission", allowed.permission).Msg("resolve what a person may see")
-			continue
-		}
-		*allowed.field = ok
-	}
-	return show
 }
 
 // toolCall answers what one finished call carried.
@@ -1416,7 +1395,7 @@ func (h *chatHandlers) toolCall(w http.ResponseWriter, r *http.Request) {
 	// And what the list does not offer, this does not serve. The rule lives in
 	// one place (openableID); asking it again here is what stops it being a
 	// property of the drawing rather than of the answer.
-	if openableID(h.app, call) == "" {
+	if h.app.OpenableID(call) == "" {
 		writeError(w, http.StatusNotFound, "not_found", "no such tool call")
 		return
 	}
@@ -1495,7 +1474,11 @@ func presentUnder(display tool.Display, call *model.ToolCall) (where, sent, answ
 		return where, everything(args), everything(result)
 	}
 
-	sent, answered = chosen(display.Sent, args), chosen(display.Answered, result)
+	// What was asked for, then what the tool attached to it: both are the
+	// request, and the second is read from the result because only the tool
+	// knows it.
+	sent = append(chosen(display.Sent, args), chosen(display.Attached, result)...)
+	answered = chosen(display.Answered, result)
 
 	// A call that FAILED is read by a person who wants to know what went
 	// wrong, and that is the command, one error line, and whatever it printed.
@@ -1655,24 +1638,4 @@ func empty(value json.RawMessage) bool {
 		return strings.TrimSpace(text) == ""
 	}
 	return false
-}
-
-// openableID is the id a tool row is opened by, or nothing for a tool that
-// should not be opened.
-//
-// An internal tool is infrastructure: tool_guide, delegation, remember, the
-// background controls. What they were sent is our own wiring and reads as noise
-// beside the work somebody actually asked for. Everything else is openable, a
-// custom tool and a projected one included: those do real work, and what they
-// carried is exactly what somebody wants to see.
-//
-// Asked of the app, not of the registry. Half of these tools are never
-// registered (they are built per turn from the roster), so a registry lookup
-// answers "not ours" for delegate and delegate_fleet, which is how the fleet
-// tool ended up with an arrow on it.
-func openableID(a *app.App, call *model.ToolCall) string {
-	if a.InternalTool(call.ToolName) {
-		return ""
-	}
-	return itoa64(call.ID)
 }

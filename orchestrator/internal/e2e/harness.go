@@ -35,7 +35,7 @@ func Seed(ctx context.Context, a *app.App) error {
 	ws, err := st.Workspaces().GetBySlug(ctx, WorkspaceSlug)
 	if err != nil {
 		ws = &model.Workspace{Slug: WorkspaceSlug, Name: "E2E"}
-		if err := st.Workspaces().Create(ctx, ws); err != nil {
+		if err := st.Workspaces().Create(ctx, ws, model.Nobody()); err != nil {
 			return fmt.Errorf("create workspace: %w", err)
 		}
 	}
@@ -52,7 +52,7 @@ func Seed(ctx context.Context, a *app.App) error {
 			return fmt.Errorf("hash password: %w", herr)
 		}
 		u := &model.User{Email: Email, Name: "E2E", PasswordHash: hash}
-		if err := st.Users().Create(ctx, u); err != nil {
+		if err := st.Users().Create(ctx, u, model.Nobody()); err != nil {
 			return fmt.Errorf("create user: %w", err)
 		}
 		if err := st.Workspaces().SetMembers(ctx, u.ID, []int64{ws.ID}); err != nil {
@@ -73,7 +73,7 @@ func Seed(ctx context.Context, a *app.App) error {
 			return fmt.Errorf("hash password: %w", herr)
 		}
 		u := &model.User{Email: Onlooker, Name: "Onlooker", PasswordHash: hash}
-		if err := st.Users().Create(ctx, u); err != nil {
+		if err := st.Users().Create(ctx, u, model.Nobody()); err != nil {
 			return fmt.Errorf("create the onlooker: %w", err)
 		}
 		if err := st.Workspaces().SetMembers(ctx, u.ID, []int64{ws.ID}); err != nil {
@@ -105,29 +105,29 @@ func Seed(ctx context.Context, a *app.App) error {
 	}
 
 	vendor := &model.AIVendor{WorkspaceID: ws.ID, VendorKey: model.VendorAnthropic, Name: "Scripted", Status: model.StatusActive}
-	if err := st.Vendors().Create(ctx, vendor); err != nil {
+	if err := st.Vendors().Create(ctx, vendor, model.Nobody()); err != nil {
 		return fmt.Errorf("create vendor: %w", err)
 	}
 	m := &model.AIModel{
 		WorkspaceID: ws.ID, VendorID: vendor.ID, ModelKey: "scripted-1",
 		Type: model.ModelTypeChat, ContextWindow: 100_000, Status: model.StatusActive,
 	}
-	if err := st.AIModels().Create(ctx, m); err != nil {
+	if err := st.AIModels().Create(ctx, m, model.Nobody()); err != nil {
 		return fmt.Errorf("create model: %w", err)
 	}
 
 	// A shared knowledge base the Gateway writes to (parked on approval), and the
 	// Gateway's own memory brain (written silently). Both unlocked.
 	knowledge := &model.Brain{WorkspaceID: ws.ID, Name: KnowledgeBrain}
-	if err := st.Brains().CreateBrain(ctx, knowledge); err != nil {
+	if err := st.Brains().CreateBrain(ctx, knowledge, model.Nobody()); err != nil {
 		return fmt.Errorf("create knowledge brain: %w", err)
 	}
 	if err := st.Brains().CreateCategory(ctx, ws.ID,
-		&model.BrainCategory{BrainID: knowledge.ID, Name: KnowledgeCategory}); err != nil {
+		&model.BrainCategory{BrainID: knowledge.ID, Name: KnowledgeCategory}, model.Nobody()); err != nil {
 		return fmt.Errorf("create category: %w", err)
 	}
 	memory := &model.Brain{WorkspaceID: ws.ID, Name: MemoryBrain}
-	if err := st.Brains().CreateBrain(ctx, memory); err != nil {
+	if err := st.Brains().CreateBrain(ctx, memory, model.Nobody()); err != nil {
 		return fmt.Errorf("create memory brain: %w", err)
 	}
 	memoryID := memory.ID
@@ -141,7 +141,7 @@ func Seed(ctx context.Context, a *app.App) error {
 		Tools: []string{"current_time", "brain_write"}, ConfirmTools: []string{"brain_write"},
 		Brains: []int64{knowledge.ID}, MemoryBrainID: &memoryID,
 	}
-	if err := st.Agents().Create(ctx, gateway); err != nil {
+	if err := st.Agents().Create(ctx, gateway, model.Nobody()); err != nil {
 		return fmt.Errorf("create gateway: %w", err)
 	}
 
@@ -160,7 +160,7 @@ func Seed(ctx context.Context, a *app.App) error {
 		Status: model.StatusActive,
 		Tools:  []string{AgentTool},
 	}
-	if err := st.Agents().Create(ctx, quiet); err != nil {
+	if err := st.Agents().Create(ctx, quiet, model.Nobody()); err != nil {
 		return fmt.Errorf("create quiet agent: %w", err)
 	}
 
@@ -171,7 +171,7 @@ func Seed(ctx context.Context, a *app.App) error {
 		// Its one tool is approval-gated, so the flow parks on a real card.
 		Tools: []string{AgentTool}, ConfirmTools: []string{AgentTool},
 	}
-	if err := st.Agents().Create(ctx, agent); err != nil {
+	if err := st.Agents().Create(ctx, agent, model.Nobody()); err != nil {
 		return fmt.Errorf("create agent: %w", err)
 	}
 	return nil
@@ -199,11 +199,11 @@ func permit(ctx context.Context, a *app.App, workspaceID, userID int64) error {
 			model.PermChatsDelete,
 		},
 	}
-	if err := st.Roles().Create(ctx, role); err != nil {
+	if err := st.Roles().Create(ctx, role, model.Nobody()); err != nil {
 		return fmt.Errorf("create role: %w", err)
 	}
 	group := &model.Group{WorkspaceID: workspaceID, Name: "Everyone"}
-	if err := st.Groups().Create(ctx, group); err != nil {
+	if err := st.Groups().Create(ctx, group, model.Nobody()); err != nil {
 		return fmt.Errorf("create group: %w", err)
 	}
 	if err := st.Groups().AssignRole(ctx, group.ID, role.ID); err != nil {
@@ -226,11 +226,11 @@ func permitLess(ctx context.Context, a *app.App, workspaceID, userID int64) erro
 		Name:        "Chat, without the workings",
 		Permissions: []string{model.PermChatsDelete},
 	}
-	if err := st.Roles().Create(ctx, role); err != nil {
+	if err := st.Roles().Create(ctx, role, model.Nobody()); err != nil {
 		return fmt.Errorf("create the plain role: %w", err)
 	}
 	group := &model.Group{WorkspaceID: workspaceID, Name: "Onlookers"}
-	if err := st.Groups().Create(ctx, group); err != nil {
+	if err := st.Groups().Create(ctx, group, model.Nobody()); err != nil {
 		return fmt.Errorf("create the onlookers: %w", err)
 	}
 	if err := st.Groups().AssignRole(ctx, group.ID, role.ID); err != nil {

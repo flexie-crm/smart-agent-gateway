@@ -159,14 +159,56 @@ func TestEveryKnownVendorKeyHasAnAdapter(t *testing.T) {
 	}
 }
 
+// A model's budget is its window in its own tokens, at the rate its own counts
+// have shown, less the reply's room and the margin. Worked out by hand here:
+// 200,000 less 8,000 is 192,000 tokens, and 95 percent of that is kept.
 func TestBudgetForModel(t *testing.T) {
+	// Never reported: the safe guess of 2 characters a token.
 	m := &model.AIModel{ContextWindow: 200_000}
-	if got := BudgetFor(m, 8_000); got != 192_000*CharsPerToken {
-		t.Fatalf("budget: %d", got)
+	if got := BudgetFor(m, 8_000); got != 364_800 { // 192,000 x 2 x 0.95
+		t.Fatalf("an unmeasured model's budget is %d, want 364,800", got)
+	}
+	// Reported: 37,000 characters were 10,000 of its tokens, 3.7 a token.
+	m.MeasuredChars, m.MeasuredTokens = 37_000, 10_000
+	if got := BudgetFor(m, 8_000); got != 674_880 { // 192,000 x 3.7 x 0.95
+		t.Fatalf("a measured model's budget is %d, want 674,880", got)
 	}
 	// An unconfigured window means we were not told, so nothing is trimmed
 	// on a number we invented.
 	if got := BudgetFor(&model.AIModel{}, 8_000); got != 0 {
 		t.Fatalf("an unset context window must not trim: %d", got)
+	}
+}
+
+// A model's rate is what its own counts have shown, and the guess until it has
+// said anything.
+func TestAModelsRateIsItsOwnCounts(t *testing.T) {
+	if got := CharsPerToken(&model.AIModel{}); got != GuessCharsPerToken {
+		t.Fatalf("a model that never reported is taken at %v, want the guess %v", got, GuessCharsPerToken)
+	}
+	if got := CharsPerToken(nil); got != GuessCharsPerToken {
+		t.Fatalf("no model is taken at %v, want the guess", got)
+	}
+	if got := CharsPerToken(&model.AIModel{MeasuredChars: 27_030, MeasuredTokens: 7_318}); got < 3.69 || got > 3.70 {
+		t.Fatalf("27,030 characters that were 7,318 tokens came out %v a token, want 3.69", got)
+	}
+}
+
+// What one call may teach: a count, and one that could be the whole request.
+func TestOnlyACountThatCanBeTrueIsLearnedFrom(t *testing.T) {
+	for _, c := range []struct {
+		chars, tokens int64
+		want          bool
+	}{
+		{27_030, 7_318, true},    // gpt-6-sol through a bridge, measured: 3.7
+		{360_000, 102_000, true}, // deepseek, measured: about 3.5
+		{10_000, 0, false},       // a server that left the count out
+		{0, 500, false},          // nothing counted here (the call carried files)
+		{70_000, 10_000, false},  // 7 a token: no model measured is near it, so the count cannot be the whole request
+		{900, 1_000, false},      // under one character a token: not a count of this request
+	} {
+		if got := Measurable(c.chars, c.tokens); got != c.want {
+			t.Fatalf("%d characters as %d tokens: learnable %v, want %v", c.chars, c.tokens, got, c.want)
+		}
 	}
 }

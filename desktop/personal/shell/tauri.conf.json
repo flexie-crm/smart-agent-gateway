@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "SAG Personal",
-  "version": "0.1.14",
+  "version": "0.1.24",
   "identifier": "io.flexie.sag.personal",
   "build": {
     "frontendDist": "splash"
@@ -38,7 +38,10 @@
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlDQkRGMzFCNTRGN0U3QTIKUldTaTUvZFVHL085bkNjTSsvWHRvczZ1K0FrcExsWGZXRlltYTY5MkNFc0ZKMDlqWHBKWDFHRk8K",
       "endpoints": [
         "https://sag-repo.flexie.io/updates/personal/{{target}}/{{arch}}/{{current_version}}"
-      ]
+      ],
+      "windows": {
+        "installMode": "quiet"
+      }
     }
   }
 }

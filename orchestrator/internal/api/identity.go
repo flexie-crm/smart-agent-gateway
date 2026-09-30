@@ -198,7 +198,12 @@ func (h *identityHandlers) createUser(w http.ResponseWriter, r *http.Request) {
 		Name:         req.Name,
 		PasswordHash: hash,
 	}
-	if err := h.app.Store.Users().Create(r.Context(), user); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.Users().Create(r.Context(), user, by); err != nil {
 		writeSaveError(w, h.app, err, "email", "another account already uses this email")
 		return
 	}
@@ -257,7 +262,12 @@ func (h *identityHandlers) updateUser(w http.ResponseWriter, r *http.Request) {
 	user.Email = strings.ToLower(strings.TrimSpace(req.Email))
 	user.Name = req.Name
 	user.Status = req.Status
-	if err := h.app.Store.Users().Update(r.Context(), user); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.Users().Update(r.Context(), user, by); err != nil {
 		writeSaveError(w, h.app, err, "email", "another account already uses this email")
 		return
 	}
@@ -294,7 +304,12 @@ func (h *identityHandlers) setUserPassword(w http.ResponseWriter, r *http.Reques
 		writeStoreError(w, h.app, err)
 		return
 	}
-	if err := h.app.Store.Users().UpdatePassword(r.Context(), user.ID, hash); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.Users().UpdatePassword(r.Context(), user.ID, hash, by); err != nil {
 		writeStoreError(w, h.app, err)
 		return
 	}
@@ -452,7 +467,12 @@ func (h *identityHandlers) createGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	group := &model.Group{WorkspaceID: claimsFrom(r).WorkspaceID, Name: req.Name}
-	if err := h.app.Store.Groups().Create(r.Context(), group); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.Groups().Create(r.Context(), group, by); err != nil {
 		writeSaveError(w, h.app, err, "name", "another group already has this name")
 		return
 	}
@@ -473,7 +493,12 @@ func (h *identityHandlers) updateGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	group.Name = req.Name
-	if err := h.app.Store.Groups().Update(r.Context(), group); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.Groups().Update(r.Context(), group, by); err != nil {
 		writeSaveError(w, h.app, err, "name", "another group already has this name")
 		return
 	}
@@ -637,7 +662,12 @@ func (h *identityHandlers) createRole(w http.ResponseWriter, r *http.Request) {
 		Name:        req.Name,
 		Permissions: req.Permissions,
 	}
-	if err := h.app.Store.Roles().Create(r.Context(), role); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.Roles().Create(r.Context(), role, by); err != nil {
 		writeSaveError(w, h.app, err, "name", "another role already has this name")
 		return
 	}
@@ -663,7 +693,12 @@ func (h *identityHandlers) updateRole(w http.ResponseWriter, r *http.Request) {
 		Name:        req.Name,
 		Permissions: req.Permissions,
 	}
-	if err := h.app.Store.Roles().Update(r.Context(), role); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.Roles().Update(r.Context(), role, by); err != nil {
 		writeSaveError(w, h.app, err, "name", "another role already has this name")
 		return
 	}

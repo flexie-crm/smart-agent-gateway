@@ -186,7 +186,7 @@ to be installed first. Nothing above works without it.
 
 | | Version | Needed for |
 |---|---|---|
-| Go | 1.26 | the server, always |
+| Go | 1.27 | the server, always |
 | Node | 22 or newer | both front ends, always |
 | Rust | stable | the desktop applications and the inference node |
 | MariaDB | 11.4 | the server in development and in production |
@@ -279,9 +279,13 @@ looking at. The test suite creates and destroys its own scratch databases, so
 ```sh
 make ci            # THE GATE: format, tidy, vet, lint, Go tests, both front ends
 make test-race     # the race detector — run it after a concurrency change
+                   # both run one package at a time: several suites use a real
+                   # database and contend for it (KB/22)
 make e2e           # a real browser against a real server
 make desktop-e2e   # the built desktop application, first run to ready
 make link-e2e      # the real desktop client, against a real server and database
+                   # (needs SAG_TEST_DSN: it also drives twenty real agents
+                   # colliding on one skill, which needs a real store)
 make node-ci       # the inference node's own gate
 ```
 
@@ -408,7 +412,29 @@ Run these in PowerShell, from the repository root.
 .\desktop\personal\windows\e2e.ps1                  # the desktop gate
 ```
 
-Output: `desktop\.local\out\personal\SAG Personal_<version>_x64-setup.exe`.
+Output: `desktop\.local\out\personal\SAG-Personal-<version>-x64-setup.exe`.
+
+Set `TAURI_SIGNING_PRIVATE_KEY_PATH` (and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+if the key has one) and the same run also writes what publishes it:
+
+```
+desktop\.local\out\personal\SAG-Personal-<version>-x64-setup.exe.sig
+desktop\.local\out\personal\updates\personal-windows-x86_64.json
+```
+
+Without a key those two are skipped and the installer is still built: a build
+with no update key is a build, not a failure. With them:
+
+```powershell
+.\desktop\personal\windows\publish.ps1           # publish it
+.\desktop\personal\windows\publish.ps1 -WhatIf   # say what it would do, touch nothing
+```
+
+That is the Windows counterpart of `./desktop/publish.sh`, which publishes
+macOS. Two scripts for the same reason the build is two scripts; they share the
+ORDER, which is load-bearing, and KB/41 says what to keep in step. The update
+artefact IS the installer here, published twice under two names, because one
+format does both jobs on this platform.
 
 `make build-personal` and `make desktop-e2e` dispatch to these on Windows, so the
 same command works on either platform.

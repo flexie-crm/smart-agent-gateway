@@ -101,7 +101,7 @@ func (r *Runner) generateTitle(ctx context.Context, turn Turn, prompt, answer st
 	if err != nil {
 		return "", err
 	}
-	r.recordModelCall(ctx, turn, resolved, time.Now(), resp.Usage)
+	r.recordModelCall(ctx, turn, resolved, time.Now(), resp.Usage, req)
 
 	return cleanTitle(resp.Message.Content), nil
 }

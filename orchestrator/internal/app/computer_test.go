@@ -9,9 +9,9 @@ import (
 
 func windowsBox() *MachineEnv {
 	return &MachineEnv{
-		OS: "windows", Arch: "x86_64", Name: "ERIOL-PC", Shell: "cmd.exe",
+		OS: "windows", Arch: "x86_64", Name: "MAREN-PC", Shell: "cmd.exe",
 		PathSeparator: "\\", CaseSensitivePaths: false, LineEnding: "\r\n",
-		Home: `C:\Users\eriol`,
+		Home: `C:\Users\maren`,
 		Has:  []string{"git", "node"}, Missing: []string{"bash", "make"},
 	}
 }
@@ -41,7 +41,7 @@ func TestTheComputerOnlyWhenSomethingCanActOnIt(t *testing.T) {
 func TestTheComputerSaysWhatAGuessWouldGetWrong(t *testing.T) {
 	got := theComputer(windowsBox(), []tool.Schema{{Name: "terminal"}})
 	for _, want := range []string{
-		"Windows", "ERIOL-PC", "x86_64", "cmd.exe", `C:\Users\eriol`,
+		"Windows", "MAREN-PC", "x86_64", "cmd.exe", `C:\Users\maren`,
 		"not case sensitive", "Installed: git, node", "Not installed: bash, make",
 		"not what you are allowed to run",
 		// The line that exists because it probed a list it had already been

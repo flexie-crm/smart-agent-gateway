@@ -84,7 +84,7 @@ func TestRecoveryNarratesInterruptedDelegations(t *testing.T) {
 	ag := &model.Agent{
 		WorkspaceID: e.ws.ID, Key: model.DefaultAgentKey, Name: "House", ModelID: &pinned,
 	}
-	if err := e.app.Store.Agents().Create(ctx, ag); err != nil {
+	if err := e.app.Store.Agents().Create(ctx, ag, model.Nobody()); err != nil {
 		t.Fatalf("create default agent: %v", err)
 	}
 
@@ -180,7 +180,7 @@ func TestRecoveryReleasesWhatADeadAgentWasWaitingOn(t *testing.T) {
 
 	pinned := e.aiModel("house-model")
 	ag := &model.Agent{WorkspaceID: e.ws.ID, Key: model.DefaultAgentKey, Name: "House", ModelID: &pinned}
-	if err := e.app.Store.Agents().Create(ctx, ag); err != nil {
+	if err := e.app.Store.Agents().Create(ctx, ag, model.Nobody()); err != nil {
 		t.Fatalf("create default agent: %v", err)
 	}
 
@@ -280,7 +280,7 @@ func TestRecoveryLeavesTheGatewaysOwnCardAlone(t *testing.T) {
 
 	pinned := e.aiModel("house-model")
 	ag := &model.Agent{WorkspaceID: e.ws.ID, Key: model.DefaultAgentKey, Name: "House", ModelID: &pinned}
-	if err := e.app.Store.Agents().Create(ctx, ag); err != nil {
+	if err := e.app.Store.Agents().Create(ctx, ag, model.Nobody()); err != nil {
 		t.Fatalf("create default agent: %v", err)
 	}
 	session := &model.AgentSession{
@@ -356,13 +356,13 @@ func TestAnInterruptedAgentIsStartedAgain(t *testing.T) {
 	pinned := e.aiModel("house-model")
 	if err := e.app.Store.Agents().Create(ctx, &model.Agent{
 		WorkspaceID: e.ws.ID, Key: model.DefaultAgentKey, Name: "House", ModelID: &pinned,
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		t.Fatalf("create default agent: %v", err)
 	}
 	// The agent that was working, so it can be resolved again on the way back.
 	if err := e.app.Store.Agents().Create(ctx, &model.Agent{
 		WorkspaceID: e.ws.ID, Key: "researcher", Name: "Researcher", ModelID: &pinned,
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
 	session := &model.AgentSession{
@@ -413,7 +413,7 @@ func TestAnAgentIsNotRestartedForEver(t *testing.T) {
 	pinned := e.aiModel("house-model")
 	if err := e.app.Store.Agents().Create(ctx, &model.Agent{
 		WorkspaceID: e.ws.ID, Key: model.DefaultAgentKey, Name: "House", ModelID: &pinned,
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		t.Fatalf("create default agent: %v", err)
 	}
 	session := &model.AgentSession{

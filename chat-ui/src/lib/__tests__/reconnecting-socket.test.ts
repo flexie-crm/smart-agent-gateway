@@ -139,6 +139,29 @@ describe('ReconnectingSocket', () => {
     expect(joined).toEqual(['presence', 'another'])
   })
 
+  // Something open on a channel is closed: the channel is left now, and it is
+  // not joined again when the socket comes back after a drop.
+  it('leaves a topic, and does not rejoin it on a reconnect', () => {
+    const h = harness()
+    h.client.subscribe('presence')
+    h.client.subscribe('agent:5')
+    h.runTimer()
+    h.sockets[0].open()
+
+    h.client.unsubscribe('agent:5')
+    expect(JSON.parse(last(h.sockets[0].sent))).toEqual({ type: 'unsubscribe', topic: 'agent:5' })
+    // Leaving what was never joined says nothing.
+    const said = h.sockets[0].sent.length
+    h.client.unsubscribe('agent:6')
+    expect(h.sockets[0].sent).toHaveLength(said)
+
+    h.sockets[0].fireClose(1006)
+    h.runTimer()
+    h.sockets[1].open()
+    const joined = h.sockets[1].sent.slice(1).map((raw) => JSON.parse(raw).topic)
+    expect(joined).toEqual(['presence'])
+  })
+
   it('collapses the StrictMode start/stop/start into a single socket', () => {
     const h = harness()
     h.client.start() // mount: schedules the open

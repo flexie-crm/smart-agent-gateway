@@ -31,8 +31,15 @@ func TestCustomToolAdminEndpoints(t *testing.T) {
 	// The templates, and the query template's MySQL form.
 	var templates []map[string]any
 	env.decode(env.do(http.MethodGet, "/v1/tools/templates", token, nil), &templates)
-	if !containsName(templates, "query") {
-		t.Fatalf("the query template was not offered: %+v", templates)
+	// Every template this build ships, because a template that is written and
+	// never registered is a feature nobody can reach, and nothing else would
+	// say so: the picker is served from the registry, so the list IS the
+	// product. (The browser tool went a day offered to nobody for exactly this
+	// shape of gap, KB/39.)
+	for _, want := range []string{"query", "ssh", "api"} {
+		if !containsName(templates, want) {
+			t.Fatalf("the %s template was not offered: %+v", want, templates)
+		}
 	}
 	rec := env.do(http.MethodGet, "/v1/tools/templates/query/fields?variant=mysql", token, nil)
 	env.expectStatus(rec, http.StatusOK)

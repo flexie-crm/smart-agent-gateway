@@ -52,11 +52,13 @@ func Tools(machines Machines) []tool.Tool {
 		// administrator wrote (BindTerminal), exactly as the brain tools are
 		// rebound over the agent's own brains: a handler built at boot cannot
 		// know a setting somebody changes at four in the afternoon.
-		{Schema: terminalSchema(), Handle: terminalHandler(machines, cmdpolicy.Policy{})},
+		{Schema: terminalSchema(), Handle: terminalHandler(machines, cmdpolicy.Policy{}, tool.OwnerNone)},
 	}
 	// The files on that same computer, each its own tool because each is its
-	// own grant (files.go).
-	return append(tools, fileTools(machines)...)
+	// own grant (files.go), and the browser on it, split for the same reason
+	// (browser.go).
+	tools = append(tools, fileTools(machines)...)
+	return append(tools, browserTools(machines)...)
 }
 
 // Offers reports which machine tools this person's computer can actually run,
@@ -117,6 +119,11 @@ func Dispatch(machines Machines, schema tool.Schema, remote string) tool.Handler
 		answer, err := machines.Call(ctx, call.WorkspaceID, call.UserID, call.DeviceID,
 			remote, inThisConversation(call), schema.FriendlyName)
 		switch {
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			// The turn was stopped, not the computer: it is there and may still
+			// be doing the work. Only what is known, because whether the
+			// command finished over there is not.
+			return toolkit.Failed("this turn was stopped before your computer answered")
 		case errors.Is(err, link.ErrNoMachine):
 			return toolkit.Failed("the chat application is not connected on this computer")
 		case errors.Is(err, link.ErrTimeout):
@@ -144,18 +151,23 @@ func Dispatch(machines Machines, schema tool.Schema, remote string) tool.Handler
 	}
 }
 
-// BindTerminal points the terminal at what this workspace decided it may run.
+// BindTerminal points the terminal at what this workspace decided it may run,
+// and at WHOSE terminals these are.
 //
 // Called once per turn with the tool's stored settings, because a policy is
 // read at boot and edited at four in the afternoon: a handler built with the
 // old one would go on enforcing it until the process restarted. The brain tools
 // are rebound the same way and for the same reason.
-func BindTerminal(loadout tool.Loadout, machines Machines, policy cmdpolicy.Policy) {
+//
+// The owner rides along because it is the other thing decided per turn and not
+// knowable at boot: it is minted when an agent's loadout is built, and it is
+// what keeps one agent out of another's shell (terminalScope).
+func BindTerminal(loadout tool.Loadout, machines Machines, policy cmdpolicy.Policy, owner tool.Owner) {
 	name := terminalSchema().Name
 	if _, ok := loadout.Handlers[name]; !ok {
 		return
 	}
-	loadout.Handlers[name] = terminalHandler(machines, policy)
+	loadout.Handlers[name] = terminalHandler(machines, policy, owner)
 }
 
 // RefuseTerminal binds a terminal that runs nothing and says WHY.
@@ -174,6 +186,41 @@ func RefuseTerminal(loadout tool.Loadout, reason string) {
 	}
 }
 
+// terminalScope is which set of terminals a call belongs to on the person's
+// computer: the far side keys what it keeps by (scope, name), so two callers
+// with different scopes cannot reach each other's shells.
+//
+// The Gateway's scope is its conversation, which is what makes the shell theirs
+// rather than everybody's. EVERY agent has its own, whatever mode it runs in,
+// because an agent is its own worker with its own folder and its own exported
+// variables and has no business inheriting somebody else's.
+//
+// The identity is the one the product already mints for this. tool.Owner says
+// so itself: a tool keeping state "must file it under the agent that opened it,
+// and NOT under the conversation: a background agent runs with its Gateway's
+// session id, so keying on the conversation puts a Gateway and every agent it
+// started on one entry, and one of them ends up typing into another's program."
+// The SSH tool has always obeyed that (its sessions are keyed owner@server);
+// the terminal did not, and the consequence was measured: two fleet members
+// asked to run one command each landed on one shell, and the second was refused
+// with "this conversation's terminal is busy with" the first one's command,
+// quoted back.
+//
+// Negated, so the two spaces cannot overlap. A conversation id is positive and
+// so is an agent's number, so conversation 5 and agent 5 both exist; -5 is an
+// agent and can never be a conversation. Structural rather than improbable.
+//
+// What it costs: an agent that stops for approval is resolved again when it
+// resumes, so it is minted a new identity and comes back to a fresh shell. That
+// is exactly what an SSH session does today, and it is the honest trade for
+// identity that no restart can confuse.
+func terminalScope(call tool.Call) int64 {
+	if n, isAgent := call.Owner.Instance(); isAgent {
+		return -n
+	}
+	return call.SessionID
+}
+
 // inThisConversation adds which conversation a call belongs to.
 //
 // The computer needs it for one rule: a file may not be overwritten unless it
@@ -189,7 +236,8 @@ func RefuseTerminal(loadout tool.Loadout, reason string) {
 // cannot pass it off. A tool that has no use for it ignores it, which is what
 // the reader on the other side does with a field it does not know.
 func inThisConversation(call tool.Call) json.RawMessage {
-	if call.SessionID == 0 {
+	scope := terminalScope(call)
+	if scope == 0 {
 		return call.Args
 	}
 	args := map[string]json.RawMessage{}
@@ -200,7 +248,7 @@ func inThisConversation(call tool.Call) json.RawMessage {
 			return call.Args
 		}
 	}
-	args["conversation"] = json.RawMessage(strconv.FormatInt(call.SessionID, 10))
+	args["conversation"] = json.RawMessage(strconv.FormatInt(scope, 10))
 	carried, err := json.Marshal(args)
 	if err != nil {
 		return call.Args

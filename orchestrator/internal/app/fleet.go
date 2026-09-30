@@ -11,9 +11,12 @@ import (
 
 	"flexie.io/sag/internal/agent"
 	"flexie.io/sag/internal/chat"
+	"flexie.io/sag/internal/events"
 	"flexie.io/sag/internal/model"
 	"flexie.io/sag/internal/queue"
 	"flexie.io/sag/internal/store"
+	"flexie.io/sag/internal/tool"
+	"flexie.io/sag/internal/tools/machine"
 )
 
 // A fleet, from the Gateway's one call to the Gateway's one answer (Mode B,
@@ -138,7 +141,7 @@ func (a *App) StartFleet(ctx context.Context, req agent.FleetRequest) {
 	// agents and watches an empty column, which is the one moment the rail exists
 	// for. Built and pushed here, before watch, so nothing else can be holding
 	// this track yet and `done` cannot be anything but zero.
-	a.pushChip(track.chip(model.DelegationRunning), req.WorkspaceID, req.UserID)
+	a.pushFleetChip(req.FleetID, track.chip(model.DelegationRunning), req.WorkspaceID, req.UserID)
 	a.fleetTracker.watch(track, a.onFleetOutOfTime)
 	a.event().Int64("fleet", req.FleetID).Int("agents", len(req.Members)).Msg("fleet dispatched")
 
@@ -154,6 +157,50 @@ func (a *App) StartFleet(ctx context.Context, req agent.FleetRequest) {
 	}
 }
 
+// reachesTheirComputer reports whether this loadout holds a tool that runs on
+// the person's own machine.
+//
+// Asked of the resolved loadout rather than of the agent's configuration,
+// because the loadout is what is true: such a tool is dropped when there is no
+// computer to run it on (machine.Offers), so one being present already says
+// there is a machine to reach.
+func reachesTheirComputer(loadout tool.Loadout) bool {
+	for _, schema := range loadout.Schemas {
+		if machine.Runs(schema.Name) {
+			return true
+		}
+	}
+	return false
+}
+
+// runFleetMemberHere runs one member in this process, through the very handler
+// a worker would have run.
+//
+// No job row is written for it, on purpose: a row is findable by the sweep, and
+// a worker that found this one would take work it cannot do. The delegation row
+// is the durable record either way, and the batch's deadline is what closes a
+// member this process died under (there is no lease to reclaim, because there
+// is no job).
+func (a *App) runFleetMemberHere(fleetID int64, m agent.FleetMember) {
+	payload, err := json.Marshal(fleetJobPayload{DelegationID: m.DelegationID, FleetID: fleetID})
+	if err != nil {
+		a.Log.Error().Err(err).Int64("del", m.DelegationID).Msg("encode fleet member")
+		return
+	}
+	// An owned goroutine, the same one a background agent gets: its cancel is
+	// tracked so it can be stopped, and shutdown waits for it.
+	a.bg.spawn(m.DelegationID, m.Sub.BackgroundTimeout, func(ctx context.Context) {
+		// No ID: there is no job row, and a made-up one in a field that names a
+		// row would read as a row somebody could go and look at.
+		if err := a.RunFleetMemberJob(ctx, &model.Job{
+			Kind: model.JobKindAgentRun, Payload: payload,
+		}); err != nil {
+			a.Log.Error().Err(err).Int64("fleet", fleetID).Int64("del", m.DelegationID).
+				Msg("fleet member run here did not finish")
+		}
+	})
+}
+
 // enqueueFleetMembers writes the batch's jobs in ONE statement, and then rings
 // the bells.
 //
@@ -161,12 +208,48 @@ func (a *App) StartFleet(ctx context.Context, req agent.FleetRequest) {
 // worker looking for work that does not exist (KB/05), while a row with no
 // signal is merely slow, because the worker's sweep finds it.
 func (a *App) enqueueFleetMembers(ctx context.Context, req agent.FleetRequest) error {
+	// WHERE each member can run, decided here and nowhere else.
+	//
+	// A member holding a tool that runs on the person's own computer cannot run
+	// on a worker. The link is a socket the chat application dialled to THIS
+	// process and keeps alive itself; another process cannot join it, and
+	// nothing can be forwarded to it that would not be a second thing to keep
+	// working. So that member runs here, as an owned goroutine, exactly as a
+	// background agent does.
+	//
+	// It is the same work either way: the same handler, reading the same row,
+	// settling and reporting the same way, registering its cancel with the same
+	// tracker. Only the trigger differs, which is the one thing this decides.
+	//
+	// The condition is its resolved loadout, not its configuration: a tool that
+	// runs on somebody's machine is only IN a loadout when there is a machine
+	// to run it on, so holding one already means there is a computer to reach.
+	local := make([]agent.FleetMember, 0, len(req.Members))
+	remote := make([]agent.FleetMember, 0, len(req.Members))
+	for _, m := range req.Members {
+		if reachesTheirComputer(m.Sub.Tools) {
+			local = append(local, m)
+			continue
+		}
+		remote = append(remote, m)
+	}
+
+	for _, m := range local {
+		a.event().Int64("fleet", req.FleetID).Int64("del", m.DelegationID).
+			Str("agent", m.Sub.Key).Msg("running member here, it reaches this computer")
+		a.runFleetMemberHere(req.FleetID, m)
+	}
+	if len(remote) == 0 {
+		return nil
+	}
+
+	// The queue is needed only by the members that leave.
 	if a.Queue == nil {
 		return errors.New("no queue is connected")
 	}
 	subject := queue.SubjectRoot + "." + queue.CapabilityDefault + "." + model.JobKindAgentRun
-	jobs := make([]*model.Job, len(req.Members))
-	for i, m := range req.Members {
+	jobs := make([]*model.Job, len(remote))
+	for i, m := range remote {
 		payload, err := json.Marshal(fleetJobPayload{DelegationID: m.DelegationID, FleetID: req.FleetID})
 		if err != nil {
 			return fmt.Errorf("encode fleet job: %w", err)
@@ -188,8 +271,8 @@ func (a *App) enqueueFleetMembers(ctx context.Context, req agent.FleetRequest) e
 	}
 
 	for i, job := range jobs {
-		a.event().Int64("fleet", req.FleetID).Int64("del", req.Members[i].DelegationID).
-			Str("agent", req.Members[i].Sub.Key).Msg("dispatching member")
+		a.event().Int64("fleet", req.FleetID).Int64("del", remote[i].DelegationID).
+			Str("agent", remote[i].Sub.Key).Msg("dispatching member")
 		if err := a.Queue.Enqueue(ctx, job.Subject, queue.Task{
 			ID: job.ID, Kind: job.Kind, WorkspaceID: job.WorkspaceID, Payload: job.Payload,
 		}); err != nil {
@@ -243,7 +326,7 @@ func (a *App) RunFleetMemberJob(ctx context.Context, job *model.Job) error {
 	}
 	// Resolved LIVE, like every other path that starts an agent from a row: one
 	// an administrator removed or revoked while this waited is not quietly run.
-	sub, err := a.ResolveAgent(ctx, del.WorkspaceID, session.UserID, noComputer(), del.AgentKey)
+	sub, err := a.ResolveAgent(ctx, del.WorkspaceID, session.UserID, onComputer(del.DeviceID), del.AgentKey)
 	if err != nil {
 		a.Log.Warn().Err(err).Str("agent", del.AgentKey).Msg("fleet member agent unavailable")
 		a.settleFleetMember(ctx, del.ID, fleetID, model.DelegationFailed, nil,
@@ -257,14 +340,13 @@ func (a *App) RunFleetMemberJob(ctx context.Context, job *model.Job) error {
 	// the run finds it. Released on the way out, so the map holds what is live.
 	defer a.fleets.add(fleetID, del.ID, cancel)()
 
-	// Nothing is streaming this. A member runs with no reader: there is no live
-	// request behind it and no socket on this process, so its frames go nowhere
-	// and its progress is the delegation row the server reads. What the person
-	// sees is the fleet's chip, which counts members rather than tokens.
+	// Nobody is reading this stream. A member runs with no live request behind
+	// it, so its words go nowhere; what is kept is what it spends and what it is
+	// doing, on its own delegation row, which is where the batch is read from.
 	a.event().Int64("fleet", fleetID).Int64("del", del.ID).Str("agent", del.AgentKey).
 		Str("job", job.ID).Msg("worker running agent")
 
-	out := chat.NewStream(discardFrames{})
+	out := chat.NewStream(a.bg.newSpendSink(del.ID))
 	result, runErr := a.Agent.RunFleetMember(runCtx, agent.BackgroundDelegation{
 		DelegationID: del.ID,
 		Sub:          sub,
@@ -273,6 +355,8 @@ func (a *App) RunFleetMemberJob(ctx context.Context, job *model.Job) error {
 		WorkspaceID:  del.WorkspaceID,
 		UserID:       session.UserID,
 		SessionID:    del.SessionID,
+		DeviceID:     del.DeviceID,
+		StepChanged:  a.tellSteps(del.WorkspaceID, session.UserID, del.SessionID, del.ID, fleetID),
 	}, out)
 
 	a.settleFleetRun(ctx, runCtx, del, fleetID, result, runErr)
@@ -294,6 +378,12 @@ func (a *App) settleFleetRun(ctx, runCtx context.Context, del *model.AgentDelega
 	}
 	a.event().Int64("fleet", fleetID).Int64("del", del.ID).Str("outcome", outcome).
 		Msg("worker agent finished")
+	// Over, unless it stopped to ask: what it spent is on its row, and this
+	// process has nothing left to count for it. A parked member keeps its
+	// accumulator, so a resume in this process carries straight on.
+	if !errors.Is(runErr, agent.ErrBackgroundParked) {
+		defer a.bg.dropProgress(del.ID)
+	}
 
 	switch {
 	case errors.Is(runErr, agent.ErrBackgroundParked):
@@ -512,7 +602,7 @@ func (a *App) RunFleetResumeJob(ctx context.Context, job *model.Job) error {
 		return nil
 	}
 
-	sub, err := a.ResolveAgent(ctx, del.WorkspaceID, p.Snapshot.UserID, noComputer(), del.AgentKey)
+	sub, err := a.ResolveAgent(ctx, del.WorkspaceID, p.Snapshot.UserID, onComputer(del.DeviceID), del.AgentKey)
 	if err != nil {
 		a.Log.Warn().Err(err).Str("agent", del.AgentKey).Msg("resume: agent no longer available")
 		a.settleFleetMember(ctx, del.ID, p.FleetID, model.DelegationFailed, nil,
@@ -524,11 +614,14 @@ func (a *App) RunFleetResumeJob(ctx context.Context, job *model.Job) error {
 	defer cancel()
 	defer a.fleets.add(p.FleetID, del.ID, cancel)()
 
-	out := chat.NewStream(discardFrames{})
+	// Its spend carries on from the first leg's: the accumulator starts from
+	// what the row already says.
+	out := chat.NewStream(a.bg.newSpendSink(del.ID))
 	result, runErr := a.Agent.ResumeFleetMember(runCtx, agent.BackgroundResume{
 		Snapshot: p.Snapshot, Approved: p.Approved, Sub: sub,
 		WorkspaceID: del.WorkspaceID, UserID: p.Snapshot.UserID,
 		SessionID: del.SessionID, ModelID: p.Snapshot.ModelID,
+		StepChanged: a.tellSteps(del.WorkspaceID, p.Snapshot.UserID, del.SessionID, del.ID, p.FleetID),
 	}, out)
 	a.settleFleetRun(ctx, runCtx, del, p.FleetID, result, runErr)
 	return nil
@@ -721,7 +814,7 @@ func (a *App) onFleetReport(ctx context.Context, report fleetReport) {
 
 	// Straight to the screen from memory. This is the ordinary case, it happens
 	// once per member, and it costs a socket write.
-	a.pushChip(progress.chip(model.DelegationRunning), progress.WorkspaceID, progress.UserID)
+	a.pushFleetChip(progress.FleetID, progress.chip(model.DelegationRunning), progress.WorkspaceID, progress.UserID)
 	if !complete {
 		return
 	}
@@ -804,9 +897,13 @@ func (a *App) closeFleetFromStore(ctx context.Context, fleetID int64) {
 	a.closeFleet(ctx, fleet, model.FleetDone)
 }
 
-// pushChip sends one chip to a person's tabs. No reads: everything on it was
-// already known.
-func (a *App) pushChip(chip Chip, workspaceID, userID int64) {
+// pushFleetChip sends a batch's chip to a person's tabs. No reads: everything
+// on it was already known.
+func (a *App) pushFleetChip(fleetID int64, chip Chip, workspaceID, userID int64) {
+	// Whatever moved the chip moved one of the batch's agents, so somebody who
+	// has the batch open is told where each of them now stands. Published even
+	// with no socket: the listener decides whether anybody is watching.
+	a.Bus.Publish(events.FleetChanged{WorkspaceID: workspaceID, UserID: userID, FleetID: fleetID})
 	if a.WS == nil {
 		return
 	}
@@ -845,6 +942,26 @@ func (a *App) closeFleet(ctx context.Context, fleet *model.AgentFleet, status st
 	a.scheduleFleetCompletion(ctx, fleet)
 }
 
+// fleetDevice is the computer a batch was started from, read off any of its
+// members. Every member of one fleet carries the same device (they are written
+// in one statement from one turn), so the first one that has it answers; empty
+// when the batch came from a browser or from a run with no computer.
+func (a *App) fleetDevice(ctx context.Context, fleetID int64) string {
+	members, err := a.Store.Agent().FleetMembers(ctx, fleetID)
+	if err != nil {
+		// Not a reason to lose the completion turn: the Gateway narrates either
+		// way, and what is lost is its own reach to that computer.
+		a.Log.Warn().Err(err).Int64("fleet_id", fleetID).Msg("read the batch's computer")
+		return ""
+	}
+	for _, m := range members {
+		if m.DeviceID != "" {
+			return m.DeviceID
+		}
+	}
+	return ""
+}
+
 // scheduleFleetCompletion wakes the Gateway ONCE, with every result on the one
 // call it made. It is the same server-initiated turn a single background agent
 // gets (KB/27); the only difference is that it is the join.
@@ -854,10 +971,16 @@ func (a *App) scheduleFleetCompletion(ctx context.Context, fleet *model.AgentFle
 		a.Log.Error().Err(err).Int64("session_id", fleet.SessionID).Msg("load session for fleet completion")
 		return
 	}
+	// The computer the batch was asked for from, taken off its members: they all
+	// carry the same one, and the fleet row has nowhere to keep it. Without it
+	// this turn is the Gateway with no machine tools, and its roster would tell
+	// it its agents hold none either.
+	device := a.fleetDevice(ctx, fleet.ID)
 	profile, loadout, err := a.Resolve(ctx, ProfileRequest{
 		WorkspaceID: fleet.WorkspaceID,
 		UserID:      session.UserID,
 		Channel:     model.ChannelChat,
+		DeviceID:    device,
 		// The model the Gateway was on when it started the batch, kept on the
 		// row so this turn runs on the same one even after a restart.
 		PreferredModelID: fleet.ModelID,
@@ -885,7 +1008,8 @@ func (a *App) scheduleFleetCompletion(ctx context.Context, fleet *model.AgentFle
 		MaxIterations:    profile.MaxIterations,
 		MaxFleetAgents:   profile.MaxFleetAgents,
 		AutoApprove:      session.ApprovalMode == model.ApprovalAuto,
-		Agent:            a.AgentResolver(fleet.WorkspaceID, session.UserID, noComputer()),
+		DeviceID:         device,
+		Agent:            a.AgentResolver(fleet.WorkspaceID, session.UserID, onComputer(device)),
 		StartBackground:  a.StartBackground,
 		StartFleet:       a.StartFleet,
 		CompletedFleetID: fleet.ID,
@@ -922,6 +1046,14 @@ func (a *App) CancelFleet(ctx context.Context, workspaceID, fleetID int64) bool 
 		a.notifyFleet(ctx, fleet)
 	}
 	a.fleetTracker.forget(fleetID)
+	// Members running HERE, stopped directly. This process does not listen for
+	// the broadcast below (RunFleetOps is the worker's), and it is the one
+	// sending it, so it stops its own the short way. Nothing to stop is the
+	// ordinary case and costs a map lookup.
+	if n := a.fleets.cancel(fleetID); n > 0 {
+		a.Log.Info().Int64("fleet_id", fleetID).Int("agents", n).
+			Msg("stopped fleet members running here")
+	}
 	a.event().Int64("fleet", fleetID).Msg("master batch cancelled, telling the workers")
 	// Told to every worker, not only the one we think has it: nobody here knows
 	// which process picked up which member, and a batch of twenty may be spread
@@ -934,13 +1066,6 @@ func (a *App) CancelFleet(ctx context.Context, workspaceID, fleetID int64) bool 
 }
 
 const fleetCancelled = "this task was cancelled"
-
-// discardFrames is the sink for a run with no reader. A fleet member's frames
-// have nowhere to go: it runs on a worker, and the person's picture of it is
-// the fleet's chip, which counts members.
-type discardFrames struct{}
-
-func (discardFrames) Write(chat.Frame) error { return nil }
 
 // notifyFleet pushes the fleet's chip to the person's tabs.
 //
@@ -975,8 +1100,5 @@ func (a *App) notifyFleet(ctx context.Context, fleet *model.AgentFleet) {
 	}
 	chip := FleetChip(current, members, a.AgentNames(wc, fleet.WorkspaceID))
 	chip.ChatUID = session.UID
-	a.WS.Notify(fleet.WorkspaceID, session.UserID, map[string]any{
-		"type":    "delegation",
-		"payload": chip,
-	})
+	a.pushFleetChip(fleet.ID, chip, fleet.WorkspaceID, session.UserID)
 }

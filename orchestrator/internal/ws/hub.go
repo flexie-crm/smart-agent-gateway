@@ -34,6 +34,7 @@ type Hub struct {
 	subscribe  chan subRequest
 	notify     chan notifyRequest
 	count      chan countRequest
+	watching   chan watchingRequest
 	broadcast  chan broadcastRequest
 	done       chan struct{}
 
@@ -63,10 +64,20 @@ type countRequest struct {
 	reply       chan Presence
 }
 
+type watchingRequest struct {
+	workspaceID int64
+	userID      int64
+	topic       string
+	reply       chan bool
+}
+
 type broadcastRequest struct {
 	workspaceID int64
-	topic       string
-	frame       []byte
+	// userID, when set, keeps the payload to that one person's sockets: a topic
+	// anybody may subscribe to by name, carrying something that is theirs.
+	userID int64
+	topic  string
+	frame  []byte
 }
 
 // NewHub builds a hub. originPatterns are the host patterns a browser may open
@@ -83,6 +94,7 @@ func NewHub(log zerolog.Logger, validate Validator, originPatterns []string) *Hu
 		// hub being briefly busy; a full buffer drops rather than stalls.
 		notify:    make(chan notifyRequest, 1024),
 		count:     make(chan countRequest),
+		watching:  make(chan watchingRequest),
 		broadcast: make(chan broadcastRequest, 1024),
 		done:      make(chan struct{}),
 	}
@@ -226,9 +238,22 @@ func (h *Hub) Run(ctx context.Context) {
 		case req := <-h.count:
 			req.reply <- countOf(req.workspaceID)
 
+		case req := <-h.watching:
+			watched := false
+			for _, c := range subs[req.topic][req.workspaceID] {
+				if c.userID == req.userID {
+					watched = true
+					break
+				}
+			}
+			req.reply <- watched
+
 		case b := <-h.broadcast:
 			if conns := subs[b.topic][b.workspaceID]; conns != nil {
 				for _, c := range conns {
+					if b.userID != 0 && c.userID != b.userID {
+						continue
+					}
 					c.enqueue(b.frame)
 				}
 			}
@@ -281,6 +306,43 @@ func (h *Hub) Broadcast(workspaceID int64, topic string, message any) {
 	default:
 		h.log.Warn().Int64("workspace_id", workspaceID).Str("topic", topic).
 			Msg("ws broadcast dropped: hub is backed up")
+	}
+}
+
+// BroadcastTo delivers a payload to the sockets ONE person holds that are
+// subscribed to a topic in a workspace.
+//
+// For a topic that belongs to somebody, like one of their agents at work.
+// Anybody may subscribe to any name, and the hub does not know whose a name is,
+// so what keeps it theirs is that nobody else is ever sent it: subscribing to
+// somebody else's agent is allowed and hears nothing.
+func (h *Hub) BroadcastTo(workspaceID, userID int64, topic string, message any) {
+	pre := topicFrame(topic, message)
+	select {
+	case h.broadcast <- broadcastRequest{workspaceID: workspaceID, userID: userID, topic: topic, frame: pre}:
+	case <-h.done:
+	default:
+		h.log.Warn().Int64("workspace_id", workspaceID).Str("topic", topic).
+			Msg("ws broadcast dropped: hub is backed up")
+	}
+}
+
+// Watching reports whether a person has a socket subscribed to a topic right
+// now, so work done only to be pushed there is skipped when nobody would see
+// it. Exact at the moment of asking, like Connected; somebody who subscribes a
+// moment later reads the current state when they open, not from a push.
+func (h *Hub) Watching(workspaceID, userID int64, topic string) bool {
+	reply := make(chan bool, 1)
+	select {
+	case h.watching <- watchingRequest{workspaceID: workspaceID, userID: userID, topic: topic, reply: reply}:
+	case <-h.done:
+		return false
+	}
+	select {
+	case watched := <-reply:
+		return watched
+	case <-h.done:
+		return false
 	}
 }
 

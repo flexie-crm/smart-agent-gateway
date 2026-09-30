@@ -39,6 +39,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"flexie.io/sag/internal/useragent"
 )
 
 // How long to wait on a control call.
@@ -479,6 +481,7 @@ func send[T any](ctx context.Context, n *Node, method, path string, body any, ti
 	if err != nil {
 		return out, fmt.Errorf("inference: building the request: %w", err)
 	}
+	useragent.Set(req.Header)
 	req.Header.Set("Authorization", "Bearer "+n.key)
 	req.Header.Set("Accept", "application/json")
 	if body != nil {

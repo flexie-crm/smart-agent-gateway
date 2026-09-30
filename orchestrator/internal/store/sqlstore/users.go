@@ -49,15 +49,22 @@ func wrapWriteErr(op string, err error) error {
 
 type workspaceStore struct{ db *sqldb.DB }
 
-func (s *workspaceStore) Create(ctx context.Context, w *model.Workspace) error {
+func (s *workspaceStore) Create(ctx context.Context, w *model.Workspace, by model.Actor) error {
 	now := time.Now().UTC()
 	w.CreatedAt, w.UpdatedAt = now, now
 	if w.Status == "" {
 		w.Status = model.StatusActive
 	}
+	w.Made(by)
+	w.Changed(by)
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO workspaces (slug, name, description, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		w.Slug, w.Name, w.Description, w.Status, w.CreatedAt, w.UpdatedAt)
+		`INSERT INTO workspaces
+		   (slug, name, description, status, created_by, created_by_name,
+		    updated_by, updated_by_name, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		w.Slug, w.Name, w.Description, w.Status,
+		nullID(w.CreatedBy), w.CreatedByName, nullID(w.UpdatedBy), w.UpdatedByName,
+		w.CreatedAt, w.UpdatedAt)
 	if err != nil {
 		return wrapWriteErr("insert workspace", err)
 	}
@@ -67,17 +74,17 @@ func (s *workspaceStore) Create(ctx context.Context, w *model.Workspace) error {
 
 func (s *workspaceStore) GetByID(ctx context.Context, id int64) (*model.Workspace, error) {
 	return scanWorkspace(s.db.QueryRowContext(ctx,
-		`SELECT id, slug, name, description, status, created_at, updated_at FROM workspaces WHERE id = ?`, id))
+		`SELECT id, slug, name, description, status, COALESCE(created_by, 0), created_by_name, COALESCE(updated_by, 0), updated_by_name, created_at, updated_at FROM workspaces WHERE id = ?`, id))
 }
 
 func (s *workspaceStore) GetBySlug(ctx context.Context, slug string) (*model.Workspace, error) {
 	return scanWorkspace(s.db.QueryRowContext(ctx,
-		`SELECT id, slug, name, description, status, created_at, updated_at FROM workspaces WHERE slug = ?`, slug))
+		`SELECT id, slug, name, description, status, COALESCE(created_by, 0), created_by_name, COALESCE(updated_by, 0), updated_by_name, created_at, updated_at FROM workspaces WHERE slug = ?`, slug))
 }
 
 func (s *workspaceStore) List(ctx context.Context) ([]*model.Workspace, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, slug, name, description, status, created_at, updated_at FROM workspaces ORDER BY id`)
+		`SELECT id, slug, name, description, status, COALESCE(created_by, 0), created_by_name, COALESCE(updated_by, 0), updated_by_name, created_at, updated_at FROM workspaces ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("list workspaces: %w", err)
 	}
@@ -86,7 +93,9 @@ func (s *workspaceStore) List(ctx context.Context) ([]*model.Workspace, error) {
 	workspaces := []*model.Workspace{}
 	for rows.Next() {
 		w := &model.Workspace{}
-		if err := rows.Scan(&w.ID, &w.Slug, &w.Name, &w.Description, &w.Status, &w.CreatedAt, &w.UpdatedAt); err != nil {
+		if err := rows.Scan(&w.ID, &w.Slug, &w.Name, &w.Description, &w.Status,
+			&w.CreatedBy, &w.CreatedByName, &w.UpdatedBy, &w.UpdatedByName,
+			&w.CreatedAt, &w.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan workspace: %w", err)
 		}
 		workspaces = append(workspaces, w)
@@ -94,15 +103,18 @@ func (s *workspaceStore) List(ctx context.Context) ([]*model.Workspace, error) {
 	return workspaces, rows.Err()
 }
 
-func (s *workspaceStore) Update(ctx context.Context, w *model.Workspace) error {
+func (s *workspaceStore) Update(ctx context.Context, w *model.Workspace, by model.Actor) error {
 	if err := requireExists(ctx, s.db, "update workspace",
 		`SELECT 1 FROM workspaces WHERE id = ?`, w.ID); err != nil {
 		return err
 	}
 	w.UpdatedAt = time.Now().UTC()
+	w.Changed(by)
 	if _, err := s.db.ExecContext(ctx,
-		`UPDATE workspaces SET slug = ?, name = ?, description = ?, status = ?, updated_at = ? WHERE id = ?`,
-		w.Slug, w.Name, w.Description, w.Status, w.UpdatedAt, w.ID); err != nil {
+		`UPDATE workspaces SET slug = ?, name = ?, description = ?, status = ?,
+		        updated_by = ?, updated_by_name = ?, updated_at = ? WHERE id = ?`,
+		w.Slug, w.Name, w.Description, w.Status,
+		nullID(w.UpdatedBy), w.UpdatedByName, w.UpdatedAt, w.ID); err != nil {
 		return wrapWriteErr("update workspace", err)
 	}
 	return nil
@@ -133,7 +145,10 @@ func (s *workspaceStore) AddMember(ctx context.Context, workspaceID, userID int6
 // active ones: a suspended workspace is not somewhere to switch to.
 func (s *workspaceStore) ListForUser(ctx context.Context, userID int64) ([]*model.Workspace, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT w.id, w.slug, w.name, w.description, w.status, w.created_at, w.updated_at
+		`SELECT w.id, w.slug, w.name, w.description, w.status,
+		        COALESCE(w.created_by, 0), w.created_by_name,
+		        COALESCE(w.updated_by, 0), w.updated_by_name,
+		        w.created_at, w.updated_at
 		 FROM workspaces w
 		 JOIN workspace_members m ON m.workspace_id = w.id
 		 WHERE m.user_id = ? AND w.status = 'active'
@@ -146,7 +161,9 @@ func (s *workspaceStore) ListForUser(ctx context.Context, userID int64) ([]*mode
 	workspaces := []*model.Workspace{}
 	for rows.Next() {
 		w := &model.Workspace{}
-		if err := rows.Scan(&w.ID, &w.Slug, &w.Name, &w.Description, &w.Status, &w.CreatedAt, &w.UpdatedAt); err != nil {
+		if err := rows.Scan(&w.ID, &w.Slug, &w.Name, &w.Description, &w.Status,
+			&w.CreatedBy, &w.CreatedByName, &w.UpdatedBy, &w.UpdatedByName,
+			&w.CreatedAt, &w.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan workspace: %w", err)
 		}
 		workspaces = append(workspaces, w)
@@ -215,7 +232,9 @@ func (s *workspaceStore) AllMemberships(ctx context.Context) (map[int64][]int64,
 
 func scanWorkspace(row *sql.Row) (*model.Workspace, error) {
 	w := &model.Workspace{}
-	err := row.Scan(&w.ID, &w.Slug, &w.Name, &w.Description, &w.Status, &w.CreatedAt, &w.UpdatedAt)
+	err := row.Scan(&w.ID, &w.Slug, &w.Name, &w.Description, &w.Status,
+		&w.CreatedBy, &w.CreatedByName, &w.UpdatedBy, &w.UpdatedByName,
+		&w.CreatedAt, &w.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -227,18 +246,26 @@ func scanWorkspace(row *sql.Row) (*model.Workspace, error) {
 
 type userStore struct{ db *sqldb.DB }
 
-const userColumns = `id, email, name, password_hash, status, created_at, updated_at`
+const userColumns = `id, email, name, password_hash, status,
+	COALESCE(created_by, 0), created_by_name, COALESCE(updated_by, 0), updated_by_name,
+	created_at, updated_at`
 
-func (s *userStore) Create(ctx context.Context, u *model.User) error {
+func (s *userStore) Create(ctx context.Context, u *model.User, by model.Actor) error {
 	now := time.Now().UTC()
 	u.CreatedAt, u.UpdatedAt = now, now
 	if u.Status == "" {
 		u.Status = model.StatusActive
 	}
+	u.Made(by)
+	u.Changed(by)
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO users (email, name, password_hash, status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		u.Email, u.Name, u.PasswordHash, u.Status, u.CreatedAt, u.UpdatedAt)
+		`INSERT INTO users
+		   (email, name, password_hash, status, created_by, created_by_name,
+		    updated_by, updated_by_name, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		u.Email, u.Name, u.PasswordHash, u.Status,
+		nullID(u.CreatedBy), u.CreatedByName, nullID(u.UpdatedBy), u.UpdatedByName,
+		u.CreatedAt, u.UpdatedAt)
 	if err != nil {
 		return wrapWriteErr("insert user", err)
 	}
@@ -266,8 +293,9 @@ func (s *userStore) List(ctx context.Context) ([]*model.User, error) {
 	users := []*model.User{}
 	for rows.Next() {
 		u := &model.User{}
-		if err := rows.Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash,
-			&u.Status, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.Status,
+			&u.CreatedBy, &u.CreatedByName, &u.UpdatedBy, &u.UpdatedByName,
+			&u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)
 		}
 		users = append(users, u)
@@ -275,29 +303,36 @@ func (s *userStore) List(ctx context.Context) ([]*model.User, error) {
 	return users, rows.Err()
 }
 
-func (s *userStore) Update(ctx context.Context, u *model.User) error {
+func (s *userStore) Update(ctx context.Context, u *model.User, by model.Actor) error {
 	if err := requireExists(ctx, s.db, "update user",
 		`SELECT 1 FROM users WHERE id = ?`, u.ID); err != nil {
 		return err
 	}
 	u.UpdatedAt = time.Now().UTC()
+	u.Changed(by)
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE users SET email = ?, name = ?, status = ?, updated_at = ? WHERE id = ?`,
-		u.Email, u.Name, u.Status, u.UpdatedAt, u.ID)
+		`UPDATE users SET email = ?, name = ?, status = ?,
+		        updated_by = ?, updated_by_name = ?, updated_at = ? WHERE id = ?`,
+		u.Email, u.Name, u.Status,
+		nullID(u.UpdatedBy), u.UpdatedByName, u.UpdatedAt, u.ID)
 	if err != nil {
 		return wrapWriteErr("update user", err)
 	}
 	return nil
 }
 
-func (s *userStore) UpdatePassword(ctx context.Context, userID int64, passwordHash string) error {
+// UpdatePassword records who changed it, which is not always the person whose
+// password it is: an administrator resetting somebody's is exactly the case the
+// column exists for.
+func (s *userStore) UpdatePassword(ctx context.Context, userID int64, passwordHash string, by model.Actor) error {
 	if err := requireExists(ctx, s.db, "update password",
 		`SELECT 1 FROM users WHERE id = ?`, userID); err != nil {
 		return err
 	}
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`,
-		passwordHash, time.Now().UTC(), userID)
+		`UPDATE users SET password_hash = ?, updated_by = ?, updated_by_name = ?, updated_at = ?
+		 WHERE id = ?`,
+		passwordHash, nullID(by.UserID), by.Name, time.Now().UTC(), userID)
 	if err != nil {
 		return fmt.Errorf("update password: %w", err)
 	}
@@ -342,8 +377,9 @@ func (s *userStore) EffectivePermissions(ctx context.Context, userID int64) ([]s
 
 func scanUser(row *sql.Row) (*model.User, error) {
 	u := &model.User{}
-	err := row.Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash,
-		&u.Status, &u.CreatedAt, &u.UpdatedAt)
+	err := row.Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.Status,
+		&u.CreatedBy, &u.CreatedByName, &u.UpdatedBy, &u.UpdatedByName,
+		&u.CreatedAt, &u.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}

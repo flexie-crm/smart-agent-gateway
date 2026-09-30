@@ -123,8 +123,10 @@ func (r *Runner) delegateFleet(ctx context.Context, d Delegation) (tool.Result, 
 			ParentToolCallID: call.ToolCallID,
 			AgentKey:         members[i].Sub.Key,
 			Mode:             model.HandoffFleet,
-			Task:             members[i].Task,
-			Status:           model.DelegationRunning,
+			// Every member reaches the computer the batch was asked for from.
+			DeviceID: turn.DeviceID,
+			Task:     members[i].Task,
+			Status:   model.DelegationRunning,
 		}
 	}
 	if err := r.store.Agent().CreateFleetMembers(ctx, fleet.ID, rows); err != nil {
@@ -272,14 +274,7 @@ func fleetName(members []FleetMember) string {
 // answering it. The person answers one card at a time, and "approve, and stop
 // asking" is there for when they have seen enough.
 func (r *Runner) RunFleetMember(ctx context.Context, bg BackgroundDelegation, out *chat.Stream) (string, error) {
-	turn := Turn{
-		WorkspaceID:  bg.WorkspaceID,
-		UserID:       bg.UserID,
-		SessionID:    bg.SessionID,
-		ModelID:      bg.ModelID,
-		AutoApprove:  r.sessionAutoApproves(ctx, bg.WorkspaceID, bg.SessionID),
-		DelegationID: bg.DelegationID,
-	}
+	turn := detachedTurn(bg, r.sessionAutoApproves(ctx, bg.WorkspaceID, bg.SessionID))
 	answer, err := r.runAgent(ctx, turn, bg.Sub, bg.Task, model.HandoffFleet, bg.ParentCallID, out)
 	if errors.Is(err, errParked) {
 		return "", ErrBackgroundParked
@@ -362,7 +357,7 @@ func (r *Runner) resolveFleetCall(ctx context.Context, turn Turn, fleet *model.A
 			"success": m.Status == model.DelegationDone,
 		}
 		if m.Status == model.DelegationDone {
-			entry["result"] = resultText(m.Result)
+			entry["result"] = ResultText(m.Result)
 			succeeded++
 		} else {
 			reason := m.ErrorText

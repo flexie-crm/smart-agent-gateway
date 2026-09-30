@@ -17,7 +17,7 @@ func mustVendor(t *testing.T, st store.Store, wsID int64, name string, creds []b
 		Name:        name,
 		Credentials: creds,
 	}
-	if err := st.Vendors().Create(ctx(), v); err != nil {
+	if err := st.Vendors().Create(ctx(), v, model.Nobody()); err != nil {
 		t.Fatalf("create vendor: %v", err)
 	}
 	return v
@@ -31,7 +31,7 @@ func mustAIModel(t *testing.T, st store.Store, wsID, vendorID int64, key string)
 		Description:     "notes",
 		InputPricePer1M: 3, OutputPricePer1M: 15,
 	}
-	if err := st.AIModels().Create(ctx(), m); err != nil {
+	if err := st.AIModels().Create(ctx(), m, model.Nobody()); err != nil {
 		t.Fatalf("create model: %v", err)
 	}
 	return m
@@ -58,7 +58,7 @@ func testVendors(t *testing.T, st store.Store) {
 		WorkspaceID: ws.ID, VendorKey: model.VendorOpenAICompatible,
 		Name: "Local model", BaseURL: "http://127.0.0.1:8000/v1",
 	}
-	if err := st.Vendors().Create(ctx(), local); err != nil {
+	if err := st.Vendors().Create(ctx(), local, model.Nobody()); err != nil {
 		t.Fatalf("create local vendor: %v", err)
 	}
 	got, err = st.Vendors().GetByID(ctx(), ws.ID, local.ID)
@@ -96,7 +96,7 @@ func testVendorCredentialUpdate(t *testing.T, st store.Store) {
 	// Update with nil credentials: the stored secret must survive.
 	v.Name = "Anthropic (renamed)"
 	v.Credentials = nil
-	if err := st.Vendors().Update(ctx(), v); err != nil {
+	if err := st.Vendors().Update(ctx(), v, model.Nobody()); err != nil {
 		t.Fatalf("update vendor: %v", err)
 	}
 	got, err := st.Vendors().GetByID(ctx(), ws.ID, v.ID)
@@ -113,7 +113,7 @@ func testVendorCredentialUpdate(t *testing.T, st store.Store) {
 	// Update with new credentials: the secret is replaced.
 	rotated := []byte("sealed-secret-v2")
 	got.Credentials = rotated
-	if err := st.Vendors().Update(ctx(), got); err != nil {
+	if err := st.Vendors().Update(ctx(), got, model.Nobody()); err != nil {
 		t.Fatalf("update vendor: %v", err)
 	}
 	if got, err = st.Vendors().GetByID(ctx(), ws.ID, v.ID); err != nil || !bytes.Equal(got.Credentials, rotated) {
@@ -121,25 +121,25 @@ func testVendorCredentialUpdate(t *testing.T, st store.Store) {
 	}
 
 	// Clearing removes the secret but keeps the vendor.
-	if err := st.Vendors().ClearCredentials(ctx(), ws.ID, v.ID); err != nil {
+	if err := st.Vendors().ClearCredentials(ctx(), ws.ID, v.ID, model.Nobody()); err != nil {
 		t.Fatalf("clear credentials: %v", err)
 	}
 	if got, err = st.Vendors().GetByID(ctx(), ws.ID, v.ID); err != nil || got.HasCredentials() {
 		t.Fatalf("credentials not cleared: %v %v", err, got.Credentials)
 	}
 	// Clearing again is harmless, but clearing an unknown vendor is not.
-	if err := st.Vendors().ClearCredentials(ctx(), ws.ID, v.ID); err != nil {
+	if err := st.Vendors().ClearCredentials(ctx(), ws.ID, v.ID, model.Nobody()); err != nil {
 		t.Fatalf("clearing an already-empty vendor must succeed: %v", err)
 	}
-	if err := st.Vendors().ClearCredentials(ctx(), ws.ID, 999999); !errors.Is(err, store.ErrNotFound) {
+	if err := st.Vendors().ClearCredentials(ctx(), ws.ID, 999999, model.Nobody()); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("expected ErrNotFound for an unknown vendor, got %v", err)
 	}
 
 	// A no-op update must not be mistaken for a missing row.
-	if err := st.Vendors().Update(ctx(), got); err != nil {
+	if err := st.Vendors().Update(ctx(), got, model.Nobody()); err != nil {
 		t.Fatalf("no-op vendor update must succeed: %v", err)
 	}
-	if err := st.Vendors().Update(ctx(), &model.AIVendor{ID: 999999, WorkspaceID: ws.ID, Name: "X"}); !errors.Is(err, store.ErrNotFound) {
+	if err := st.Vendors().Update(ctx(), &model.AIVendor{ID: 999999, WorkspaceID: ws.ID, Name: "X"}, model.Nobody()); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("update of an unknown vendor must report ErrNotFound, got %v", err)
 	}
 }
@@ -166,7 +166,7 @@ func testAIModels(t *testing.T, st store.Store) {
 	got.ModelKey = "claude-opus-5"
 	got.Description = "the smart one"
 	got.Status = model.StatusDisabled
-	if err := st.AIModels().Update(ctx(), got); err != nil {
+	if err := st.AIModels().Update(ctx(), got, model.Nobody()); err != nil {
 		t.Fatalf("update model: %v", err)
 	}
 	if got, err = st.AIModels().GetByID(ctx(), ws.ID, m.ID); err != nil ||
@@ -174,7 +174,7 @@ func testAIModels(t *testing.T, st store.Store) {
 		t.Fatalf("model update not persisted: %v %+v", err, got)
 	}
 	// No-op update must not report a missing row.
-	if err := st.AIModels().Update(ctx(), got); err != nil {
+	if err := st.AIModels().Update(ctx(), got, model.Nobody()); err != nil {
 		t.Fatalf("no-op model update must succeed: %v", err)
 	}
 
@@ -293,5 +293,58 @@ func testMemory(t *testing.T, st store.Store) {
 	}
 	if v, err := st.Memory().WorkspaceMemory(ctx(), ws.ID); err != nil || v != "" {
 		t.Fatalf("workspace memory outlived its workspace: %v %q", err, v)
+	}
+}
+
+// A model's running totals of characters sent and tokens reported: each call
+// keeps a share of what was there and adds its own, in one statement, and a
+// model read back carries them. Worked out by hand: 1,000 characters as 300
+// tokens, then 2,000 as 500, keeping 0.9, is 2,900 characters as 770 tokens.
+func testModelTokenMeasure(t *testing.T, st store.Store) {
+	ws := mustWorkspace(t, st, "acme")
+	vendor := mustVendor(t, st, ws.ID, "A vendor", nil)
+	m := mustAIModel(t, st, ws.ID, vendor.ID, "measured")
+	other := mustAIModel(t, st, ws.ID, vendor.ID, "untouched")
+
+	fresh, err := st.AIModels().GetByID(ctx(), ws.ID, m.ID)
+	if err != nil {
+		t.Fatalf("get model: %v", err)
+	}
+	if fresh.MeasuredChars != 0 || fresh.MeasuredTokens != 0 {
+		t.Fatalf("a model that never reported reads %v characters and %v tokens", fresh.MeasuredChars, fresh.MeasuredTokens)
+	}
+
+	for _, call := range [][2]int64{{1000, 300}, {2000, 500}} {
+		if err := st.AIModels().MeasureTokens(ctx(), m.ID, call[0], call[1], 0.9); err != nil {
+			t.Fatalf("measure tokens: %v", err)
+		}
+	}
+	got, err := st.AIModels().GetByID(ctx(), ws.ID, m.ID)
+	if err != nil {
+		t.Fatalf("get model: %v", err)
+	}
+	if got.MeasuredChars != 2900 || got.MeasuredTokens != 770 {
+		t.Fatalf("the totals are %v characters and %v tokens, want 2,900 and 770", got.MeasuredChars, got.MeasuredTokens)
+	}
+	listed, err := st.AIModels().List(ctx(), ws.ID)
+	if err != nil {
+		t.Fatalf("list models: %v", err)
+	}
+	for _, l := range listed {
+		if l.ID == m.ID && (l.MeasuredChars != 2900 || l.MeasuredTokens != 770) {
+			t.Fatalf("the list reads %v and %v for the measured model", l.MeasuredChars, l.MeasuredTokens)
+		}
+		if l.ID == other.ID && (l.MeasuredChars != 0 || l.MeasuredTokens != 0) {
+			t.Fatal("measuring one model moved another")
+		}
+	}
+
+	// And editing the model in the console leaves what was measured alone.
+	got.Description = "edited"
+	if err := st.AIModels().Update(ctx(), got, model.Nobody()); err != nil {
+		t.Fatalf("update model: %v", err)
+	}
+	if after, _ := st.AIModels().GetByID(ctx(), ws.ID, m.ID); after.MeasuredChars != 2900 || after.MeasuredTokens != 770 {
+		t.Fatalf("an edit reset the measure to %v and %v", after.MeasuredChars, after.MeasuredTokens)
 	}
 }

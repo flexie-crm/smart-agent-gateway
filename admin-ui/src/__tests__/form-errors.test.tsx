@@ -2,6 +2,8 @@ import { StrictMode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@/test-utils'
 import { Groups } from '@/pages/Access'
+import { ApiError, Offline, Unreadable } from '@/lib/api'
+import { describeError } from '@/lib/form'
 
 // A form fails at two levels: a line about the attempt, and a message on the
 // input that caused it. These tests drive a real form through both, and pin
@@ -92,6 +94,34 @@ describe('a form failing at two levels', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     expect(await screen.findByText('The gateway did not answer.')).toBeInTheDocument()
+  })
+
+  // A fault of OUR OWN is the fourth thing, and the one that used to be
+  // reported as the gateway not answering: a claim about a server that is
+  // working, made by the only code that knew better.
+  it('does not blame the gateway for a fault in the console', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const boom = new TypeError("Cannot read properties of undefined (reading 'filter')")
+
+    expect(describeError(boom)).toBe(
+      'Something went wrong in the console. Reload the page and try again.',
+    )
+    // The control: this is exactly what a dead network produces, and the two
+    // must not read the same.
+    expect(describeError(new Offline())).toBe('The gateway did not answer.')
+    expect(describeError(boom)).not.toBe(describeError(new Offline()))
+
+    // And the real error is not swallowed: it is the only copy of what
+    // happened, and a message on a form cannot carry a stack.
+    expect(logged).toHaveBeenCalledWith('the console failed while handling an answer', boom)
+    logged.mockRestore()
+  })
+
+  it('tells an unreadable answer apart from no answer, and a refusal from both', () => {
+    expect(describeError(new Unreadable())).toBe("The gateway's answer could not be read.")
+    expect(describeError(new ApiError(400, 'invalid_request', 'a group needs a name', {}))).toBe(
+      'A group needs a name.',
+    )
   })
 
   it('clears a local refusal once the field is fixed and the save lands', async () => {

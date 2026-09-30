@@ -6,7 +6,7 @@
 #
 # Produces the installer:
 #
-#   desktop\.local\out\personal\SAG Personal_<version>_x64-setup.exe
+#   desktop\.local\out\personal\SAG-Personal-<version>-x64-setup.exe
 #
 # It carries the whole product: the gateway, its MariaDB, both pages. Installing
 # it and opening it starts the gateway; closing it stops it.
@@ -89,25 +89,50 @@ if ($SkipDatabase -and (Test-Path (Join-Path $mariadb 'bin\mariadbd.exe'))) {
 # ask at run time what they are. A bundle that has to ask has a moment where it
 # does not know, and a request that fails leaves it showing the wrong product.
 $env:VITE_SAG_PERSONAL = '1'
-# And this platform ships no engine (see "the engine" below), so the console is
-# built without every surface that would be about one: the Machines menu item,
-# its route, and the button that adds a model from a machine. It is set here
-# beside the flag it belongs with, and read by PERSONAL_POSTURE.
-$env:VITE_SAG_LOCAL_MODELS = '0'
+# What this platform does NOT have is an engine inside the application, so this
+# computer is not one of the machines models can run on. One sentence on the
+# Inference screen says which machines it means, and it is the only thing that
+# changes: everything else on that screen is about machines somewhere else, which
+# this platform has exactly like every other (see below).
+$env:VITE_SAG_LOCAL_ENGINE = '0'
+
+# And beyond that sentence the console is NOT built differently for this platform,
+# though it used to be.
+# Shipping no engine was read as having nothing to run models on, so the Inference
+# screen, its route and the button that adds a model from a machine were all
+# compiled out. That was wrong: a machine is a server with a graphics card in it,
+# added by exchanging certificates with it, and on a personal installation that
+# is the only way in anyway, because the gateway is on loopback and nothing can
+# call it back. Hiding the screen removed the one kind of inference that works
+# here. What this platform ships no engine for is the LOCAL node, and that is
+# decided where it is started (config.EngineBundled).
+
+# Into their OWN directories, never the ones a server serves. These builds carry
+# VITE_SAG_PERSONAL, which makes a different product out of the same source, and
+# the web console and the web chat are written to admin-ui/dist and
+# chat-ui/dist/app, which is what a running gateway is pointed at
+# (SAG_CONSOLE_DIR, SAG_CHAT_DIR). Building this edition over them replaces the
+# web console and chat with the desktop ones on a machine that is serving them,
+# and nothing announces it: a console link appears in the web chat's sidebar and
+# its right-click menu stops working, on a build nobody asked to change.
+#
+# desktop/personal/build.sh was fixed for that and this script was not, so it
+# went on doing it here for every Windows build.
+$env:SAG_OUT_DIR = 'dist/personal'
 
 Write-Host "==> the console"
 Push-Location (Join-Path $repo 'admin-ui')
 try { Run 'building the console' { & npm run build } } finally { Pop-Location }
-Copy-Item (Join-Path $repo 'admin-ui\dist') (Join-Path $payload 'console') -Recurse
+Copy-Item (Join-Path $repo 'admin-ui\dist\personal') (Join-Path $payload 'console') -Recurse
 
 Write-Host "==> the chat"
 Push-Location (Join-Path $repo 'chat-ui')
 try {
 	Run 'building the chat' { & npm run build }
 } finally { Pop-Location }
-Copy-Item (Join-Path $repo 'chat-ui\dist\app') (Join-Path $payload 'chat') -Recurse
+Copy-Item (Join-Path $repo 'chat-ui\dist\personal') (Join-Path $payload 'chat') -Recurse
 
-Remove-Item Env:\VITE_SAG_PERSONAL, Env:\VITE_SAG_LOCAL_MODELS
+Remove-Item Env:\VITE_SAG_PERSONAL, Env:\VITE_SAG_LOCAL_ENGINE, Env:\SAG_OUT_DIR
 
 # ----------------------------------------------------------------- the gateway
 Write-Host "==> the gateway"
@@ -205,7 +230,49 @@ $installer = Get-ChildItem $bundles -Filter '*-setup.exe' -File -ErrorAction Sil
 	Sort-Object LastWriteTime -Descending |
 	Select-Object -First 1
 if (-not $installer) { throw "the bundle step produced no installer in $bundles" }
-Copy-Item $installer.FullName $apps
+
+# Renamed on the way out, and the name matters more than it looks.
+#
+# Tauri names it from the product, so it arrives as "SAG Personal_0.1.5_x64-setup.exe",
+# with a space. That space becomes %20 in every address it is ever served under,
+# and publish.sh carries the file's name into a remote shell command where it
+# would split into two arguments and move nothing. The macOS archive has been
+# SAG-Personal-<version>... since the beginning for the same reason; this is the
+# same name in this platform's shape.
+#
+# THE VERSION COMES FROM THE INSTALLER THE BUNDLER JUST WROTE, not from the
+# configuration file, and then the two have to agree.
+#
+# Reading the file was wrong and it took a real build to show it. The bundler
+# reads the version when it starts; this runs minutes later, and a `git pull`
+# in between moved the file from 0.1.5 to 0.1.6 while cargo was still
+# compiling. The result was an installer carrying a 0.1.5 application under the
+# name 0.1.6, and it did not fail anywhere: the manifest would have announced a
+# version that was never built, every installation would have downloaded it,
+# and the updater compares against the version compiled into the RUNNING
+# process, so each one would have installed 0.1.5, found itself still older
+# than 0.1.6, and downloaded it again on the next tick, for ever.
+#
+# So the name is taken from the artefact, which cannot be wrong about itself,
+# and the disagreement is a build failure rather than a file with a misleading
+# name. Loudly: what makes this dangerous is that every step after it succeeds.
+if ($installer.Name -notmatch '_(?<v>[0-9]+\.[0-9]+\.[0-9]+[^_]*)_x64-setup\.exe$') {
+	throw "cannot read a version out of the bundler's name for it: $($installer.Name)"
+}
+$version = $Matches.v
+$declared = (Get-Content (Join-Path $repo 'desktop\personal\shell\tauri.conf.json') -Raw |
+	ConvertFrom-Json).version
+if ($version -ne $declared) {
+	throw @"
+the bundler built $version and the configuration now says $declared.
+
+The tree moved while the build was running, so the application in the installer
+is not the one that would be announced. Nothing downstream can detect this.
+Build again on a settled tree.
+"@
+}
+$name = "SAG-Personal-$version-x64-setup.exe"
+Copy-Item $installer.FullName (Join-Path $apps $name)
 
 # The unpacked application too, beside the installer. It is what the build
 # actually produced and what a quick check can run without installing anything;
@@ -213,7 +280,68 @@ Copy-Item $installer.FullName $apps
 # a broken application gets found by installing it rather than by looking at it.
 Copy-Item (Join-Path $repo 'desktop\target\release\SAG Personal.exe') $apps
 
-$final = Join-Path $apps $installer.Name
+$final = Join-Path $apps $name
+
+# ------------------------------------------------------------------ the update
+# What an installed copy replaces itself with, and the manifest that points at
+# it. Written HERE, by the same run that made the installer, because a build and
+# the announcement of it are one act: published separately you get a version
+# announced that was never uploaded, which is every installation downloading a
+# 404.
+#
+# THE ARTEFACT IS THE INSTALLER ITSELF, and that is not a shortcut. macOS needs
+# two files because its two jobs need two formats: a .dmg is a thing a person
+# mounts and the updater cannot use it, so a .tar.gz of the .app exists beside
+# it. Here there is one format that does both. tauri-plugin-updater sniffs what
+# it downloaded (`extract` in updater.rs) and accepts a bare .exe through
+# `extract_exe`, handing it to the NSIS path; the .zip it also accepts is behind
+# a cargo feature and would only wrap the same bytes. So one file is built,
+# signed once, and published twice under two names.
+#
+# Signed with the UPDATE key, which is per edition, so a leak of one cannot push
+# a release to the other. Without a key the installer is still built and simply
+# not announced: a build without it is a build, not a failure. That is why every
+# line below is inside the check rather than guarded one at a time.
+if ($env:TAURI_SIGNING_PRIVATE_KEY -or $env:TAURI_SIGNING_PRIVATE_KEY_PATH) {
+	Write-Host "==> the update"
+	# If the key carries a password, TAURI_SIGNING_PRIVATE_KEY_PASSWORD must be
+	# set too: the signer asks for one on a terminal otherwise, and a build that
+	# stops to ask is a build that hangs on a machine nobody is watching.
+	Push-Location $apps
+	try {
+		Run 'signing the installer' { & npx --yes '@tauri-apps/cli@2' signer sign $name }
+	} finally { Pop-Location }
+	$sig = "$final.sig"
+	if (-not (Test-Path $sig)) { throw "the installer was not signed: $sig is missing" }
+
+	# One manifest, named the way the server reads it back. The two halves of
+	# that name are not ours to choose: tauri-plugin-updater substitutes its own
+	# `target()` and `updater_arch()` into the endpoint, which on this platform
+	# are "windows" and "x86_64" (updater.rs). Name it anything else and the
+	# request 204s for ever, which is indistinguishable from being up to date.
+	$updates = Join-Path $apps 'updates'
+	New-Item -ItemType Directory -Force -Path $updates | Out-Null
+	$manifest = [ordered] @{
+		version   = $version
+		pub_date  = [DateTime]::UtcNow.ToString('o')
+		signature = (Get-Content $sig -Raw).Trim()
+		# A path, not an address: the host fills itself in, so a manifest written
+		# here does not have to know what the download host is called.
+		url       = "/updates/personal/$name"
+	}
+	# No BOM. Go reads this with encoding/json, which has no idea what a byte
+	# order mark is and refuses the whole file for the three bytes in front of
+	# the first brace. Out-File and > both write one on this version of
+	# PowerShell, which is why neither is used here.
+	[System.IO.File]::WriteAllText(
+		(Join-Path $updates 'personal-windows-x86_64.json'),
+		($manifest | ConvertTo-Json),
+		[System.Text.UTF8Encoding]::new($false))
+	Write-Host "    personal-windows-x86_64.json announces $version"
+} else {
+	Write-Host "==> no update manifest (no signing key), so this build cannot be published"
+}
+
 Write-Host ""
 Write-Host "  Built:"
 Write-Host ("    {0}  ({1:N1} MB)" -f $final, ((Get-Item $final).Length / 1MB))

@@ -102,7 +102,10 @@ mod seen {
 
     /// was this file read in this conversation?
     pub fn was_read(conversation: i64, path: &Path) -> bool {
-        with(|all| all.get(&conversation).is_some_and(|paths| paths.contains(path)))
+        with(|all| {
+            all.get(&conversation)
+                .is_some_and(|paths| paths.contains(path))
+        })
     }
 
     #[cfg(test)]
@@ -127,7 +130,11 @@ mod seen {
 fn hash_of(text: &str) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(text.as_bytes());
-    digest.iter().take(8).map(|byte| format!("{byte:02x}")).collect()
+    digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// What line ending a file uses, so an edit written with the other kind does
@@ -173,7 +180,11 @@ fn resolve(given: &str) -> Result<PathBuf, String> {
             .to_string()
     })?;
     let candidate = Path::new(given);
-    Ok(if candidate.is_absolute() { candidate.to_path_buf() } else { root.join(candidate) })
+    Ok(if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        root.join(candidate)
+    })
 }
 
 /// A folder to work in: the one given, or the chosen one when none is.
@@ -188,7 +199,10 @@ fn resolve_folder(given: &str) -> Result<PathBuf, String> {
     }
     let folder = resolve(given)?;
     if !folder.is_dir() {
-        return Err(format!("{} is not a folder on this computer", folder.to_string_lossy()));
+        return Err(format!(
+            "{} is not a folder on this computer",
+            folder.to_string_lossy()
+        ));
     }
     Ok(folder)
 }
@@ -208,7 +222,10 @@ fn text(path: &Path) -> Result<String, Response> {
             )))
         }
         Err(err) => {
-            return Err(Response::failed(format!("{} could not be read: {err}", path.to_string_lossy())))
+            return Err(Response::failed(format!(
+                "{} could not be read: {err}",
+                path.to_string_lossy()
+            )))
         }
     };
     if raw.iter().take(SNIFF).any(|byte| *byte == 0) {
@@ -239,6 +256,29 @@ fn spoken(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// on_the_disk runs a file tool's work on the threads kept for work that
+/// BLOCKS, and waits there for its answer.
+///
+/// Every tool in this file is disk work from start to finish: a read, a write,
+/// a walk over a folder and every file in it. Done on the runtime's own threads
+/// it holds one of them for as long as the disk takes, and the link's control
+/// socket runs on those same threads and has to answer the gateway's heartbeat
+/// meanwhile. Measured with the real client against the real gateway: a search
+/// through 27,000 files froze the link for the whole search in 9 runs of 13
+/// (which thread happens to be minding the network decides it, which is why it
+/// looked random), and in use the heartbeat went unanswered and the gateway
+/// dropped the computer. With the work here instead: 0 runs of 8 (KB/29).
+///
+/// The work itself is unchanged; only the thread doing it moved.
+async fn on_the_disk(work: impl FnOnce() -> Response + Send + 'static) -> Response {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(answer) => answer,
+        // The work panicked. That is still an answer the gateway can pass on,
+        // rather than a call that never comes back.
+        Err(_) => Response::failed("the tool stopped before it finished"),
+    }
+}
+
 // ── read ────────────────────────────────────────────────────────────────────
 
 pub mod read {
@@ -263,6 +303,10 @@ pub mod read {
     }
 
     pub async fn run(args: Value) -> Response {
+        on_the_disk(move || answer(args)).await
+    }
+
+    fn answer(args: Value) -> Response {
         let args: Args = match serde_json::from_value(args) {
             Ok(args) => args,
             Err(err) => {
@@ -291,7 +335,11 @@ pub mod read {
                 "that file has {total} lines, so there is nothing at line {from}"
             ));
         }
-        let take = if args.limit == 0 { DEFAULT_LINES } else { args.limit };
+        let take = if args.limit == 0 {
+            DEFAULT_LINES
+        } else {
+            args.limit
+        };
         let slice: Vec<&str> = lines.iter().skip(from - 1).take(take).copied().collect();
         let to = from + slice.len().saturating_sub(1);
 
@@ -346,6 +394,10 @@ pub mod write {
     }
 
     pub async fn run(args: Value) -> Response {
+        on_the_disk(move || answer(args)).await
+    }
+
+    fn answer(args: Value) -> Response {
         let args: Args = match serde_json::from_value(args) {
             Ok(args) => args,
             Err(err) => {
@@ -415,7 +467,8 @@ pub mod write {
         // against an attacker, and refusing everything a worker or a command
         // line asked for would be a capability quietly lost. Where it matters,
         // which is a person in a conversation, the conversation is always there.
-        if existed && args.conversation != 0 && !seen::was_read(args.conversation, &settled(&path)) {
+        if existed && args.conversation != 0 && !seen::was_read(args.conversation, &settled(&path))
+        {
             return Response::bad_arguments(format!(
                 "{} already exists and has not been read in this conversation. Read it first, so \
                  that what is in it is not lost; use edit_file to change part of it, or write it \
@@ -480,6 +533,10 @@ pub mod edit {
     }
 
     pub async fn run(args: Value) -> Response {
+        on_the_disk(move || answer(args)).await
+    }
+
+    fn answer(args: Value) -> Response {
         let args: Args = match serde_json::from_value(args) {
             Ok(args) => args,
             Err(err) => {
@@ -522,14 +579,22 @@ pub mod edit {
 
         let windows = windows_endings(&whole);
         let (updated, replacements) = if by_lines {
-            match by_line_range(&whole, args.start_line, args.end_line, &args.replace, windows) {
+            match by_line_range(
+                &whole,
+                args.start_line,
+                args.end_line,
+                &args.replace,
+                windows,
+            ) {
                 Ok(done) => done,
                 Err(reason) => return Response::bad_arguments(reason),
             }
         } else {
             match by_exact_text(&whole, &args.find, &args.replace, args.all, windows) {
                 Ok(done) => done,
-                Err(reason) => return Response::bad_arguments(format!("{reason} in {}", spoken(&path))),
+                Err(reason) => {
+                    return Response::bad_arguments(format!("{reason} in {}", spoken(&path)))
+                }
             }
         };
 
@@ -580,7 +645,11 @@ pub mod edit {
             return Err(format!(
                 "that text is not there. Read the file and copy the lines exactly, spaces \
                  included{}",
-                if windows { " (this file's lines end the Windows way, which is handled for you)" } else { "" }
+                if windows {
+                    " (this file's lines end the Windows way, which is handled for you)"
+                } else {
+                    ""
+                }
             ));
         }
         let (updated, count) = apply(&flattened, &wanted, &one_kind(replace), found, all, false)?;
@@ -628,10 +697,16 @@ pub mod edit {
         let lines: Vec<&str> = flattened.split('\n').collect();
         // A file ending in a newline splits into a last empty piece, which is
         // not a line somebody can address.
-        let addressable = if lines.last() == Some(&"") { lines.len() - 1 } else { lines.len() };
+        let addressable = if lines.last() == Some(&"") {
+            lines.len() - 1
+        } else {
+            lines.len()
+        };
         let end = if end == 0 { start } else { end };
         if start > addressable {
-            return Err(format!("that file has {addressable} lines, so there is no line {start}"));
+            return Err(format!(
+                "that file has {addressable} lines, so there is no line {start}"
+            ));
         }
         if end < start {
             return Err(format!("end_line {end} is before start_line {start}"));
@@ -644,7 +719,10 @@ pub mod edit {
             out.extend(one_kind(replace).split('\n').map(|line| line.to_string()));
         }
         out.extend(lines[end..].iter().map(|line| line.to_string()));
-        Ok((as_the_file_writes(&out.join("\n"), windows), end - start + 1))
+        Ok((
+            as_the_file_writes(&out.join("\n"), windows),
+            end - start + 1,
+        ))
     }
 }
 
@@ -688,6 +766,10 @@ pub mod find {
     }
 
     pub async fn run(args: Value) -> Response {
+        on_the_disk(move || answer(args)).await
+    }
+
+    fn answer(args: Value) -> Response {
         let args: Args = match serde_json::from_value(args) {
             Ok(args) => args,
             Err(err) => {
@@ -756,6 +838,10 @@ pub mod search {
     }
 
     pub async fn run(args: Value) -> Response {
+        on_the_disk(move || answer(args)).await
+    }
+
+    fn answer(args: Value) -> Response {
         let args: Args = match serde_json::from_value(args) {
             Ok(args) => args,
             Err(err) => {
@@ -772,9 +858,7 @@ pub mod search {
         let matcher = match RegexMatcher::new_line_matcher(&pattern(&args)) {
             Ok(matcher) => matcher,
             Err(err) => {
-                return Response::bad_arguments(format!(
-                    "that expression could not be read: {err}"
-                ))
+                return Response::bad_arguments(format!("that expression could not be read: {err}"))
             }
         };
         let only = if args.glob.trim().is_empty() {
@@ -875,7 +959,10 @@ pub(super) mod tests {
     }
 
     pub(super) fn content(response: &Response) -> &Value {
-        response.content.as_ref().expect("a successful call carries content")
+        response
+            .content
+            .as_ref()
+            .expect("a successful call carries content")
     }
 
     #[tokio::test]
@@ -892,7 +979,11 @@ pub(super) mod tests {
         assert_eq!(body["more"], false);
 
         // A part of it, and the answer says which part.
-        let part = call(read::run, json!({ "path": "read/poem.txt", "offset": 2, "limit": 2 })).await;
+        let part = call(
+            read::run,
+            json!({ "path": "read/poem.txt", "offset": 2, "limit": 2 }),
+        )
+        .await;
         let body = content(&part);
         assert_eq!(body["content"], "two\nthree");
         assert_eq!(body["from_line"], 2);
@@ -908,14 +999,21 @@ pub(super) mod tests {
         let answer = call(read::run, json!({ "path": "binary/picture.png" })).await;
         assert!(!answer.ok);
         assert_eq!(answer.kind, "denied");
-        assert!(answer.message.contains("not a text file"), "{}", answer.message);
+        assert!(
+            answer.message.contains("not a text file"),
+            "{}",
+            answer.message
+        );
     }
 
     #[tokio::test]
     async fn says_which_file_is_missing() {
         let answer = call(read::run, json!({ "path": "nowhere/at/all.txt" })).await;
         assert!(!answer.ok);
-        assert_eq!(answer.kind, "bad_arguments", "the assistant can correct a wrong path");
+        assert_eq!(
+            answer.kind, "bad_arguments",
+            "the assistant can correct a wrong path"
+        );
     }
 
     #[tokio::test]
@@ -928,15 +1026,25 @@ pub(super) mod tests {
         .await;
         assert!(made.ok, "{}", made.message);
         assert_eq!(content(&made)["created"], true);
-        assert_eq!(std::fs::read_to_string(here.join("notes.md")).unwrap(), "# Notes\n");
+        assert_eq!(
+            std::fs::read_to_string(here.join("notes.md")).unwrap(),
+            "# Notes\n"
+        );
 
         let again = call(
             write::run,
             json!({ "path": "write/notes.md", "content": "# Other\n" }),
         )
         .await;
-        assert_eq!(content(&again)["created"], false, "replacing is not creating");
-        assert_eq!(std::fs::read_to_string(here.join("notes.md")).unwrap(), "# Other\n");
+        assert_eq!(
+            content(&again)["created"],
+            false,
+            "replacing is not creating"
+        );
+        assert_eq!(
+            std::fs::read_to_string(here.join("notes.md")).unwrap(),
+            "# Other\n"
+        );
     }
 
     // A folder that is not there is made, because this tool can be granted
@@ -951,7 +1059,11 @@ pub(super) mod tests {
         )
         .await;
         assert!(answer.ok, "{}", answer.message);
-        assert_eq!(content(&answer)["created_folder"], true, "and it says it did");
+        assert_eq!(
+            content(&answer)["created_folder"],
+            true,
+            "and it says it did"
+        );
         assert_eq!(
             std::fs::read_to_string(here.join("nested/deep/file.txt")).unwrap(),
             "x"
@@ -975,8 +1087,15 @@ pub(super) mod tests {
         )
         .await;
         assert!(!blind.ok, "a file nobody read was overwritten");
-        assert_eq!(blind.kind, "bad_arguments", "the assistant can correct this");
-        assert!(blind.message.contains("has not been read"), "{}", blind.message);
+        assert_eq!(
+            blind.kind, "bad_arguments",
+            "the assistant can correct this"
+        );
+        assert!(
+            blind.message.contains("has not been read"),
+            "{}",
+            blind.message
+        );
         assert_eq!(
             std::fs::read_to_string(here.join("theirs.txt")).unwrap(),
             "work somebody did\n",
@@ -984,7 +1103,11 @@ pub(super) mod tests {
         );
 
         // Having read it, the same write is fine.
-        let looked = call(read::run, json!({ "path": "unread/theirs.txt", "conversation": 7001 })).await;
+        let looked = call(
+            read::run,
+            json!({ "path": "unread/theirs.txt", "conversation": 7001 }),
+        )
+        .await;
         assert!(looked.ok, "{}", looked.message);
         let again = call(
             write::run,
@@ -992,7 +1115,10 @@ pub(super) mod tests {
         )
         .await;
         assert!(again.ok, "{}", again.message);
-        assert_eq!(std::fs::read_to_string(here.join("theirs.txt")).unwrap(), "mine");
+        assert_eq!(
+            std::fs::read_to_string(here.join("theirs.txt")).unwrap(),
+            "mine"
+        );
     }
 
     // With no conversation the rule cannot be applied, so it does not refuse.
@@ -1003,9 +1129,16 @@ pub(super) mod tests {
         let here = folder("nobody");
         put(&here.join("file.txt"), "before\n");
 
-        let answer = call(write::run, json!({ "path": "nobody/file.txt", "content": "after" })).await;
+        let answer = call(
+            write::run,
+            json!({ "path": "nobody/file.txt", "content": "after" }),
+        )
+        .await;
         assert!(answer.ok, "{}", answer.message);
-        assert_eq!(std::fs::read_to_string(here.join("file.txt")).unwrap(), "after");
+        assert_eq!(
+            std::fs::read_to_string(here.join("file.txt")).unwrap(),
+            "after"
+        );
     }
 
     // The memory is per conversation, which is the point of it: reading a file
@@ -1015,7 +1148,11 @@ pub(super) mod tests {
         let here = folder("elsewhere");
         put(&here.join("shared.txt"), "original\n");
 
-        let looked = call(read::run, json!({ "path": "elsewhere/shared.txt", "conversation": 7002 })).await;
+        let looked = call(
+            read::run,
+            json!({ "path": "elsewhere/shared.txt", "conversation": 7002 }),
+        )
+        .await;
         assert!(looked.ok, "{}", looked.message);
 
         let other = call(
@@ -1023,8 +1160,14 @@ pub(super) mod tests {
             json!({ "path": "elsewhere/shared.txt", "content": "new", "conversation": 7003 }),
         )
         .await;
-        assert!(!other.ok, "another conversation's read let this one write blind");
-        assert_eq!(std::fs::read_to_string(here.join("shared.txt")).unwrap(), "original\n");
+        assert!(
+            !other.ok,
+            "another conversation's read let this one write blind"
+        );
+        assert_eq!(
+            std::fs::read_to_string(here.join("shared.txt")).unwrap(),
+            "original\n"
+        );
     }
 
     // The same file by another name is the same file. Reading `a.txt` and
@@ -1035,7 +1178,11 @@ pub(super) mod tests {
         let here = folder("names");
         put(&here.join("same.txt"), "first\n");
 
-        let looked = call(read::run, json!({ "path": "names/same.txt", "conversation": 7004 })).await;
+        let looked = call(
+            read::run,
+            json!({ "path": "names/same.txt", "conversation": 7004 }),
+        )
+        .await;
         assert!(looked.ok, "{}", looked.message);
 
         let absolute = here.join("same.txt");
@@ -1044,7 +1191,11 @@ pub(super) mod tests {
             json!({ "path": absolute.to_string_lossy(), "content": "second", "conversation": 7004 }),
         )
         .await;
-        assert!(answer.ok, "the same file under another name was refused: {}", answer.message);
+        assert!(
+            answer.ok,
+            "the same file under another name was refused: {}",
+            answer.message
+        );
     }
 
     // A NEW file is not held to it: there is nothing to lose.
@@ -1078,7 +1229,11 @@ pub(super) mod tests {
             json!({ "path": "edited/code.rs", "content": "fn three() {}\n", "conversation": 7006 }),
         )
         .await;
-        assert!(written.ok, "an edit did not count as having seen the file: {}", written.message);
+        assert!(
+            written.ok,
+            "an edit did not count as having seen the file: {}",
+            written.message
+        );
         let _ = seen::forget_everything;
     }
 
@@ -1141,7 +1296,11 @@ pub(super) mod tests {
         .await;
         assert!(!answer.ok);
         assert_eq!(answer.kind, "bad_arguments");
-        assert!(answer.message.contains("is not there"), "{}", answer.message);
+        assert!(
+            answer.message.contains("is not there"),
+            "{}",
+            answer.message
+        );
     }
 
     #[tokio::test]
@@ -1159,11 +1318,29 @@ pub(super) mod tests {
         let answer = call(find::run, json!({ "pattern": "**/*.go", "folder": "find" })).await;
         assert!(answer.ok, "{}", answer.message);
         let files = content(&answer)["files"].as_array().unwrap().clone();
-        let names: Vec<String> = files.iter().map(|f| f.as_str().unwrap().to_string()).collect();
+        let names: Vec<String> = files
+            .iter()
+            .map(|f| f.as_str().unwrap().to_string())
+            .collect();
+        // Compared with ONE separator, because `spoken` answers in the
+        // platform's own: `src/one.go` here and `src\one.go` on Windows.
+        //
+        // The product is right to do that and is deliberately not changed: a
+        // path it reports is one the model hands straight back to `read_file`,
+        // so it has to be the one that computer understands. It is the test
+        // that carried the assumption, by spelling the separator in four
+        // assertions.
+        let names: Vec<String> = names.iter().map(|n| n.replace('\\', "/")).collect();
         assert!(names.iter().any(|n| n.ends_with("src/one.go")), "{names:?}");
         assert!(names.iter().any(|n| n.ends_with("src/two.go")), "{names:?}");
-        assert!(!names.iter().any(|n| n.contains("build/")), "the project's ignore file was not honoured: {names:?}");
-        assert!(!names.iter().any(|n| n.contains(".git/")), "version control's own folder came back: {names:?}");
+        assert!(
+            !names.iter().any(|n| n.contains("build/")),
+            "the project's ignore file was not honoured: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains(".git/")),
+            "version control's own folder came back: {names:?}"
+        );
     }
 
     #[tokio::test]
@@ -1181,7 +1358,10 @@ pub(super) mod tests {
         let matches = content(&answer)["matches"].as_array().unwrap().clone();
         assert_eq!(matches.len(), 1, "{matches:?}");
         assert!(matches[0]["file"].as_str().unwrap().ends_with("a.go"));
-        assert_eq!(matches[0]["line"], 3, "the line number is where somebody looks");
+        assert_eq!(
+            matches[0]["line"], 3,
+            "the line number is where somebody looks"
+        );
         assert_eq!(matches[0]["text"], "func Open() {}");
 
         // Case, and the glob that narrows where to look.
@@ -1197,7 +1377,99 @@ pub(super) mod tests {
             json!({ "pattern": "open", "folder": "search", "glob": "*.txt", "ignore_case": true }),
         )
         .await;
-        assert_eq!(content(&narrowed)["count"], 1, "the glob did not narrow the search");
+        assert_eq!(
+            content(&narrowed)["count"],
+            1,
+            "the glob did not narrow the search"
+        );
+    }
+
+    /// No tool in this file may hold the thread the link answers the gateway on.
+    ///
+    /// Each is given enough to do that it takes a while, and while it works the
+    /// runtime is asked to do something else (`ticks_while`). On the one thread
+    /// `#[tokio::test]` runs on, a tool doing its disk work there stops that
+    /// dead every time, and a tool on the blocking pool does not stop it at
+    /// all. All five are checked and every one that holds the thread is named.
+    #[tokio::test]
+    async fn no_file_tool_holds_the_thread_the_link_runs_on() {
+        use crate::tools::ticks_while;
+
+        let here = folder("holds-nothing");
+        // About three megabytes a page, under what one write may carry, and
+        // enough that reading, writing, editing and searching it takes a while.
+        let page = "a line with nothing on it worth looking for\n".repeat(70_000);
+        for n in 0..4 {
+            put(&here.join(format!("page{n}.txt")), &page);
+        }
+        put(
+            &here.join("edit.txt"),
+            &format!("{page}the one line to change\n"),
+        );
+        // A listing is a walk, and what a walk takes is a number of entries.
+        let many = here.join("many");
+        std::fs::create_dir_all(&many).expect("make the folder of many files");
+        for n in 0..400 {
+            put(&many.join(format!("f{n}.txt")), "x\n");
+        }
+
+        let mut held = Vec::new();
+        let mut note = |tool: &str, (answer, ticks): (Response, usize)| {
+            // A tool that refused did no work, and proves nothing either way.
+            assert!(answer.ok, "{tool} did not do its work: {}", answer.message);
+            if ticks == 0 {
+                held.push(tool.to_string());
+            }
+        };
+        note(
+            "read_file",
+            ticks_while(call(
+                read::run,
+                json!({ "path": "holds-nothing/page0.txt" }),
+            ))
+            .await,
+        );
+        note(
+            "write_file",
+            ticks_while(call(
+                write::run,
+                json!({ "path": "holds-nothing/written.txt", "content": page }),
+            ))
+            .await,
+        );
+        note(
+            "edit_file",
+            ticks_while(call(
+                edit::run,
+                json!({
+                    "path": "holds-nothing/edit.txt",
+                    "find": "the one line to change",
+                    "replace": "the line that changed",
+                }),
+            ))
+            .await,
+        );
+        note(
+            "find_files",
+            ticks_while(call(
+                find::run,
+                json!({ "pattern": "**/*.txt", "folder": "holds-nothing" }),
+            ))
+            .await,
+        );
+        note(
+            "search_files",
+            ticks_while(call(
+                search::run,
+                json!({ "pattern": "zqxjv", "folder": "holds-nothing" }),
+            ))
+            .await,
+        );
+        assert!(
+            held.is_empty(),
+            "these held the runtime's only thread for all of their work, so the link could not have answered the gateway meanwhile: {}",
+            held.join(", ")
+        );
     }
 }
 
@@ -1218,7 +1490,11 @@ mod patching {
         let here = folder("hashes");
         put(&here.join("shared.py"), "def one():\n    return 1\n");
 
-        let read = call(read::run, json!({ "path": "hashes/shared.py", "conversation": 81 })).await;
+        let read = call(
+            read::run,
+            json!({ "path": "hashes/shared.py", "conversation": 81 }),
+        )
+        .await;
         let was = content(&read)["hash"].as_str().unwrap().to_string();
         assert!(!was.is_empty(), "a read must say which version it read");
 
@@ -1234,7 +1510,11 @@ mod patching {
         )
         .await;
         assert!(!refused.ok, "an edit against an old version was applied");
-        assert!(refused.message.contains("has changed since"), "{}", refused.message);
+        assert!(
+            refused.message.contains("has changed since"),
+            "{}",
+            refused.message
+        );
         assert_eq!(
             std::fs::read_to_string(here.join("shared.py")).unwrap(),
             "def one():\n    return 2\n",
@@ -1243,7 +1523,11 @@ mod patching {
 
         // And the hash the edit ANSWERS with lets the next one follow without
         // reading the file again.
-        let read = call(read::run, json!({ "path": "hashes/shared.py", "conversation": 81 })).await;
+        let read = call(
+            read::run,
+            json!({ "path": "hashes/shared.py", "conversation": 81 }),
+        )
+        .await;
         let now = content(&read)["hash"].as_str().unwrap().to_string();
         let done = call(
             edit::run,
@@ -1263,7 +1547,11 @@ mod patching {
             }),
         )
         .await;
-        assert!(again.ok, "the hash an edit answered with was not good enough for the next: {}", again.message);
+        assert!(
+            again.ok,
+            "the hash an edit answered with was not good enough for the next: {}",
+            again.message
+        );
     }
 
     /// A file written on Windows is edited by text written anywhere.
@@ -1275,7 +1563,10 @@ mod patching {
     #[tokio::test]
     async fn text_matches_a_file_whose_lines_end_the_windows_way() {
         let here = folder("crlf");
-        put(&here.join("app.ts"), "const a = 1;\r\nconst b = 2;\r\nconst c = 3;\r\n");
+        put(
+            &here.join("app.ts"),
+            "const a = 1;\r\nconst b = 2;\r\nconst c = 3;\r\n",
+        );
 
         let done = call(
             edit::run,
@@ -1287,7 +1578,11 @@ mod patching {
             }),
         )
         .await;
-        assert!(done.ok, "an edit failed on a file with Windows line endings: {}", done.message);
+        assert!(
+            done.ok,
+            "an edit failed on a file with Windows line endings: {}",
+            done.message
+        );
 
         let after = std::fs::read_to_string(here.join("app.ts")).unwrap();
         assert_eq!(
@@ -1316,7 +1611,10 @@ mod patching {
         .await;
         assert!(done.ok, "{}", done.message);
         let after = std::fs::read_to_string(here.join("x.txt")).unwrap();
-        assert_eq!(after, "one\r\ntwo\r\nand a half\r\nthree\r\n", "the file became mixed: {after:?}");
+        assert_eq!(
+            after, "one\r\ntwo\r\nand a half\r\nthree\r\n",
+            "the file became mixed: {after:?}"
+        );
     }
 
     /// Lines by number, which nothing about whitespace can make ambiguous.
@@ -1336,7 +1634,11 @@ mod patching {
         )
         .await;
         assert!(done.ok, "{}", done.message);
-        assert_eq!(content(&done)["replacements"], 2, "it should say how many lines it replaced");
+        assert_eq!(
+            content(&done)["replacements"],
+            2,
+            "it should say how many lines it replaced"
+        );
         assert_eq!(
             std::fs::read_to_string(here.join("list.txt")).unwrap(),
             "one\nTWO\nTHREE\nfour\n"
@@ -1361,7 +1663,10 @@ mod patching {
         )
         .await;
         assert!(gone.ok, "{}", gone.message);
-        assert_eq!(std::fs::read_to_string(here.join("list.txt")).unwrap(), "ONE\nTWO\nTHREE\n");
+        assert_eq!(
+            std::fs::read_to_string(here.join("list.txt")).unwrap(),
+            "ONE\nTWO\nTHREE\n"
+        );
     }
 
     /// A line that is not there is a mistake the assistant can correct.
@@ -1377,7 +1682,10 @@ mod patching {
         .await;
         assert!(!answer.ok);
         assert!(answer.message.contains("2 lines"), "{}", answer.message);
-        assert_eq!(std::fs::read_to_string(here.join("short.txt")).unwrap(), "one\ntwo\n");
+        assert_eq!(
+            std::fs::read_to_string(here.join("short.txt")).unwrap(),
+            "one\ntwo\n"
+        );
     }
 
     /// Both ways of saying which part to change is a call to correct, not a
@@ -1404,7 +1712,11 @@ mod patching {
     async fn a_write_against_an_old_version_is_refused() {
         let here = folder("hashes2");
         put(&here.join("notes.md"), "first\n");
-        let read = call(read::run, json!({ "path": "hashes2/notes.md", "conversation": 87 })).await;
+        let read = call(
+            read::run,
+            json!({ "path": "hashes2/notes.md", "conversation": 87 }),
+        )
+        .await;
         let was = content(&read)["hash"].as_str().unwrap().to_string();
 
         put(&here.join("notes.md"), "somebody else's work\n");

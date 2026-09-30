@@ -115,5 +115,28 @@ func carried() []Component {
 			"separate program, communicating with it over a socket. Its source is " +
 			"published by the MariaDB Foundation at https://github.com/MariaDB/server " +
 			"and can also be obtained from Flexie on request.",
+	}, {
+		Name:    "Chrome Headless Shell",
+		Version: browserVersion,
+		Part:    "Desktop",
+		Licence: "BSD-3-Clause",
+		URL:     "https://www.chromium.org",
+		Text:    headlessShell,
+		Note: "The desktop applications carry an unmodified headless build of Chromium " +
+			"and run it as a separate program, speaking to it over a local socket. It is " +
+			"what lets the assistant read and act on a web page. The text below is the " +
+			"one that build ships: Chromium's own notice, followed by the notice of every " +
+			"library compiled into it.",
+	}, {
+		Name:    "Playwright",
+		Part:    "Desktop",
+		Licence: "Apache-2.0",
+		URL:     "https://playwright.dev",
+		Text:    playwright,
+		Note: "The desktop applications carry Playwright's browser automation script, " +
+			"unmodified, and put it into each page the assistant looks at. It is what " +
+			"knows how to find a button by what it says and whether it can be clicked. " +
+			"The text below is that project's own notice, which also credits Puppeteer, " +
+			"followed by its licence.",
 	}}
 }

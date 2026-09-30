@@ -39,7 +39,7 @@ type handler struct {
 // the tool is reached through the chat application.
 func (h *handler) forCaller(call tool.Call) Config {
 	cfg := h.cfg
-	if !truthy(cfg.ThroughChat) || h.machines == nil {
+	if !cfg.ThroughChat || h.machines == nil {
 		return cfg
 	}
 	cfg.reachKey = fmt.Sprintf("|chat:%d:%d:%s", call.WorkspaceID, call.UserID, call.DeviceID)

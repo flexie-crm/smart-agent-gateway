@@ -2,7 +2,6 @@ package api
 
 import (
 	"errors"
-	"html"
 	"net/http"
 	"net/url"
 	"strings"
@@ -11,8 +10,8 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"flexie.io/sag/internal/app"
-	"flexie.io/sag/internal/mcpclient"
 	"flexie.io/sag/internal/model"
+	"flexie.io/sag/internal/oauthclient"
 )
 
 // The admin surface of the MCP client: the connections this workspace
@@ -59,8 +58,8 @@ func (h *mcpHandlers) clientMetadata(w http.ResponseWriter, _ *http.Request) {
 			"this installation has no address a remote service could reach")
 		return
 	}
-	url := mcpclient.ClientMetadataURL(h.app.Config.BaseURL, false, h.app.Config.MCPClientMetadataURL)
-	writeJSON(w, http.StatusOK, mcpclient.NewClientMetadata(url, h.app.MCPRedirectURI(), "mcp"))
+	url := oauthclient.ClientMetadataURL(h.app.Config.BaseURL, false, h.app.Config.MCPClientMetadataURL)
+	writeJSON(w, http.StatusOK, oauthclient.NewClientMetadata(url, h.app.MCPRedirectURI(), "mcp"))
 }
 
 // mcpServerBody deliberately has no secret fields. Keys and tokens are
@@ -119,13 +118,33 @@ type mcpServerRequest struct {
 	Status            string `json:"status"`
 }
 
+// mcpConnectionsBody is the connections screen in one answer: the connections, and
+// the one fact that belongs to the SCREEN rather than to any row.
+//
+// The callback address is that fact. A service that signs a person in has to be
+// told where to send them back, it is matched byte for byte at the far end, and
+// it is the same address for every connection this deployment makes. It was
+// knowable only by reading our source, which meant registering an application
+// at a provider involved a guess at the one field that cannot be guessed.
+type mcpConnectionsBody struct {
+	Servers []*mcpServerBody `json:"servers"`
+	// CallbackURL is what goes in the provider's "Redirect URI" field when SAG
+	// is registered there by hand. Exactly this string: OAuth compares it
+	// character for character, so a missing scheme or a trailing slash is a
+	// refusal at the consent screen and nowhere earlier.
+	CallbackURL string `json:"callback_url"`
+}
+
 func (h *mcpHandlers) list(w http.ResponseWriter, r *http.Request) {
 	servers, err := h.app.Store.MCPServers().List(r.Context(), claimsFrom(r).WorkspaceID)
 	if err != nil {
 		writeStoreError(w, h.app, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, mapSlice(servers, newMCPServerBody))
+	writeJSON(w, http.StatusOK, mcpConnectionsBody{
+		Servers:     mapSlice(servers, newMCPServerBody),
+		CallbackURL: h.app.MCPRedirectURI(),
+	})
 }
 
 func (h *mcpHandlers) create(w http.ResponseWriter, r *http.Request) {
@@ -165,7 +184,12 @@ func (h *mcpHandlers) create(w http.ResponseWriter, r *http.Request) {
 		}
 		m.OAuthClientSecret = sealed
 	}
-	if err := h.app.Store.MCPServers().Create(r.Context(), m); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.MCPServers().Create(r.Context(), m, by); err != nil {
 		writeSaveError(w, h.app, err, "name", "another connection already uses this name")
 		return
 	}
@@ -217,7 +241,12 @@ func (h *mcpHandlers) update(w http.ResponseWriter, r *http.Request) {
 		}
 		m.OAuthClientSecret = sealed
 	}
-	if err := h.app.Store.MCPServers().Update(r.Context(), m); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.MCPServers().Update(r.Context(), m, by); err != nil {
 		writeSaveError(w, h.app, err, "name", "another connection already uses this name")
 		return
 	}
@@ -291,9 +320,9 @@ func (h *mcpHandlers) connect(w http.ResponseWriter, r *http.Request) {
 		// network that is working. It is the one cause here with something to
 		// DO about it, so it is the one that gets said out loud; everything else
 		// stays generic, because the detail of a remote failure is for the log.
-		if errors.Is(err, mcpclient.ErrNoClientRegistration) {
+		if errors.Is(err, oauthclient.ErrNoClientRegistration) {
 			writeError(w, http.StatusBadRequest, "client_registration_required",
-				mcpclient.ErrNoClientRegistration.Error())
+				oauthclient.ErrNoClientRegistration.Error())
 			return
 		}
 		writeError(w, http.StatusBadGateway, "connect_failed",
@@ -310,12 +339,18 @@ func (h *mcpHandlers) callback(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	state, code := query.Get("state"), query.Get("code")
 	if remoteErr := query.Get("error"); remoteErr != "" {
-		h.callbackPage(w, http.StatusBadRequest, "The service refused the connection.",
-			firstNonEmpty(query.Get("error_description"), remoteErr))
+		h.callbackPage(w, http.StatusBadRequest, connectOutcome{
+			title:    "Not connected",
+			detail:   "The service did not allow the connection.",
+			reported: firstNonEmpty(query.Get("error_description"), remoteErr),
+		})
 		return
 	}
 	if state == "" || code == "" {
-		h.callbackPage(w, http.StatusBadRequest, "This address only works at the end of a connection attempt.", "")
+		h.callbackPage(w, http.StatusBadRequest, connectOutcome{
+			title:  "Nothing to finish here",
+			detail: "This address is the last step of a connection, and there is none under way.",
+		})
 		return
 	}
 
@@ -324,43 +359,37 @@ func (h *mcpHandlers) callback(w http.ResponseWriter, r *http.Request) {
 		h.app.Log.Error().Err(err).Msg("complete mcp connect")
 		// The same words the console is told over its socket, from one place:
 		// two accounts of one failure is how they come to disagree.
-		h.callbackPage(w, http.StatusBadRequest, "The connection could not be completed.",
-			app.MCPConnectReason(err))
+		h.callbackPage(w, http.StatusBadRequest, connectOutcome{
+			title:    "Not connected",
+			detail:   "The connection did not finish.",
+			reported: app.MCPConnectReason(err),
+		})
 		return
 	}
 	detail := "No tools were found yet; use Sync in the console."
 	if result.Offered > 0 {
 		detail = "Its tools are now available to grant in the console."
 	}
-	h.callbackPage(w, http.StatusOK, "Connected to "+server.Name+".", detail)
+	h.callbackPage(w, http.StatusOK, connectOutcome{
+		ok: true, title: "Connected to " + server.Name, detail: detail,
+	})
 }
 
-// callbackPage is deliberately self-contained HTML: this window was opened by a
-// redirect and does not share the console's session. It is the last page of the
-// consent and it speaks to the person looking at it, once, plainly.
+// callbackPage is the shared consent page (connectpage.go) with the one thing
+// this feature decides filled in: where to try again from.
 //
-// It used to carry a script that posted the outcome to `window.opener` and
-// closed itself, so the console the person came from could say so and refresh.
-// That is gone, and with it the last thing here that ran. The consent is opened
-// from a click of the person's own now (KB/36: a window cannot be opened after
-// an await, and the desktop application has no windows to open), which means
-// this page is very often not in the same browser as the console and, on the
-// desktop, not in the same APPLICATION. There is nobody on the other end of a
-// postMessage. The console is told over its socket instead, by the gateway,
-// which knows the answer either way (`CompleteMCPConnect`).
-//
-// So there is no script at all. Nothing to close a window with, and no message
-// posted to `"*"` in the hope somebody is listening.
-func (h *mcpHandlers) callbackPage(w http.ResponseWriter, status int, title, detail string) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(status)
-	page := "<!doctype html><meta charset=\"utf-8\"><title>" + html.EscapeString(title) + "</title>" +
-		"<body style=\"font-family:system-ui;display:grid;place-items:center;min-height:90vh\">" +
-		"<div style=\"text-align:center\"><h1 style=\"font-size:1.2rem\">" + html.EscapeString(title) + "</h1>" +
-		"<p style=\"color:#666\">" + html.EscapeString(detail) + "</p>" +
-		"<p style=\"color:#666\">You can close this window and go back to the console.</p></div>" +
-		"</body>"
-	_, _ = w.Write([]byte(page))
+// It carries NO script, and that is deliberate rather than an omission. The
+// consent is opened from a click of the person's own (KB/36: a window cannot
+// be opened after an await, and the desktop application has no windows to
+// open), so this page is very often not in the same browser as the console
+// and, on the desktop, not in the same APPLICATION: there is nobody on the
+// other end of a postMessage. The console is told over its socket instead, by
+// the gateway, which knows the answer either way (`CompleteMCPConnect`). So no
+// window is closed from here and no message is posted to `"*"` in the hope
+// somebody is listening, which is what leaving `kind` empty means.
+func (h *mcpHandlers) callbackPage(w http.ResponseWriter, status int, out connectOutcome) {
+	out.back = "the console"
+	writeConnectPage(w, status, out)
 }
 
 func (h *mcpHandlers) load(w http.ResponseWriter, r *http.Request) (*model.MCPServer, bool) {

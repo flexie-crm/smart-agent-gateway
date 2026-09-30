@@ -47,14 +47,14 @@ func TestAVendorAndAModelAreNotEnoughOnTheirOwn(t *testing.T) {
 	ctx := context.Background()
 
 	vendor := &model.AIVendor{WorkspaceID: env.ws.ID, Name: "Anthropic", VendorKey: "anthropic"}
-	if err := env.app.Store.Vendors().Create(ctx, vendor); err != nil {
+	if err := env.app.Store.Vendors().Create(ctx, vendor, model.Nobody()); err != nil {
 		t.Fatal(err)
 	}
 	aiModel := &model.AIModel{
 		WorkspaceID: env.ws.ID, VendorID: vendor.ID,
 		ModelKey: "claude-opus-4-8", Type: "chat", ContextWindow: 200000,
 	}
-	if err := env.app.Store.AIModels().Create(ctx, aiModel); err != nil {
+	if err := env.app.Store.AIModels().Create(ctx, aiModel, model.Nobody()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -76,14 +76,14 @@ func TestItIsReadyOnceTheGatewayHasAModel(t *testing.T) {
 	ctx := context.Background()
 
 	vendor := &model.AIVendor{WorkspaceID: env.ws.ID, Name: "Anthropic", VendorKey: "anthropic"}
-	if err := env.app.Store.Vendors().Create(ctx, vendor); err != nil {
+	if err := env.app.Store.Vendors().Create(ctx, vendor, model.Nobody()); err != nil {
 		t.Fatal(err)
 	}
 	aiModel := &model.AIModel{
 		WorkspaceID: env.ws.ID, VendorID: vendor.ID,
 		ModelKey: "claude-opus-4-8", Type: "chat", ContextWindow: 200000,
 	}
-	if err := env.app.Store.AIModels().Create(ctx, aiModel); err != nil {
+	if err := env.app.Store.AIModels().Create(ctx, aiModel, model.Nobody()); err != nil {
 		t.Fatal(err)
 	}
 	pointGatewayAt(t, env, aiModel.ID)
@@ -106,14 +106,14 @@ func TestAGatewayPointingAtADeletedModelIsNotReady(t *testing.T) {
 	ctx := context.Background()
 
 	vendor := &model.AIVendor{WorkspaceID: env.ws.ID, Name: "Anthropic", VendorKey: "anthropic"}
-	if err := env.app.Store.Vendors().Create(ctx, vendor); err != nil {
+	if err := env.app.Store.Vendors().Create(ctx, vendor, model.Nobody()); err != nil {
 		t.Fatal(err)
 	}
 	aiModel := &model.AIModel{
 		WorkspaceID: env.ws.ID, VendorID: vendor.ID,
 		ModelKey: "claude-opus-4-8", Type: "chat", ContextWindow: 200000,
 	}
-	if err := env.app.Store.AIModels().Create(ctx, aiModel); err != nil {
+	if err := env.app.Store.AIModels().Create(ctx, aiModel, model.Nobody()); err != nil {
 		t.Fatal(err)
 	}
 	pointGatewayAt(t, env, aiModel.ID)
@@ -142,7 +142,7 @@ func pointGatewayAt(t *testing.T, env *testEnv, modelID int64) {
 			continue
 		}
 		agent.ModelID = &modelID
-		if err := env.app.Store.Agents().Update(ctx, agent); err != nil {
+		if err := env.app.Store.Agents().Update(ctx, agent, model.Nobody()); err != nil {
 			t.Fatal(err)
 		}
 		return
@@ -156,7 +156,7 @@ func pointGatewayAt(t *testing.T, env *testEnv, modelID int64) {
 		Status:      model.StatusActive,
 		ModelID:     &modelID,
 	}
-	if err := env.app.Store.Agents().Create(ctx, gateway); err != nil {
+	if err := env.app.Store.Agents().Create(ctx, gateway, model.Nobody()); err != nil {
 		t.Fatal(err)
 	}
 }

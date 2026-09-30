@@ -36,7 +36,7 @@ func newFakeStore() *fakeOAuthStore {
 
 func (f *fakeOAuthStore) id() int64 { f.nextID++; return f.nextID }
 
-func (f *fakeOAuthStore) CreateClient(_ context.Context, c *model.OAuthClient) error {
+func (f *fakeOAuthStore) CreateClient(_ context.Context, c *model.OAuthClient, _ model.Actor) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	c.ID = f.id()
@@ -78,7 +78,7 @@ func (f *fakeOAuthStore) GetClientForWorkspace(_ context.Context, _ int64, id in
 	return nil, store.ErrNotFound
 }
 
-func (f *fakeOAuthStore) UpdateClient(_ context.Context, c *model.OAuthClient) error {
+func (f *fakeOAuthStore) UpdateClient(_ context.Context, c *model.OAuthClient, _ model.Actor) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.clients[c.ClientID] = c

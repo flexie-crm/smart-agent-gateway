@@ -10,12 +10,15 @@ import { CheckboxField } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Field, Modal } from '@/components/ui/modal'
 import { NativeSelect } from '@/components/ui/native-select'
+import { TokenMultiSelect } from '@/components/ui/token-multiselect'
+import type { TokenOption } from '@/components/ui/token-multiselect'
 import { Textarea } from '@/components/ui/textarea'
 import { useFormErrors } from '@/lib/form'
 import { useNotify } from '@/lib/notify'
 import { POSTURE } from '@/lib/api'
 import { api, useResource } from '@/lib/resources'
 import type {
+  SkillChoice,
   TemplateParam,
   TemplateSection,
   Tool,
@@ -156,6 +159,7 @@ export function Tools() {
       {adding && (
         <AddToolModal
           onClose={() => setAdding(false)}
+          onRefresh={reload}
           onCreated={async () => {
             setAdding(false)
             await reload()
@@ -175,10 +179,39 @@ export function Tools() {
  * disabled. Everything after a step appears once the step is answered, so the
  * form is never a wall of empty inputs.
  */
-function AddToolModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => Promise<void> }) {
+/**
+ * How a skill is offered in a picker: ONE name, which is the rule everywhere a
+ * skill is printed (lib/skills.ts). The handle is an identifier, so showing it
+ * beside a perfectly good title says the same thing twice in two shapes, and a
+ * package that carried no title is already called by its handle.
+ *
+ * The status still shows. A skill that is switched off is choosable and says
+ * which it is, rather than vanishing from a list somebody is trying to find it
+ * in. It will not appear in the tool's guide while it is off, which is the
+ * same rule an agent's assigned skills follow.
+ */
+function skillOptionsFrom(choices: SkillChoice[]): TokenOption[] {
+  return choices.map((sk) => ({
+    value: String(sk.id),
+    label: sk.name,
+    hint: sk.status === 'active' ? undefined : sk.status,
+  }))
+}
+
+function AddToolModal({
+  onClose,
+  onCreated,
+  onRefresh,
+}: {
+  onClose: () => void
+  onCreated: () => Promise<void>
+  onRefresh: () => Promise<void>
+}) {
   const notify = useNotify()
   const errors = useFormErrors()
   const [templates, setTemplates] = useState<ToolTemplate[]>([])
+  // Set once the tool exists and still needs somebody to sign in at the service.
+  const [offer, setOffer] = useState<{ url?: string; reason?: string } | null>(null)
   const [template, setTemplate] = useState<ToolTemplate | null>(null)
   const [variant, setVariant] = useState('')
   const [sections, setSections] = useState<TemplateSection[]>([])
@@ -187,10 +220,12 @@ function AddToolModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
   // them retires it rather than leaving a stale "Connected" beside edited values.
   const [testVersion, setTestVersion] = useState(0)
   const invalidateTest = () => setTestVersion((v) => v + 1)
-  const [alias, setAlias] = useState('')
   const [displayName, setDisplayName] = useState('')
   const [description, setDescription] = useState('')
   const [guide, setGuide] = useState('')
+  const [skillChoices, setSkillChoices] = useState<SkillChoice[]>([])
+  const [selectedSkills, setSelectedSkills] = useState<string[]>([])
+  const skillOptions = useMemo(() => skillOptionsFrom(skillChoices), [skillChoices])
   const [paramDescriptions, setParamDescriptions] = useState<Record<string, string>>({})
   const [values, setValues] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState(false)
@@ -208,6 +243,10 @@ function AddToolModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
     void api.tools.newForm(template.name, variant).then((form) => {
       if (cancelled) return
       setSections(form.sections)
+      // The skills ride on the same answer, because they are part of this
+      // form: a second request to fill one picker is the thing the one
+      // request per dialog rule exists to stop.
+      setSkillChoices(form.skills ?? [])
       // The values come with the form. What a new tool starts from is the
       // server's decision, not something assembled here out of field defaults.
       setValues((prev) => {
@@ -233,7 +272,14 @@ function AddToolModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
     setSections([])
     setTab(0)
     invalidateTest()
-    setDescription(t?.description ?? '')
+    // default_description, NOT description. The second is the paragraph in the
+    // callout above, written for the person choosing a tool; putting it here
+    // filled the model's instructions with copy written to sell it one.
+    //
+    // Cleared out entirely, Build still writes an instance-specific one naming
+    // the address, the engine or the server, so an emptied field is a sensible
+    // tool rather than a nameless one.
+    setDescription(t?.default_description ?? '')
     setGuide(t?.default_guide ?? '')
     setParamDescriptions(Object.fromEntries((t?.params ?? []).map((p) => [p.key, p.description])))
   }
@@ -242,6 +288,10 @@ function AddToolModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
     const out: Record<string, unknown> = {}
     for (const section of sections)
       for (const field of section.fields) {
+        // A callback field is read-only: the deployment's own address, shown to
+        // be pasted elsewhere. Sending it back would store a fact about us as
+        // though somebody had configured it.
+        if (field.type === 'callback') continue
         const raw = values[field.key] ?? ''
         if (field.type === 'number') out[field.key] = raw === '' ? undefined : Number(raw)
         else out[field.key] = raw
@@ -254,16 +304,25 @@ function AddToolModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
     errors.clear()
     setBusy(true)
     try {
-      await api.tools.createCustom({
+      const created = await api.tools.createCustom({
         template: template.name,
         variant,
-        alias,
         display_name: displayName,
         description,
         guide,
         param_descriptions: paramDescriptions,
         settings: settings(),
+        skills: selectedSkills.map(Number),
       })
+      // A tool that signs in to a service is not finished when it is saved, so
+      // the dialog stays and offers the sign-in rather than closing and leaving
+      // somebody to find the tool again.
+      if (created.connect_url || created.connect_error) {
+        setOffer({ url: created.connect_url, reason: created.connect_error })
+        setBusy(false)
+        await onRefresh()
+        return
+      }
       notify.success('The tool was created. Grant it to an agent to use it.')
       await onCreated()
     } catch (failure) {
@@ -277,6 +336,53 @@ function AddToolModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
     invalidateTest()
   }
 
+  // The tool exists and the service has still to be told who is asking. A step
+  // of its own rather than a line under the form, because it leaves the
+  // console: it opens the service's own consent page in another tab.
+  if (offer) {
+    return (
+      <Modal
+        open
+        onOpenChange={(o) => !o && void onCreated()}
+        title="Sign in to finish"
+        onSubmit={onCreated}
+        submitLabel="Done"
+        hideCancel
+      >
+        {offer.url ? (
+          <div className="space-y-3">
+            {/* Answers the question somebody asks here, which is why this step
+                exists at all when they just typed everything in. */}
+            <p className="text-sm text-muted-foreground">
+              The tool is saved, but it has no access yet. The client ID and secret you entered identify
+              the <strong>application</strong>, not the person it acts as. Only a person can grant that,
+              and only the service can issue the token it hands back, so there is nothing to type here.
+            </p>
+            <p className="text-sm text-muted-foreground">
+              Sign in once and it is remembered and renewed on its own. Close that tab when it says it is
+              connected.
+            </p>
+            <Button asChild size="sm">
+              <a href={offer.url} target="_blank" rel="noreferrer">
+                Sign in to the service
+              </a>
+            </Button>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              The tool is saved, but the sign-in could not be started, so it has no access yet:
+            </p>
+            <p className="text-sm text-destructive">{offer.reason}</p>
+            <p className="text-sm text-muted-foreground">
+              Open the tool, check the addresses and the client it was given, then press Test to try again.
+            </p>
+          </div>
+        )}
+      </Modal>
+    )
+  }
+
   return (
     <Modal open onOpenChange={(o) => !o && onClose()} title="Add tool" onSubmit={create} submitting={busy} submitLabel="Create tool" wide>
       <Field label="Type">
@@ -286,40 +392,60 @@ function AddToolModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
         </div>
       </Field>
 
-      <Field label="Tool">
-        <NativeSelect value={template?.name ?? ''} onChange={(e) => chooseTemplate(e.target.value)}>
-          <option value="">Choose a tool…</option>
-          {templates.map((t) => (
-            <option key={t.name} value={t.name}>
-              {t.title}
-            </option>
-          ))}
-        </NativeSelect>
-      </Field>
+      {/* What is being made and what it is called, together, because they are
+          one decision. Both required, and enforced by the browser rather than
+          by a check in here: each empty option has an empty value, so the form
+          cannot be submitted without them. They had the same hole before, where
+          create() returned early and the button did nothing and said nothing.
+
+          ONE name. The identifier the assistant calls it by is derived from
+          this on the server, so nobody types a second name or learns that an
+          identifier has rules. */}
+      <div className="grid grid-cols-2 items-start gap-x-4 gap-y-4">
+        <Field label="Tool" required>
+          <NativeSelect required value={template?.name ?? ''} onChange={(e) => chooseTemplate(e.target.value)}>
+            <option value="">Choose a tool…</option>
+            {templates.map((t) => (
+              <option key={t.name} value={t.name}>
+                {t.title}
+              </option>
+            ))}
+          </NativeSelect>
+        </Field>
+        <Field label="Name" required hint="What people call it.">
+          <Input
+            required
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            placeholder="Production orders"
+          />
+        </Field>
+      </div>
 
       {template && (
         <>
-          {/* What this tool is, so the person understands it before configuring.
-              A tinted callout, so it reads as guidance and not another field. */}
+          {/* What this kind of tool is, in plain words, so the person knows what
+              they are making before they configure it. A tinted callout, so it
+              reads as guidance and not another field. */}
           <div className="rounded-md border border-primary/30 bg-primary/5 px-4 py-3">
             <p className="text-sm text-muted-foreground">{template.description}</p>
           </div>
 
-          <div className="grid grid-cols-2 items-start gap-x-4 gap-y-4">
-            <Field label="Name" required hint="How the AI calls it. Lowercase, numbers, underscores.">
-              <Input value={alias} onChange={(e) => setAlias(e.target.value)} placeholder="prod_orders" autoFocus />
-            </Field>
-            <Field label="Display name" hint="What people see. Defaults from the name.">
-              <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Production orders" />
-            </Field>
-          </div>
-
-          <Field label="Description" hint="Teach the AI when to use this tool. Write it for the model, not the end user.">
+          <Field
+            label="AI Description"
+            hint="Teach the AI when to use this tool. Write it for the model, not for people. Leave it empty and the tool describes itself from the settings you gave it."
+          >
             <Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} />
           </Field>
 
-          <Field label="Driver">
+          {/* Required, and enforced by the browser rather than by a check here:
+              the empty option has an empty value, so a form submitted without a
+              driver never reaches the server. Nothing below this can be filled
+              in until one is chosen anyway, because the settings ARE the
+              driver's. */}
+          <Field label="Driver" required>
             <NativeSelect
+              required
               value={variant}
               onChange={(e) => {
                 setVariant(e.target.value)
@@ -373,10 +499,25 @@ function AddToolModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
 
       {template && (
         <Field
-          label="AI guide"
+          label="AI Guide"
           hint="Detailed usage the AI fetches only when it needs it, so it does not weigh down every request."
         >
           <Textarea value={guide} onChange={(e) => setGuide(e.target.value)} rows={4} />
+        </Field>
+      )}
+
+      {template && (
+        <Field
+          label="Skills for using this tool"
+          hint="Written procedures that document THIS tool: an API's paths, what its codes mean, the order things go in. The assistant is told they exist when it reads the guide above, and opens one only if it needs to. An agent holding the tool can read these whether or not the skill was assigned to it."
+        >
+          <TokenMultiSelect
+            options={skillOptions}
+            value={selectedSkills}
+            onChange={setSelectedSkills}
+            placeholder="Add a skill…"
+            empty="No skills exist yet. Import one on the Skills screen."
+          />
         </Field>
       )}
 
@@ -422,6 +563,15 @@ function EditCustomToolModal({
   const [values, setValues] = useState<Record<string, string>>({})
   const [enabled, setEnabled] = useState(tool.status === 'active')
   const [grants, setGrants] = useState<number[]>(tool.grants)
+  const [skillChoices, setSkillChoices] = useState<SkillChoice[]>([])
+  const [selectedSkills, setSelectedSkills] = useState<string[]>([])
+  const skillOptions = useMemo(() => skillOptionsFrom(skillChoices), [skillChoices])
+  // The tool's sign-in, when it has one. Null for every other kind of tool.
+  const [connection, setConnection] = useState<ToolDetail['connection']>(undefined)
+  const [signingIn, setSigningIn] = useState(false)
+  // Set while a sign-in is happening in another tab, which is what says this
+  // form has something to wait for.
+  const [awaitingSignIn, setAwaitingSignIn] = useState(false)
   const [busy, setBusy] = useState(false)
 
   // ONE request. It answers with the tool, the form its driver makes up, the
@@ -436,6 +586,11 @@ function EditCustomToolModal({
       setVariant(detail.variant ?? '')
       setGuide(detail.guide ?? '')
       setParamDescriptions(detail.param_descriptions ?? {})
+      // What it could be documented by, and what it is, both out of this one
+      // answer.
+      setSkillChoices(detail.skill_choices ?? [])
+      setSelectedSkills((detail.skills ?? []).map(String))
+      setConnection(detail.connection)
       // The form and the values that fill it arrive together, from the one
       // request that asked for this tool. Nothing is merged or defaulted here:
       // an existing tool is what is stored, and a field it has no value for
@@ -451,10 +606,58 @@ function EditCustomToolModal({
     }
   }, [tool])
 
+  // A sign-in happens in ANOTHER TAB, so this form has to find out that it
+  // finished. Two ways, because either can be the one that happens: the
+  // callback page posts back to the window that opened it, and somebody who
+  // closes that tab by hand instead lands back here with the form focused.
+  //
+  // Without this the form went on saying "not connected" until the whole page
+  // was reloaded and the tool opened again, which is how it read as broken.
+  useEffect(() => {
+    if (!awaitingSignIn) return
+    let cancelled = false
+
+    const recheck = async () => {
+      const detail = await api.tools.get(tool.id)
+      if (cancelled) return
+      setConnection(detail.connection)
+      if (detail.connection?.connected) {
+        setAwaitingSignIn(false)
+        notify.success('Connected. The tool can now act at the service.')
+      }
+    }
+
+    const heard = (event: MessageEvent) => {
+      // Same origin only, and only our own message: anything else arriving on
+      // this channel is somebody else's business.
+      if (event.origin !== window.location.origin) return
+      const message = event.data as { source?: string; kind?: string } | null
+      if (message?.source !== 'sag' || message.kind !== 'tool-connect') return
+      void recheck()
+    }
+    const returned = () => {
+      if (document.visibilityState === 'visible') void recheck()
+    }
+
+    window.addEventListener('message', heard)
+    window.addEventListener('focus', returned)
+    document.addEventListener('visibilitychange', returned)
+    return () => {
+      cancelled = true
+      window.removeEventListener('message', heard)
+      window.removeEventListener('focus', returned)
+      document.removeEventListener('visibilitychange', returned)
+    }
+  }, [awaitingSignIn, tool.id, notify])
+
   const settings = (): Record<string, unknown> => {
     const out: Record<string, unknown> = {}
     for (const section of sections)
       for (const field of section.fields) {
+        // A callback field is read-only: the deployment's own address, shown to
+        // be pasted elsewhere. Sending it back would store a fact about us as
+        // though somebody had configured it.
+        if (field.type === 'callback') continue
         const raw = values[field.key] ?? ''
         if (field.type === 'number') out[field.key] = raw === '' ? undefined : Number(raw)
         else out[field.key] = raw
@@ -477,6 +680,7 @@ function EditCustomToolModal({
         description,
         guide,
         param_descriptions: paramDescriptions,
+        skills: selectedSkills.map(Number),
       })
       await api.tools.update(tool.id, { status: enabled ? 'active' : 'disabled', grants })
       notify.success('The tool was updated.')
@@ -543,16 +747,95 @@ function EditCustomToolModal({
         <Field label="Name" hint="How the AI calls it. Fixed once created.">
           <Input value={tool.name} readOnly disabled />
         </Field>
-        <Field label="Display name" hint="What people see.">
+        <Field label="Name" hint="What people call it. The assistant's own name for it was fixed when the tool was made.">
           <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder={tool.name} />
         </Field>
       </div>
 
-      <Field label="Description" hint="Teach the AI when to use this tool. Write it for the model, not the end user.">
+      <Field
+        label="AI Description"
+        hint="Teach the AI when to use this tool. Write it for the model, not for people."
+      >
         <Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} />
       </Field>
 
       {driverLabel && <Field label="Driver" hint="Fixed once created.">{<Input value={driverLabel} readOnly disabled />}</Field>}
+
+      {/* A tool that signs in to a service is not finished until somebody has.
+          Shown on opening, because it used to appear only as a side effect of
+          pressing Test, so a tool that had never been connected looked
+          complete and offered no way to connect it. */}
+      {connection && (
+        <Field
+          label="Connection"
+          hint={
+            connection.connected
+              ? 'The assistant acts as the person who signed in. Disconnect to revoke that without deleting the tool.'
+              : 'This tool cannot reach the service until somebody signs in. The settings are kept either way.'
+          }
+        >
+          <div className="flex items-center gap-3">
+            {connection.connected ? (
+              <>
+                <Badge tone="good">
+                  {connection.connected_by ? `Connected by ${connection.connected_by}` : 'Connected'}
+                </Badge>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={signingIn}
+                  onClick={async () => {
+                    setSigningIn(true)
+                    try {
+                      await api.tools.disconnect(tool.id)
+                      setConnection({ connected: false })
+                      notify.success('The sign-in was removed. The tool and its settings are kept.')
+                    } catch (failure) {
+                      errors.fail(failure)
+                    } finally {
+                      setSigningIn(false)
+                    }
+                  }}
+                >
+                  Disconnect
+                </Button>
+              </>
+            ) : (
+              <>
+                <Badge tone="warn">Not connected</Badge>
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={signingIn}
+                  onClick={async () => {
+                    setSigningIn(true)
+                    try {
+                      const { authorize_url } = await api.tools.connect(tool.id)
+                      // Not noopener: the callback page tells the window that
+                      // opened it when the sign-in finished, and a window with
+                      // no opener cannot.
+                      window.open(authorize_url, '_blank')
+                      setAwaitingSignIn(true)
+                    } catch (failure) {
+                      errors.fail(failure)
+                    } finally {
+                      setSigningIn(false)
+                    }
+                  }}
+                >
+                  {signingIn ? 'Starting…' : 'Sign in to the service'}
+                </Button>
+                <span className="text-sm text-muted-foreground">
+                  {awaitingSignIn
+                    ? 'Waiting for the sign-in in the other tab. This updates by itself.'
+                    : 'Opens in a new tab.'}
+                </span>
+              </>
+            )}
+          </div>
+        </Field>
+      )}
 
       {sections.length > 0 && (
         <>
@@ -570,8 +853,21 @@ function EditCustomToolModal({
         <ParamsEditor params={tool_.params} values={paramDescriptions} onChange={(key, v) => setParamDescriptions((prev) => ({ ...prev, [key]: v }))} />
       )}
 
-      <Field label="AI guide" hint="Detailed usage the AI fetches only when it needs it, so it does not weigh down every request.">
+      <Field label="AI Guide" hint="Detailed usage the AI fetches only when it needs it, so it does not weigh down every request.">
         <Textarea value={guide} onChange={(e) => setGuide(e.target.value)} rows={4} />
+      </Field>
+
+      <Field
+        label="Skills for using this tool"
+        hint="Written procedures that document THIS tool: an API's paths, what its codes mean, the order things go in. The assistant is told they exist when it reads the guide above, and opens one only if it needs to. An agent holding the tool can read these whether or not the skill was assigned to it."
+      >
+        <TokenMultiSelect
+          options={skillOptions}
+          value={selectedSkills}
+          onChange={setSelectedSkills}
+          placeholder="Add a skill…"
+          empty="No skills exist yet. Import one on the Skills screen."
+        />
       </Field>
 
       <hr className="border-border" />
@@ -656,7 +952,7 @@ function ParamsEditor({
   if (params.length === 0) return null
   return (
     <div>
-      <div className="text-sm font-medium">Parameters</div>
+      <div className="text-sm font-medium">AI Parameters</div>
       <p className="text-xs text-muted-foreground">
         The inputs the AI provides when it calls this tool. Fixed by the template; edit the descriptions for better
         context.
@@ -740,6 +1036,26 @@ function ConnectionTest({
           <span className="text-sm text-destructive">{result.message || result.error || 'Could not connect.'}</span>
         )}
       </div>
+
+      {/* Somewhere the administrator has to go for this to finish. Rendered
+          without knowing what is there, exactly as a prompt's fields are: a new
+          tab, because coming back is a redirect to this gateway and taking the
+          console with them would lose the form. */}
+      <div>
+        {result?.visit && (
+          <div className="flex items-center gap-3 border-t border-border pt-3">
+            <Button type="button" size="sm" asChild>
+              <a href={result.visit} target="_blank" rel="noreferrer">
+                {result.visiting || 'Continue'}
+              </a>
+            </Button>
+            <span className="text-sm text-muted-foreground">
+              Opens in a new tab. Come back here when it is done.
+            </span>
+          </div>
+        )}
+      </div>
+
 
       {prompt && (
         <div className="space-y-3 border-t border-border pt-3">

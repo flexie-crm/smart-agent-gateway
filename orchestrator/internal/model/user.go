@@ -34,6 +34,11 @@ type Workspace struct {
 	Status      string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	// Who made it and who last changed it (model.Actor): the ids go to NULL
+	// when the person is deleted and the names are frozen, so the record reads
+	// afterwards.
+	Authored
+	Edited
 }
 
 // User is a person in the tenant, not in a workspace. Which workspaces they may
@@ -47,6 +52,11 @@ type User struct {
 	Status       string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+	// Who made it and who last changed it (model.Actor): the ids go to NULL
+	// when the person is deleted and the names are frozen, so the record reads
+	// afterwards.
+	Authored
+	Edited
 }
 
 // UserSetting is one preference of one person: a key, and whatever the caller

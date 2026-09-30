@@ -22,11 +22,11 @@ func TestBrainWriteParksAndLandsOnApproval(t *testing.T) {
 	ctx := context.Background()
 
 	notes := &model.Brain{WorkspaceID: env.ws.ID, Name: "Notes"}
-	if err := env.app.Store.Brains().CreateBrain(ctx, notes); err != nil {
+	if err := env.app.Store.Brains().CreateBrain(ctx, notes, model.Nobody()); err != nil {
 		t.Fatalf("create brain: %v", err)
 	}
 	ideas := &model.BrainCategory{BrainID: notes.ID, Name: "Ideas"}
-	if err := env.app.Store.Brains().CreateCategory(ctx, env.ws.ID, ideas); err != nil {
+	if err := env.app.Store.Brains().CreateCategory(ctx, env.ws.ID, ideas, model.Nobody()); err != nil {
 		t.Fatalf("create category: %v", err)
 	}
 	brainWriteGateway(t, env, notes.ID)
@@ -74,7 +74,7 @@ func TestBrainWriteInvalidNeverCards(t *testing.T) {
 	ctx := context.Background()
 
 	notes := &model.Brain{WorkspaceID: env.ws.ID, Name: "Notes"}
-	if err := env.app.Store.Brains().CreateBrain(ctx, notes); err != nil {
+	if err := env.app.Store.Brains().CreateBrain(ctx, notes, model.Nobody()); err != nil {
 		t.Fatalf("create brain: %v", err)
 	}
 	brainWriteGateway(t, env, notes.ID)
@@ -107,7 +107,7 @@ func brainWriteGateway(t *testing.T, env *testEnv, brainID int64) {
 		WorkspaceID: env.ws.ID, Key: model.DefaultAgentKey, Name: "Assistant",
 		Tools: []string{"brain_write"}, ConfirmTools: []string{"brain_write"},
 		Brains: []int64{brainID},
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		t.Fatalf("create Gateway agent: %v", err)
 	}
 }

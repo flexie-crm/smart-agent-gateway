@@ -53,7 +53,7 @@ func (f *fakeRunner) ran() []string {
 // pending behind it never delivered another turn (KB/29).
 type schedStore struct {
 	store.Store
-	runs  *schedRuns
+	runs  store.RunStore
 	agent *schedAgent
 }
 

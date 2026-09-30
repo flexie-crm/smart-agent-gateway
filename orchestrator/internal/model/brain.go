@@ -32,6 +32,11 @@ type Brain struct {
 	// something an agent should rewrite because it inferred something.
 	Locked bool `json:"locked"`
 
+	// Who made it and who last changed it. An agent writes here as well as a
+	// person, which is why both halves exist (see model.Actor).
+	Authored
+	Edited
+
 	// Counts are what a list needs to be useful. A brain with no documents in it
 	// looks exactly like a brain with a thousand until somebody says so.
 	Categories int `json:"categories"`
@@ -40,14 +45,19 @@ type Brain struct {
 
 // BrainCategory is a section of a brain.
 type BrainCategory struct {
-	ID          int64     `json:"id"`
-	BrainID     int64     `json:"brain_id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Weight      int       `json:"weight"`
-	Documents   int       `json:"documents"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          int64  `json:"id"`
+	BrainID     int64  `json:"brain_id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Weight      int    `json:"weight"`
+	Documents   int    `json:"documents"`
+	// Who made it and who last changed it. An agent writes here as well as a
+	// person, which is why both halves exist (see model.Actor).
+	Authored
+	Edited
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // BrainDocument is a document: a title, and Markdown.
@@ -55,14 +65,19 @@ type BrainCategory struct {
 // Never HTML. The agent writes here, and what an agent writes must not be able
 // to become a script tag in somebody's browser.
 type BrainDocument struct {
-	ID         int64     `json:"id"`
-	BrainID    int64     `json:"brain_id"`
-	CategoryID int64     `json:"category_id"`
-	Title      string    `json:"title"`
-	Content    string    `json:"content"`
-	Weight     int       `json:"weight"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID         int64  `json:"id"`
+	BrainID    int64  `json:"brain_id"`
+	CategoryID int64  `json:"category_id"`
+	Title      string `json:"title"`
+	Content    string `json:"content"`
+	Weight     int    `json:"weight"`
+	// Who made it and who last changed it. An agent writes here as well as a
+	// person, which is why both halves exist (see model.Actor).
+	Authored
+	Edited
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 
 	// Related is the graph. The links are symmetric, and the store keeps them so:
 	// a document reachable from one side and invisible from the other is lost.
@@ -86,9 +101,13 @@ type BrainLink struct {
 // agent has to decide whether a document is worth opening, and a title alone is
 // not enough to decide with.
 type BrainHit struct {
-	DocumentID int64   `json:"document_id"`
-	BrainID    int64   `json:"brain_id"`
-	Brain      string  `json:"brain"`
+	DocumentID int64  `json:"document_id"`
+	BrainID    int64  `json:"brain_id"`
+	Brain      string `json:"brain"`
+	// CategoryID is where the document lives, as an id and not only a name,
+	// because a hit has to be OPENABLE: the console selects a document by naming
+	// its brain, its category and itself, and a category name selects nothing.
+	CategoryID int64   `json:"category_id"`
 	Category   string  `json:"category"`
 	Title      string  `json:"title"`
 	Snippet    string  `json:"snippet"`

@@ -32,7 +32,7 @@ func scanJSONList(raw []byte, dest *[]string) error {
 
 // --- Clients ---------------------------------------------------------------
 
-func (s *oauthStore) CreateClient(ctx context.Context, c *model.OAuthClient) error {
+func (s *oauthStore) CreateClient(ctx context.Context, c *model.OAuthClient, by model.Actor) error {
 	now := time.Now().UTC()
 	c.CreatedAt, c.UpdatedAt = now, now
 	if c.Status == "" {
@@ -54,13 +54,20 @@ func (s *oauthStore) CreateClient(ctx context.Context, c *model.OAuthClient) err
 	if c.ClientSecretHash != "" {
 		secret = sql.NullString{String: c.ClientSecretHash, Valid: true}
 	}
+	// A client registered by DCR has no person behind it, which the empty actor
+	// records honestly: the registration came from software.
+	c.Made(by)
+	c.Changed(by)
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO oauth_clients
 		 (workspace_id, client_id, client_secret_hash, client_type, name,
-		  redirect_uris, grant_types, scopes, is_dcr, status, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		  redirect_uris, grant_types, scopes, is_dcr, status,
+		  created_by, created_by_name, updated_by, updated_by_name, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.WorkspaceID, c.ClientID, secret, c.ClientType, c.Name,
-		redirects, grants, scopes, c.IsDCR, c.Status, c.CreatedAt, c.UpdatedAt)
+		redirects, grants, scopes, c.IsDCR, c.Status,
+		nullID(c.CreatedBy), c.CreatedByName, nullID(c.UpdatedBy), c.UpdatedByName,
+		c.CreatedAt, c.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("insert oauth client: %w", err)
 	}
@@ -76,10 +83,13 @@ func (s *oauthStore) GetClientByClientID(ctx context.Context, clientID string) (
 	)
 	err := s.db.QueryRowContext(ctx,
 		`SELECT id, workspace_id, client_id, client_secret_hash, client_type, name,
-		        redirect_uris, grant_types, scopes, is_dcr, status, created_at, updated_at
+		        redirect_uris, grant_types, scopes, is_dcr, status,
+		        `+authoredColumns+`, created_at, updated_at
 		 FROM oauth_clients WHERE client_id = ?`, clientID).
 		Scan(&c.ID, &c.WorkspaceID, &c.ClientID, &secret, &c.ClientType, &c.Name,
-			&redirects, &grants, &scope, &c.IsDCR, &c.Status, &c.CreatedAt, &c.UpdatedAt)
+			&redirects, &grants, &scope, &c.IsDCR, &c.Status,
+			&c.CreatedBy, &c.CreatedByName, &c.UpdatedBy, &c.UpdatedByName,
+			&c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -107,7 +117,9 @@ func scanClientRow(scan func(dest ...any) error) (*model.OAuthClient, error) {
 		redirects, grants, scope []byte
 	)
 	err := scan(&c.ID, &c.WorkspaceID, &c.ClientID, &secret, &c.ClientType, &c.Name,
-		&redirects, &grants, &scope, &c.IsDCR, &c.Status, &c.CreatedAt, &c.UpdatedAt)
+		&redirects, &grants, &scope, &c.IsDCR, &c.Status,
+		&c.CreatedBy, &c.CreatedByName, &c.UpdatedBy, &c.UpdatedByName,
+		&c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -132,7 +144,8 @@ func scanClientRow(scan func(dest ...any) error) (*model.OAuthClient, error) {
 func (s *oauthStore) ListClients(ctx context.Context, workspaceID int64) ([]*model.OAuthClient, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, workspace_id, client_id, client_secret_hash, client_type, name,
-		        redirect_uris, grant_types, scopes, is_dcr, status, created_at, updated_at
+		        redirect_uris, grant_types, scopes, is_dcr, status,
+		        `+authoredColumns+`, created_at, updated_at
 		 FROM oauth_clients
 		 WHERE workspace_id = ? OR workspace_id IS NULL
 		 ORDER BY created_at DESC`, workspaceID)
@@ -157,7 +170,8 @@ func (s *oauthStore) ListClients(ctx context.Context, workspaceID int64) ([]*mod
 func (s *oauthStore) GetClientForWorkspace(ctx context.Context, workspaceID, id int64) (*model.OAuthClient, error) {
 	return scanClientRow(s.db.QueryRowContext(ctx,
 		`SELECT id, workspace_id, client_id, client_secret_hash, client_type, name,
-		        redirect_uris, grant_types, scopes, is_dcr, status, created_at, updated_at
+		        redirect_uris, grant_types, scopes, is_dcr, status,
+		        `+authoredColumns+`, created_at, updated_at
 		 FROM oauth_clients
 		 WHERE id = ? AND (workspace_id = ? OR workspace_id IS NULL)`, id, workspaceID).Scan)
 }
@@ -165,7 +179,7 @@ func (s *oauthStore) GetClientForWorkspace(ctx context.Context, workspaceID, id 
 // UpdateClient writes the admin-owned fields. The client_id is immutable;
 // the secret hash is set to exactly what the caller resolved (a type toggle
 // clears it or mints a fresh one, and that decision is the API layer's).
-func (s *oauthStore) UpdateClient(ctx context.Context, c *model.OAuthClient) error {
+func (s *oauthStore) UpdateClient(ctx context.Context, c *model.OAuthClient, by model.Actor) error {
 	redirects, err := jsonList(c.RedirectURIs)
 	if err != nil {
 		return fmt.Errorf("marshal redirect uris: %w", err)
@@ -183,12 +197,15 @@ func (s *oauthStore) UpdateClient(ctx context.Context, c *model.OAuthClient) err
 		secret = sql.NullString{String: c.ClientSecretHash, Valid: true}
 	}
 	c.UpdatedAt = time.Now().UTC()
+	c.Changed(by)
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE oauth_clients SET
 			name = ?, client_type = ?, client_secret_hash = ?, redirect_uris = ?,
-			grant_types = ?, scopes = ?, status = ?, updated_at = ?
+			grant_types = ?, scopes = ?, status = ?,
+			updated_by = ?, updated_by_name = ?, updated_at = ?
 		 WHERE id = ?`,
-		c.Name, c.ClientType, secret, redirects, grants, scopes, c.Status, c.UpdatedAt, c.ID)
+		c.Name, c.ClientType, secret, redirects, grants, scopes, c.Status,
+		nullID(c.UpdatedBy), c.UpdatedByName, c.UpdatedAt, c.ID)
 	if err != nil {
 		return wrapWriteErr("update oauth client", err)
 	}

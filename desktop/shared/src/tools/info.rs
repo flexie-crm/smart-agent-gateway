@@ -30,5 +30,18 @@ pub async fn run(_args: Value) -> Response {
         // The name a person would recognise, not an identifier: this is what
         // the assistant says back when somebody asks which computer it can see.
         "name": crate::environment::hostname(),
+        // What can RUN here, and which version of each.
+        //
+        // This answers a question that was previously answered by trying: a
+        // skill whose scripts need Python 3.10 on a machine offering 3.9 was
+        // found out by running one and reading a syntax error. The version is
+        // as much of the answer as the presence.
+        //
+        // It costs four short probes on a call nothing makes in a loop, and it
+        // needs NO version bump: the link contract versions a tool's ARGUMENTS
+        // ("a tool's arguments never change shape under the same version"), so
+        // a field added to an answer cannot leave an older gateway unable to
+        // read it or an older application un-offered the tool.
+        "runtimes": super::skill::runtimes().await,
     }))
 }

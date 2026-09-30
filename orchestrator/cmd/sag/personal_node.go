@@ -150,7 +150,13 @@ func launchLocalNode(ctx context.Context, a *app.App, cfg *config.Config, logger
 	if err != nil {
 		return nil, err
 	}
-	cfg.PersonalAccelerated, cfg.PersonalAcceleratorReason = choice.accelerated, choice.reason
+	// Which build this machine ended up running, and why, said once on a log
+	// line. It used to be put on the config as well, for a Machines screen that
+	// would show it; nothing ever read it, in Go or in either front end, and the
+	// comment saying otherwise outlived the intention by every release since.
+	// Telling somebody why their model is slow is worth doing and is the node's
+	// own account of itself to make (KB/35), not a field on this process's
+	// configuration.
 	logger.Info().Bool("accelerated", choice.accelerated).
 		Str("binary", filepath.Base(choice.binary)).Msg(choice.reason)
 

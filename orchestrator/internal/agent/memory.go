@@ -389,7 +389,7 @@ func (r *Runner) summarizeMemory(ctx context.Context, resolved *provider.Resolve
 		WorkspaceID: req.WorkspaceID,
 		SessionID:   req.SessionID,
 		ModelID:     req.ModelID,
-	}, resolved, started, resp.Usage)
+	}, resolved, started, resp.Usage, prepared)
 
 	return resp.Message.Content, nil
 }

@@ -25,10 +25,35 @@ var ErrBusy = errors.New("run: this conversation is already answering")
 // not started is refused, because starting it now guarantees interrupting it.
 var ErrShuttingDown = errors.New("run: this service is restarting")
 
-// runTimeout is the longest a turn may take. It is generous, because a turn
-// that calls several slow tools is doing its job, and it is finite, because a
-// vendor that never answers must not hold a goroutine forever.
-const runTimeout = 30 * time.Minute
+// ErrHeld is a conversation whose lane is taken by work that is not a turn: it
+// is being compacted, and nothing is said into it until that is done.
+var ErrHeld = errors.New("run: this conversation is being compacted")
+
+// idleTimeout is how long a turn may show NO SIGN OF LIFE before it is ended.
+//
+// Half an hour, which is the number this always had. What changed is what it
+// measures. It used to be a deadline on the whole turn, and a deadline on the
+// whole turn cannot tell a turn that has hung from a turn that is busy: a
+// build running for forty minutes on somebody's computer was killed at thirty,
+// mid-command, and the person was told their turn had been stopped.
+//
+// SILENCE is the thing worth measuring, because a working turn is never
+// silent. A model streaming sends words and thinking; a tool that is running
+// sends a heartbeat every ten seconds (agent.heartbeatInterval); a tool
+// starting and finishing each send a frame. All of it passes through the one
+// stream this manager creates, and the stream records it before any of it is
+// filtered for what a person may see (chat.Stream.QuietFor). A vendor that
+// took the request and said nothing sends none of it, and that is the one case
+// this ends.
+const idleTimeoutDefault = 30 * time.Minute
+
+// How often to look, and both as variables so a test can shorten them: a bug
+// in what happens after half an hour of silence is found by making half an
+// hour short.
+var (
+	idleTimeout    = idleTimeoutDefault
+	idleCheckEvery = time.Minute
+)
 
 // retention is how long a finished run stays replayable in memory. It covers
 // the gap a person actually experiences: the answer lands, the laptop wakes up,
@@ -83,6 +108,15 @@ type Manager struct {
 	// so a listener (the live dashboard, KB/30) can react to the running count
 	// moving. Set by the app; nil elsewhere.
 	onTurnChange func(started bool, workspaceID int64)
+
+	// held is every conversation whose lane is taken by work that is not a turn
+	// (Hold). Kept beside byChat, under the same lock, because the two are one
+	// question: is anything using this conversation right now.
+	held map[int64]bool
+
+	// onContext hears how full a conversation is, from inside its turns (see
+	// agent.Turn.ContextUsed). Set by the app; nil elsewhere.
+	onContext func(workspaceID, userID, sessionID int64, m *model.AIModel, chars, baseChars int)
 }
 
 func NewManager(st store.Store, runner Runner, said Said, log zerolog.Logger) *Manager {
@@ -94,6 +128,7 @@ func NewManager(st store.Store, runner Runner, said Said, log zerolog.Logger) *M
 		byUID:   make(map[string]*Run),
 		byChat:  make(map[int64]*Run),
 		pending: make(map[int64][]agent.Turn),
+		held:    make(map[int64]bool),
 	}
 }
 
@@ -105,6 +140,49 @@ func (m *Manager) OnServerTurn(fn func(*Run)) { m.onServerTurn = fn }
 // OnTurnChange registers the callback fired when a turn starts and ends, so the
 // app can announce the running count moved (KB/30). Set once at wiring time.
 func (m *Manager) OnTurnChange(fn func(started bool, workspaceID int64)) { m.onTurnChange = fn }
+
+// OnContext registers the listener for how full a conversation is, which every
+// turn started here reports to. Set once at wiring time.
+func (m *Manager) OnContext(fn func(workspaceID, userID, sessionID int64, m *model.AIModel, chars, baseChars int)) {
+	m.onContext = fn
+}
+
+// Hold takes a conversation's lane for work that is not a turn, a compaction,
+// so no turn starts while it runs and it does not start while one is running.
+// It is decided under the lock a turn claims its lane with, so the two cannot
+// both win. The answer gives the lane back, once however often it is called,
+// and then starts whatever queued behind it.
+func (m *Manager) Hold(sessionID int64) (func(), error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.quiescing {
+		return nil, ErrShuttingDown
+	}
+	if r, ok := m.byChat[sessionID]; ok && !r.Done() {
+		return nil, ErrBusy
+	}
+	if m.held[sessionID] {
+		return nil, ErrHeld
+	}
+	m.held[sessionID] = true
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.mu.Lock()
+			delete(m.held, sessionID)
+			m.mu.Unlock()
+			m.startNextPending(sessionID)
+		})
+	}, nil
+}
+
+// Holding says whether a conversation's lane is held, which is what a reload is
+// told so the chat stays frozen while the compaction it started goes on.
+func (m *Manager) Holding(sessionID int64) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.held[sessionID]
+}
 
 func (m *Manager) turnChanged(started bool, workspaceID int64) {
 	if m.onTurnChange != nil {
@@ -119,10 +197,15 @@ func (m *Manager) turnChanged(started bool, workspaceID int64) {
 // is that the reader hanging up does not cancel the work.
 func (m *Manager) Start(ctx context.Context, turn agent.Turn) (*Run, error) {
 	m.mu.RLock()
-	stopping := m.quiescing
+	stopping, held := m.quiescing, m.held[turn.SessionID]
 	m.mu.RUnlock()
 	if stopping {
 		return nil, ErrShuttingDown
+	}
+	if held {
+		// Said before anything is recorded: no run is created for a turn that
+		// is not going to happen.
+		return nil, ErrHeld
 	}
 	uid, err := model.NewRunUID()
 	if err != nil {
@@ -144,11 +227,19 @@ func (m *Manager) Start(ctx context.Context, turn agent.Turn) (*Run, error) {
 	// cancellation, which is exactly the distinction we want: the turn should
 	// still be traceable to the request that asked for it, and should not die
 	// with it.
-	runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runTimeout)
+	// No deadline. What ends a turn that is getting nowhere is silence, watched
+	// while it runs (endIfItGoesQuiet), not the clock.
+	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 
 	r := newRun(record.ID, uid, turn.SessionID, turn.UserID, turn.WorkspaceID, cancel)
 
 	m.mu.Lock()
+	if m.held[turn.SessionID] {
+		// Taken between the look above and this lock.
+		m.mu.Unlock()
+		cancel()
+		return nil, ErrHeld
+	}
 	if previous, ok := m.byChat[turn.SessionID]; ok && !previous.Done() {
 		// One conversation, one turn at a time. A second prompt while the first
 		// is still answering would interleave two streams into one transcript,
@@ -173,6 +264,14 @@ func (m *Manager) Start(ctx context.Context, turn agent.Turn) (*Run, error) {
 		heard := context.WithoutCancel(ctx)
 		sessionID := turn.SessionID
 		turn.Heard = func() []string { return m.said.Take(heard, sessionID) }
+	}
+	// And every turn says how full its conversation is, for the same reason:
+	// attached where turns start, it cannot be forgotten where one is built.
+	if m.onContext != nil {
+		workspaceID, userID, sessionID := turn.WorkspaceID, turn.UserID, turn.SessionID
+		turn.ContextUsed = func(mdl *model.AIModel, chars, baseChars int) {
+			m.onContext(workspaceID, userID, sessionID, mdl, chars, baseChars)
+		}
 	}
 
 	go m.execute(runCtx, cancel, r, turn)
@@ -302,6 +401,11 @@ func (m *Manager) execute(ctx context.Context, cancel context.CancelFunc, r *Run
 		show = *turn.Show
 	}
 	out := chat.NewStreamShowing(r, show)
+
+	// Ended only if it stops showing any sign of life. See idleTimeout.
+	stopWatching := m.endIfItGoesQuiet(ctx, cancel, out, r)
+	defer stopWatching()
+
 	err := m.runner.Run(ctx, turn, out)
 
 	// The context is checked FIRST, and regardless of the error. A cancelled
@@ -348,6 +452,53 @@ func (m *Manager) execute(ctx context.Context, cancel context.CancelFunc, r *Run
 	if status != model.RunWaitingApproval {
 		m.startNextPending(r.SessionID)
 	}
+}
+
+// endIfItGoesQuiet ends a turn that has shown no sign of life for idleTimeout,
+// and returns the function that stops watching.
+//
+// It reads the STREAM rather than the run, because the run is only sent what
+// this person may see: thinking is withheld from somebody without the
+// permission for it (chat.Stream.withheld), and a model that is thinking is
+// working.
+func (m *Manager) endIfItGoesQuiet(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	out *chat.Stream,
+	r *Run,
+) func() {
+	done := make(chan struct{})
+
+	// Read once, here, rather than on every tick: this watch belongs to one
+	// turn and its window is fixed when the turn starts. It also means the
+	// goroutine never touches the package variables, which a test shortens and
+	// puts back while a previous turn's watcher may still be winding down.
+	window, look := idleTimeout, idleCheckEvery
+
+	go func() {
+		ticker := time.NewTicker(look)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				quiet := out.QuietFor()
+				if quiet < window {
+					continue
+				}
+				m.log.Warn().Str("run", r.UID).Int64("session_id", r.SessionID).
+					Dur("quiet_for", quiet).Msg("a turn went quiet; ending it")
+				cancel()
+				return
+			}
+		}
+	}()
+
+	var once sync.Once
+	return func() { once.Do(func() { close(done) }) }
 }
 
 // settle closes the run: no more frames, the record says how it ended, and the

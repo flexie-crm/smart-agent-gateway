@@ -17,6 +17,7 @@ import (
 	"flexie.io/sag/internal/model"
 	"flexie.io/sag/internal/testdb"
 	"flexie.io/sag/internal/tool"
+	"flexie.io/sag/internal/tools/agentguide"
 )
 
 // The layered configuration model, resolved against a real database.
@@ -61,7 +62,7 @@ func newEnv(t *testing.T) *env {
 
 	e := &env{t: t, app: a}
 	e.ws = &model.Workspace{Slug: "acme", Name: "Acme"}
-	if err := st.Workspaces().Create(context.Background(), e.ws); err != nil {
+	if err := st.Workspaces().Create(context.Background(), e.ws, model.Nobody()); err != nil {
 		t.Fatalf("create workspace: %v", err)
 	}
 	// The tools this build has code for, offered to the workspace, exactly as
@@ -80,14 +81,14 @@ func (e *env) aiModel(key string) int64 {
 	ctx := context.Background()
 
 	vendor := &model.AIVendor{WorkspaceID: e.ws.ID, VendorKey: model.VendorAnthropic, Name: key}
-	if err := e.app.Store.Vendors().Create(ctx, vendor); err != nil {
+	if err := e.app.Store.Vendors().Create(ctx, vendor, model.Nobody()); err != nil {
 		e.t.Fatalf("create vendor: %v", err)
 	}
 	m := &model.AIModel{
 		WorkspaceID: e.ws.ID, VendorID: vendor.ID, ModelKey: key,
 		Type: model.ModelTypeChat, ContextWindow: 100_000,
 	}
-	if err := e.app.Store.AIModels().Create(ctx, m); err != nil {
+	if err := e.app.Store.AIModels().Create(ctx, m, model.Nobody()); err != nil {
 		e.t.Fatalf("create model: %v", err)
 	}
 	return m.ID
@@ -96,7 +97,7 @@ func (e *env) aiModel(key string) int64 {
 func (e *env) user(email string) *model.User {
 	e.t.Helper()
 	u := &model.User{Email: email, Name: email, PasswordHash: "hash"}
-	if err := e.app.Store.Users().Create(context.Background(), u); err != nil {
+	if err := e.app.Store.Users().Create(context.Background(), u, model.Nobody()); err != nil {
 		e.t.Fatalf("create user: %v", err)
 	}
 	if err := e.app.Store.Workspaces().SetMembers(context.Background(), u.ID, []int64{e.ws.ID}); err != nil {
@@ -110,7 +111,7 @@ func (e *env) group(name string, users ...*model.User) *model.Group {
 	e.t.Helper()
 	ctx := context.Background()
 	g := &model.Group{WorkspaceID: e.ws.ID, Name: name}
-	if err := e.app.Store.Groups().Create(ctx, g); err != nil {
+	if err := e.app.Store.Groups().Create(ctx, g, model.Nobody()); err != nil {
 		e.t.Fatalf("create group: %v", err)
 	}
 	for _, u := range users {
@@ -133,19 +134,18 @@ func (e *env) workflow(name string, definition string, assignments ...model.Work
 		e.t.Fatalf("the test's own definition is invalid: %v", err)
 	}
 
-	wf := &model.Workflow{WorkspaceID: e.ws.ID, Name: name, CreatedBy: 1}
-	if err := e.app.Store.Workflows().Create(ctx, wf); err != nil {
+	wf := &model.Workflow{WorkspaceID: e.ws.ID, Name: name}
+	if err := e.app.Store.Workflows().Create(ctx, wf, model.Nobody()); err != nil {
 		e.t.Fatalf("create workflow: %v", err)
 	}
 	v := &model.WorkflowVersion{
 		WorkflowID: wf.ID,
 		Definition: json.RawMessage(definition),
-		CreatedBy:  1,
 	}
-	if err := e.app.Store.Workflows().CreateVersion(ctx, e.ws.ID, v); err != nil {
+	if err := e.app.Store.Workflows().CreateVersion(ctx, e.ws.ID, v, model.Nobody()); err != nil {
 		e.t.Fatalf("create version: %v", err)
 	}
-	if err := e.app.Store.Workflows().Publish(ctx, e.ws.ID, wf.ID, v.ID); err != nil {
+	if err := e.app.Store.Workflows().Publish(ctx, e.ws.ID, wf.ID, v.ID, model.Nobody()); err != nil {
 		e.t.Fatalf("publish: %v", err)
 	}
 	if err := e.app.Store.Workflows().SetAssignments(ctx, e.ws.ID, wf.ID, assignments); err != nil {
@@ -213,7 +213,7 @@ func TestTheDefaultAgentOverridesTheCodeDefaults(t *testing.T) {
 		Reasoning:    true,
 		Tools:        []string{"current_time"},
 	}
-	if err := e.app.Store.Agents().Create(ctx, agent); err != nil {
+	if err := e.app.Store.Agents().Create(ctx, agent, model.Nobody()); err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
 
@@ -239,7 +239,7 @@ func TestTheDefaultAgentOverridesTheCodeDefaults(t *testing.T) {
 	// Disabling the package falls back to the code defaults rather than to an
 	// assistant with no instructions at all.
 	agent.Status = model.StatusDisabled
-	if err := e.app.Store.Agents().Update(ctx, agent); err != nil {
+	if err := e.app.Store.Agents().Update(ctx, agent, model.Nobody()); err != nil {
 		t.Fatalf("disable agent: %v", err)
 	}
 	profile = e.resolve(user, model.ChannelChat, 3)
@@ -259,11 +259,11 @@ func TestTheDefaultAgentCarriesItsBrains(t *testing.T) {
 	// A reference knowledge base (locked, read-only) and the agent's own memory
 	// brain (unlocked, the only kind a memory brain may be).
 	knowledge := &model.Brain{WorkspaceID: e.ws.ID, Name: "Support Playbook", Locked: true}
-	if err := e.app.Store.Brains().CreateBrain(ctx, knowledge); err != nil {
+	if err := e.app.Store.Brains().CreateBrain(ctx, knowledge, model.Nobody()); err != nil {
 		t.Fatalf("create knowledge brain: %v", err)
 	}
 	memory := &model.Brain{WorkspaceID: e.ws.ID, Name: "Field Notes"}
-	if err := e.app.Store.Brains().CreateBrain(ctx, memory); err != nil {
+	if err := e.app.Store.Brains().CreateBrain(ctx, memory, model.Nobody()); err != nil {
 		t.Fatalf("create memory brain: %v", err)
 	}
 	memoryID := memory.ID
@@ -274,7 +274,7 @@ func TestTheDefaultAgentCarriesItsBrains(t *testing.T) {
 		Name:          "House",
 		Brains:        []int64{knowledge.ID, memory.ID},
 		MemoryBrainID: &memoryID,
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
 
@@ -322,7 +322,7 @@ func TestAWorkflowOverridesOnlyWhatItNames(t *testing.T) {
 		Instructions: "Answer in Albanian.",
 		ModelID:      &pinned,
 		Tools:        []string{"current_time", "list_models"},
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
 
@@ -403,19 +403,18 @@ func TestAnUnreadableWorkflowRefusesTheTurn(t *testing.T) {
 
 	// Written straight to the store, bypassing the validation the API applies,
 	// because this is the state a corrupted row would leave behind.
-	wf := &model.Workflow{WorkspaceID: e.ws.ID, Name: "Broken", CreatedBy: 1}
-	if err := e.app.Store.Workflows().Create(ctx, wf); err != nil {
+	wf := &model.Workflow{WorkspaceID: e.ws.ID, Name: "Broken"}
+	if err := e.app.Store.Workflows().Create(ctx, wf, model.Nobody()); err != nil {
 		t.Fatalf("create workflow: %v", err)
 	}
 	v := &model.WorkflowVersion{
 		WorkflowID: wf.ID,
 		Definition: json.RawMessage(`{"kind":"graph","nodes":[]}`),
-		CreatedBy:  1,
 	}
-	if err := e.app.Store.Workflows().CreateVersion(ctx, e.ws.ID, v); err != nil {
+	if err := e.app.Store.Workflows().CreateVersion(ctx, e.ws.ID, v, model.Nobody()); err != nil {
 		t.Fatalf("create version: %v", err)
 	}
-	if err := e.app.Store.Workflows().Publish(ctx, e.ws.ID, wf.ID, v.ID); err != nil {
+	if err := e.app.Store.Workflows().Publish(ctx, e.ws.ID, wf.ID, v.ID, model.Nobody()); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 	if err := e.app.Store.Workflows().SetAssignments(ctx, e.ws.ID, wf.ID, []model.WorkflowAssignment{
@@ -458,7 +457,7 @@ func TestTheLoadoutIsCodeAndConfigurationAndPermission(t *testing.T) {
 	// allow-list may name a tool this build has not shipped.
 	names := append(e.app.DefaultTools(), "a_tool_this_build_does_not_have")
 
-	loadout, err := e.app.Loadout(ctx, e.ws.ID, insider.ID, "", names, nil, nil, tool.OwnerOfAgent())
+	loadout, err := e.app.Loadout(ctx, e.ws.ID, insider.ID, "", names, nil, nil, tool.OwnerOfAgent(), model.Nobody())
 	if err != nil {
 		t.Fatalf("loadout: %v", err)
 	}
@@ -484,17 +483,17 @@ func TestTheLoadoutIsCodeAndConfigurationAndPermission(t *testing.T) {
 	// The administrator restricts one tool to finance and disables another.
 	restricted := byName["list_models"]
 	restricted.Grants = []int64{finance.ID}
-	if err := e.app.Store.Tools().Update(ctx, restricted); err != nil {
+	if err := e.app.Store.Tools().Update(ctx, restricted, model.Nobody()); err != nil {
 		t.Fatalf("grant: %v", err)
 	}
 	disabled := byName["set_model_status"]
 	disabled.Status = model.StatusDisabled
-	if err := e.app.Store.Tools().Update(ctx, disabled); err != nil {
+	if err := e.app.Store.Tools().Update(ctx, disabled, model.Nobody()); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
 
 	// The insider keeps the restricted tool. Nobody keeps the disabled one.
-	loadout, err = e.app.Loadout(ctx, e.ws.ID, insider.ID, "", e.app.DefaultTools(), nil, nil, tool.OwnerOfAgent())
+	loadout, err = e.app.Loadout(ctx, e.ws.ID, insider.ID, "", e.app.DefaultTools(), nil, nil, tool.OwnerOfAgent(), model.Nobody())
 	if err != nil {
 		t.Fatalf("loadout: %v", err)
 	}
@@ -509,7 +508,7 @@ func TestTheLoadoutIsCodeAndConfigurationAndPermission(t *testing.T) {
 	}
 
 	// The outsider does not.
-	loadout, err = e.app.Loadout(ctx, e.ws.ID, outsider.ID, "", e.app.DefaultTools(), nil, nil, tool.OwnerOfAgent())
+	loadout, err = e.app.Loadout(ctx, e.ws.ID, outsider.ID, "", e.app.DefaultTools(), nil, nil, tool.OwnerOfAgent(), model.Nobody())
 	if err != nil {
 		t.Fatalf("loadout: %v", err)
 	}
@@ -548,7 +547,7 @@ func TestApprovalIsCodeFloorOrAgentConfirm(t *testing.T) {
 	// With nothing in the confirm set the read-only tool asks nobody, while the
 	// dangerous tool still asks because the code floor cannot be lowered.
 	loadout, err := e.app.Loadout(ctx, e.ws.ID, user.ID, "",
-		[]string{"current_time", "set_model_status"}, nil, nil, tool.OwnerOfAgent())
+		[]string{"current_time", "set_model_status"}, nil, nil, tool.OwnerOfAgent(), model.Nobody())
 	if err != nil {
 		t.Fatalf("loadout: %v", err)
 	}
@@ -563,7 +562,7 @@ func TestApprovalIsCodeFloorOrAgentConfirm(t *testing.T) {
 	// The dangerous tool is left OUT of the set, to prove its approval comes
 	// from the floor, not from being named.
 	loadout, err = e.app.Loadout(ctx, e.ws.ID, user.ID, "",
-		[]string{"current_time", "set_model_status"}, []string{"current_time"}, nil, tool.OwnerOfAgent())
+		[]string{"current_time", "set_model_status"}, []string{"current_time"}, nil, tool.OwnerOfAgent(), model.Nobody())
 	if err != nil {
 		t.Fatalf("loadout: %v", err)
 	}
@@ -599,7 +598,7 @@ func TestTheApprovalWindowIsLayered(t *testing.T) {
 		Key:         model.DefaultAgentKey,
 		Name:        "House",
 		ApprovalTTL: &house,
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
 	if got := e.resolve(user, model.ChannelChat, 3).ApprovalTTL; got != house {
@@ -674,7 +673,7 @@ func TestResolveAssemblesTheLivePrompt(t *testing.T) {
 	ctx := context.Background()
 	user := e.user("dana@acme.test")
 	user.Name = "Dana"
-	if err := e.app.Store.Users().Update(ctx, user); err != nil {
+	if err := e.app.Store.Users().Update(ctx, user, model.Nobody()); err != nil {
 		t.Fatalf("name the user: %v", err)
 	}
 
@@ -685,19 +684,21 @@ func TestResolveAssemblesTheLivePrompt(t *testing.T) {
 		Name:         "House",
 		Instructions: "Only ever discuss invoices.",
 		Tools:        e.app.DefaultTools(),
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		t.Fatalf("create default agent: %v", err)
 	}
 	// An agent to route to, so the roster renders. Its instructions run to a
 	// second line, and it holds a tool, so the roster can be checked for the FULL
-	// instructions (not the first line) and the tool by name.
+	// instructions (not the first line) and for NOT carrying the tool: an
+	// agent's abilities are looked up with agent_guide when the Gateway is
+	// deciding where to send a task.
 	if err := e.app.Store.Agents().Create(ctx, &model.Agent{
 		WorkspaceID:  e.ws.ID,
 		Key:          "researcher",
 		Name:         "Researcher",
 		Instructions: "You find and summarize source material.\nAlways cite your sources.",
 		Tools:        []string{"current_time"},
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
 	// What the assistant has already learned, in both scopes.
@@ -723,10 +724,19 @@ func TestResolveAssemblesTheLivePrompt(t *testing.T) {
 		"You are helping the user with full name: Dana.", // the person
 		"researcher",                // the agent roster
 		"Always cite your sources.", // the agent's FULL instructions, not the first line
-		"Current time",              // the agent's tools, by FRIENDLY name (not the callable key)
+		agentguide.Name,             // and the way to find out what it can actually do
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("the assembled prompt is missing live context %q:\n%s", want, got)
+		}
+	}
+	// And what is NOT in it: the agent's abilities, in either spelling. That
+	// text is paid for on every turn of every conversation and multiplied by
+	// the number of agents, while the decision it informs is taken in a handful
+	// of turns.
+	for _, looked := range []string{"Current time", "current_time"} {
+		if strings.Contains(got, looked) {
+			t.Fatalf("an agent's ability (%q) was written into the prompt:\n%s", looked, got)
 		}
 	}
 	// And what is NOT in it: what was remembered. Both scopes are read with the

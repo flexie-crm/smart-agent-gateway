@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
 
+	"flexie.io/sag/internal/config"
 	"flexie.io/sag/internal/inference"
 	"flexie.io/sag/internal/model"
 	"flexie.io/sag/internal/queue"
@@ -165,6 +168,7 @@ func (a *App) Nodes(ctx context.Context) ([]NodeSummary, error) {
 	if err != nil {
 		return nil, err
 	}
+	rows = a.withoutAMachineThatCannotExistHere(rows)
 
 	out := make([]NodeSummary, len(rows))
 	done := make(chan struct{}, len(rows))
@@ -182,6 +186,60 @@ func (a *App) Nodes(ctx context.Context) ([]NodeSummary, error) {
 		}
 	}
 	return out, nil
+}
+
+// withoutAMachineThatCannotExistHere drops this computer from the list on a
+// build that carries no engine.
+//
+// A personal installation runs its own node when an engine shipped with it, and
+// that node registers over loopback like any other machine. On a platform we
+// ship no engine for there is none, and `startLocalNode` returns before starting
+// anything (cmd/sag/personal_node.go). What is left is the row a previous
+// version wrote, on an installation that HAD an engine and was upgraded to one
+// that does not: a machine called "This computer" that will never answer again,
+// on a screen whose whole job is to say which machines are up.
+//
+// Hidden rather than deleted, and the difference matters. The row still carries
+// whatever models were given to workspaces from it, and taking those away is a
+// decision with consequences for somebody's work; it belongs to the person, on
+// the screen, with the sentence that says what is lost. This only stops the
+// product asserting that a machine exists here when it cannot.
+//
+// Loopback is what identifies it, rather than the name it was given. A machine
+// added on a personal installation is somewhere else by construction: the
+// gateway listens on loopback and nothing outside can reach it, so a machine is
+// added by exchanging certificates with a computer that has its own address
+// (KB/35). Nothing but this installation's own node has ever been at 127.0.0.1.
+func (a *App) withoutAMachineThatCannotExistHere(rows []*model.InferenceNode) []*model.InferenceNode {
+	if !a.Config.Personal || config.EngineBundled {
+		return rows
+	}
+	kept := make([]*model.InferenceNode, 0, len(rows))
+	for _, row := range rows {
+		if isLoopbackAddress(row.BaseURL) {
+			continue
+		}
+		kept = append(kept, row)
+	}
+	return kept
+}
+
+// isLoopbackAddress reports whether a machine's address is this computer.
+//
+// Parsed rather than matched on a prefix: "127.0.0.1", "localhost" and "[::1]"
+// are all this computer, and a host that merely BEGINS with one of them
+// (127.0.0.1.example.com) is not.
+func isLoopbackAddress(base string) bool {
+	parsed, err := url.Parse(base)
+	if err != nil {
+		return false
+	}
+	host := parsed.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // probe asks one machine how it is.
@@ -479,7 +537,7 @@ func (a *App) settleModelPull(ctx context.Context, node *inference.Node, pull in
 //
 // Idempotent: a workspace that already has this model is left as it is, because
 // two administrators pressing the same button want the same outcome.
-func (a *App) AttachNodeModel(ctx context.Context, nodeID, workspaceID int64, uid string) (*model.AIModel, error) {
+func (a *App) AttachNodeModel(ctx context.Context, nodeID, workspaceID int64, uid string, by model.Actor) (*model.AIModel, error) {
 	node, row, err := a.Node(ctx, nodeID)
 	if err != nil {
 		return nil, err
@@ -489,7 +547,7 @@ func (a *App) AttachNodeModel(ctx context.Context, nodeID, workspaceID int64, ui
 		return nil, err
 	}
 
-	pointer, err := a.pointerTo(ctx, workspaceID, row)
+	pointer, err := a.pointerTo(ctx, workspaceID, row, by)
 	if err != nil {
 		return nil, err
 	}
@@ -523,7 +581,7 @@ func (a *App) AttachNodeModel(ctx context.Context, nodeID, workspaceID int64, ui
 		Description:   describeNodeModel(m),
 		Status:        model.StatusActive,
 	}
-	if err := a.Store.AIModels().Create(ctx, created); err != nil {
+	if err := a.Store.AIModels().Create(ctx, created, by); err != nil {
 		return nil, fmt.Errorf("give the workspace this model: %w", err)
 	}
 	a.Log.Info().Int64("workspace", workspaceID).Str("model", m.Handle).Str("machine", row.Name).
@@ -536,7 +594,7 @@ func (a *App) AttachNodeModel(ctx context.Context, nodeID, workspaceID int64, ui
 // One per workspace and machine, however many models it takes from there. It
 // carries no address and no key: both are the machine's, read through it, so
 // there is nothing here to keep in step and nothing stored twice.
-func (a *App) pointerTo(ctx context.Context, workspaceID int64, node *model.InferenceNode) (*model.AIVendor, error) {
+func (a *App) pointerTo(ctx context.Context, workspaceID int64, node *model.InferenceNode, by model.Actor) (*model.AIVendor, error) {
 	existing, err := a.Store.Vendors().ByNodeID(ctx, workspaceID, node.ID)
 	if err == nil {
 		return existing, nil
@@ -552,7 +610,7 @@ func (a *App) pointerTo(ctx context.Context, workspaceID int64, node *model.Infe
 		NodeID:      node.ID,
 		Status:      model.StatusActive,
 	}
-	if err := a.Store.Vendors().Create(ctx, pointer); err != nil {
+	if err := a.Store.Vendors().Create(ctx, pointer, by); err != nil {
 		return nil, fmt.Errorf("point this workspace at the machine: %w", err)
 	}
 	return pointer, nil

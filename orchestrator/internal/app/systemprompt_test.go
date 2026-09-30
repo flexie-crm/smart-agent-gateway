@@ -7,6 +7,9 @@ import (
 	"time"
 
 	"flexie.io/sag/internal/tool"
+	"flexie.io/sag/internal/tools/agentguide"
+	"flexie.io/sag/internal/tools/recall"
+	"flexie.io/sag/internal/tools/skills"
 )
 
 // A fixed instant so the date line is deterministic.
@@ -163,6 +166,13 @@ func TestPersonAndMemorySectionsAppearOnlyWhenPresent(t *testing.T) {
 	if !strings.Contains(full, "recall") {
 		t.Fatalf("nothing tells the assistant how to read what it remembers:\n%s", full)
 	}
+	// And the PERSON's own section says there are notes, which the line above
+	// cannot tell: "recall" is in the working-notes heading too, so that
+	// assertion passes on a prompt whose person section says only who they are.
+	// It did, for thirteen days.
+	if !strings.Contains(full, "notes about this person") {
+		t.Fatalf("the person's section does not say there is anything remembered about them:\n%s", full)
+	}
 	if !strings.Contains(full, "# Your working notes") {
 		t.Fatalf("the working notes section is missing, so the assistant does not know it has any:\n%s", full)
 	}
@@ -182,22 +192,59 @@ func TestAgentsSectionListsTheRoster(t *testing.T) {
 			{
 				Key: "researcher", Name: "Researcher",
 				Instructions: "Finds and summarizes source material.\nAlways cite the source.",
-				// The tool is named by its FRIENDLY name, never the callable key, so
-				// the Gateway does not hallucinate a call to it.
-				Tools: []toolBrief{{Name: "API request", Description: "Fetch a URL."}},
+				Abilities: []tool.Schema{
+					{Name: "http_request", FriendlyName: "API request", Description: "Fetch a URL."},
+				},
 			},
 		},
 	})
 	if !strings.Contains(got, "# Agents you can draw on") {
 		t.Fatalf("the roster section is missing:\n%s", got)
 	}
-	// The FULL instructions (not just the first line) and the tools, by friendly
-	// name and short description, are all in the roster so the Gateway can route on
-	// them, framed as the agent's own (which the Gateway cannot call).
-	for _, want := range []string{"researcher", "Always cite the source.", "API request", "you cannot call"} {
+	// The FULL instructions, not just the first line: they are what the Gateway
+	// routes on, so they stay in the prompt.
+	for _, want := range []string{"researcher", "Always cite the source.", "agent_guide", "you cannot call"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("the roster is missing %q:\n%s", want, got)
 		}
+	}
+}
+
+// The roster is a MAP: it says what each agent is for and points at the way to
+// find out more. An agent's abilities are NOT written into it, in any spelling,
+// because that text is paid for on every turn of every conversation and
+// multiplied by the number of agents.
+//
+// Both spellings are asserted, because either one leaking would be the whole
+// regression: the friendly name is what the roster used to print, and the
+// callable key is what agent_guide now hands back.
+func TestTheRosterDoesNotSpellOutAnAgentsAbilities(t *testing.T) {
+	got := renderGateway(gatewayPrompt{
+		now: promptClock,
+		agents: []agentInfo{{
+			Key: "researcher", Name: "Researcher", Instructions: "Finds sources.",
+			Abilities: []tool.Schema{
+				{Name: "http_request", FriendlyName: "API request", Description: "Fetch a URL."},
+				{Name: "nli_update_entity", FriendlyName: "Create Record", Description: "Write a record."},
+			},
+			Brains: brainRoster{
+				knowledge: []knowledgeBrain{{name: "Support Playbook", readOnly: true}},
+				memory:    "Researcher Memory",
+			},
+		}},
+	})
+	for _, leaked := range []string{
+		"API request", "http_request",
+		"Create Record", "nli_update_entity",
+		"Fetch a URL.", "Support Playbook", "Researcher Memory",
+	} {
+		if strings.Contains(got, leaked) {
+			t.Errorf("the roster spelled out %q instead of leaving it to agent_guide:\n%s", leaked, got)
+		}
+	}
+	// And it does say where to go instead.
+	if !strings.Contains(got, agentguide.Name) {
+		t.Fatalf("the roster does not point at the way to look an agent up:\n%s", got)
 	}
 }
 
@@ -409,5 +456,165 @@ func TestAgentPromptNamesTheWorkingFolder(t *testing.T) {
 	without := renderAgent(agentPrompt{now: promptClock, role: "do things"})
 	if strings.Contains(without, "# The folder you are working in") {
 		t.Fatalf("an agent with no computer is told about a folder:\n%s", without)
+	}
+}
+
+// The person's section, asserted on its own.
+//
+// Against personSection rather than the whole prompt, deliberately: every
+// phrase this cares about appears somewhere else in a rendered prompt, so an
+// assertion made against the whole thing cannot tell a section that says the
+// right thing from a section that says nothing while its neighbour does. That
+// is not a hypothetical: it is how the missing preamble survived.
+func TestThePersonsNotesAreAnnouncedOnlyWhenThereAreSome(t *testing.T) {
+	// Notes, and a name.
+	both := personSection("Dana", "Prefers terse answers.")
+	if !strings.Contains(both, "notes about this person") {
+		t.Errorf("notes exist and the section does not say so:\n%s", both)
+	}
+	if !strings.Contains(both, recall.Name) {
+		t.Errorf("the section does not say what reads them:\n%s", both)
+	}
+	// The notes themselves are never carried: they only grow.
+	if strings.Contains(both, "Prefers terse answers.") {
+		t.Errorf("the notes were pasted into the prompt:\n%s", both)
+	}
+	// No trailing whitespace: the separator is followed by something now.
+	if both != strings.TrimSpace(both) {
+		t.Errorf("the section ends in whitespace, so the prompt carries a stray blank line: %q", both)
+	}
+
+	// A name and nothing remembered: an assistant with nothing to read is not
+	// sent looking for it.
+	named := personSection("Dana", "")
+	if strings.Contains(named, "notes about this person") {
+		t.Errorf("an assistant with nothing remembered was sent to read notes:\n%s", named)
+	}
+	if !strings.Contains(named, "Dana") {
+		t.Errorf("the name went missing when there was no memory:\n%s", named)
+	}
+
+	// Notes and NO name, which is a real person: somebody who has never set
+	// one. The section has to exist, or the only thing that says the notes are
+	// there is dropped along with the empty name.
+	anonymous := personSection("", "Prefers terse answers.")
+	if !strings.Contains(anonymous, "notes about this person") {
+		t.Errorf("a person with notes and no name got no section at all: %q", anonymous)
+	}
+
+	// Neither: no section, because an empty one is noise on every turn.
+	if empty := personSection("", ""); empty != "" {
+		t.Errorf("an empty section was built: %q", empty)
+	}
+}
+
+// The skills roster is a MAP, and the whole point of it is what it leaves out.
+func TestTheSkillsSectionNamesThemAndNothingElse(t *testing.T) {
+	held := []skillOnHand{
+		{handle: "pdf-processing", name: "PDF Toolkit"},
+		{handle: "csv-tools", name: "csv-tools"},
+	}
+	got := renderGateway(gatewayPrompt{now: promptClock, skills: held})
+
+	if !strings.Contains(got, "# Skills you hold, opened with "+skills.LoadName) {
+		t.Fatalf("no skills section:\n%s", got)
+	}
+	// The handle, because that is what load_skill takes, and the name when it
+	// says something the handle does not.
+	if !strings.Contains(got, "- pdf-processing (PDF Toolkit)") {
+		t.Errorf("a named skill is not listed with its name:\n%s", got)
+	}
+	// And NOT "csv-tools (csv-tools)", which teaches nothing: a package that
+	// carried no title is called by its handle, and saying it twice is a line
+	// spent on nothing.
+	if strings.Contains(got, "csv-tools (csv-tools)") {
+		t.Errorf("a skill with no title of its own is named twice:\n%s", got)
+	}
+	if !strings.Contains(got, "- csv-tools") {
+		t.Errorf("a skill with no title is not listed at all:\n%s", got)
+	}
+	// The way to find out what one is FOR is named, because the descriptions
+	// are deliberately not here.
+	if !strings.Contains(got, skills.SearchName) {
+		t.Errorf("nothing says how to find out what a skill is for:\n%s", got)
+	}
+
+	// And both calls are SHOWN, not just named. A shape costs a dozen words,
+	// and a model inferring one from an input schema sometimes infers it
+	// wrongly. The load example uses the first handle in this agent's own list,
+	// so it is a call that would actually work.
+	if !strings.Contains(got, skills.LoadName+`(skill: "pdf-processing")`) {
+		t.Errorf("no worked example of opening a skill:\n%s", got)
+	}
+	if !strings.Contains(got, skills.SearchName+`(query: "`) {
+		t.Errorf("no worked example of searching:\n%s", got)
+	}
+}
+
+// The search example in the prompt is the one the tool's own description uses.
+// Two different shapes for one call, shown to the same model in the same turn,
+// is a way to teach it that neither is authoritative.
+func TestThePromptAndTheToolShowTheSameSearchExample(t *testing.T) {
+	got := renderGateway(gatewayPrompt{
+		now:    promptClock,
+		skills: []skillOnHand{{handle: "pdf-processing", name: "PDF Toolkit"}},
+	})
+	const example = "extract totals from a supplier invoice"
+	if !strings.Contains(got, example) {
+		t.Errorf("the prompt does not show the example:\n%s", got)
+	}
+	if !strings.Contains(skills.SearchSchema().Description+string(skills.SearchSchema().InputSchema), example) {
+		t.Error("the tool's own description no longer uses that example, so the two have drifted")
+	}
+}
+
+// The reason the roster exists in this shape. A description is the field the
+// package format designed to be selected on and runs to several hundred
+// characters; twenty of them is kilobytes of every turn.
+func TestTheSkillsSectionCarriesNoDescriptions(t *testing.T) {
+	long := "Use when building, extending or debugging WordPress REST API endpoints and routes, " +
+		"register_rest_route, controller classes, schema validation, permission callbacks."
+	got := renderGateway(gatewayPrompt{
+		now:    promptClock,
+		skills: []skillOnHand{{handle: "wp-rest-api", name: "WP REST API"}},
+	})
+	if strings.Contains(got, long) {
+		t.Error("a description reached the prompt")
+	}
+	// The control for that: it is not merely absent from a prompt that has no
+	// skills section at all.
+	if !strings.Contains(got, "wp-rest-api") {
+		t.Errorf("the skill is not in the prompt either:\n%s", got)
+	}
+}
+
+// An agent gets the same map of its own, because an agent is a full agent.
+func TestAnAgentGetsItsOwnSkillsSection(t *testing.T) {
+	got := renderAgent(agentPrompt{
+		now:    promptClock,
+		role:   "You check invoices.",
+		skills: []skillOnHand{{handle: "pdf-processing", name: "PDF Toolkit"}},
+	})
+	if !strings.Contains(got, "# Skills you hold, opened with "+skills.LoadName) {
+		t.Fatalf("an agent has no skills section:\n%s", got)
+	}
+	if !strings.Contains(got, "- pdf-processing (PDF Toolkit)") {
+		t.Errorf("an agent's skill is not listed:\n%s", got)
+	}
+}
+
+// And neither prompt mentions skills when none is assigned. A section saying
+// "you hold none" is a paragraph sent every turn about nothing.
+func TestNoSkillsMeansNoSkillsSection(t *testing.T) {
+	for what, got := range map[string]string{
+		"the Gateway": renderGateway(gatewayPrompt{now: promptClock}),
+		"an agent":    renderAgent(agentPrompt{now: promptClock, role: "You check invoices."}),
+	} {
+		if strings.Contains(got, "Skills you hold") {
+			t.Errorf("%s is told about skills it does not have:\n%s", what, got)
+		}
+		if strings.Contains(got, skills.LoadName) || strings.Contains(got, skills.SearchName) {
+			t.Errorf("%s is told to use a tool it was not given:\n%s", what, got)
+		}
 	}
 }

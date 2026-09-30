@@ -22,11 +22,11 @@ func TestBrainToolIsScopedThroughTheLoadout(t *testing.T) {
 
 	// Two brains; the agent will be given only one of them.
 	mine := &model.Brain{WorkspaceID: e.ws.ID, Name: "Mine"}
-	if err := e.app.Store.Brains().CreateBrain(ctx, mine); err != nil {
+	if err := e.app.Store.Brains().CreateBrain(ctx, mine, model.Nobody()); err != nil {
 		t.Fatalf("create brain: %v", err)
 	}
 	theirs := &model.Brain{WorkspaceID: e.ws.ID, Name: "Theirs"}
-	if err := e.app.Store.Brains().CreateBrain(ctx, theirs); err != nil {
+	if err := e.app.Store.Brains().CreateBrain(ctx, theirs, model.Nobody()); err != nil {
 		t.Fatalf("create brain: %v", err)
 	}
 
@@ -34,7 +34,7 @@ func TestBrainToolIsScopedThroughTheLoadout(t *testing.T) {
 	theirDoc := brainDoc(t, e, theirs.ID, "Secret", "Hidden", "nope")
 
 	// A loadout for an agent assigned ONLY "Mine".
-	loadout, err := e.app.Loadout(ctx, e.ws.ID, user.ID, "", []string{brain.ReadName}, nil, []int64{mine.ID}, tool.OwnerOfAgent())
+	loadout, err := e.app.Loadout(ctx, e.ws.ID, user.ID, "", []string{brain.ReadName}, nil, []int64{mine.ID}, tool.OwnerOfAgent(), model.Nobody())
 	if err != nil {
 		t.Fatalf("loadout: %v", err)
 	}
@@ -67,15 +67,15 @@ func TestBrainWriteToolThroughTheLoadout(t *testing.T) {
 	user := e.user("nobody@acme.test")
 
 	writable := &model.Brain{WorkspaceID: e.ws.ID, Name: "Notes"}
-	if err := e.app.Store.Brains().CreateBrain(ctx, writable); err != nil {
+	if err := e.app.Store.Brains().CreateBrain(ctx, writable, model.Nobody()); err != nil {
 		t.Fatalf("create brain: %v", err)
 	}
 	locked := &model.Brain{WorkspaceID: e.ws.ID, Name: "Policy", Locked: true}
-	if err := e.app.Store.Brains().CreateBrain(ctx, locked); err != nil {
+	if err := e.app.Store.Brains().CreateBrain(ctx, locked, model.Nobody()); err != nil {
 		t.Fatalf("create brain: %v", err)
 	}
 
-	loadout, err := e.app.Loadout(ctx, e.ws.ID, user.ID, "", []string{brain.WriteName}, nil, []int64{writable.ID, locked.ID}, tool.OwnerOfAgent())
+	loadout, err := e.app.Loadout(ctx, e.ws.ID, user.ID, "", []string{brain.WriteName}, nil, []int64{writable.ID, locked.ID}, tool.OwnerOfAgent(), model.Nobody())
 	if err != nil {
 		t.Fatalf("loadout: %v", err)
 	}
@@ -200,20 +200,89 @@ func documentNamed(t *testing.T, e *env, categoryID int64, title string) int64 {
 // The memory tool is the agent's own memory brain: present only when one is
 // assigned, internal and never approval-gated, and it self-organises (creates
 // its categories, updates by title).
+// What an agent writes is recorded as the AGENT.
+//
+// This is the whole point of threading an actor through the loadout: the tool
+// handler is bound per turn with who is running it, so a document written by an
+// agent says so, and a person's name never ends up on text they did not write.
+func TestWhatAnAgentWritesIsRecordedAsTheAgent(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	user := e.user("watching@acme.test")
+
+	notes := &model.Brain{WorkspaceID: e.ws.ID, Name: "Notes"}
+	if err := e.app.Store.Brains().CreateBrain(ctx, notes, model.Nobody()); err != nil {
+		t.Fatalf("create brain: %v", err)
+	}
+
+	// The turn belongs to a person, and the writes belong to the agent running
+	// in it: whose conversation it was is in the transcript, and putting their
+	// name on the row would credit them for text they never wrote.
+	agent := model.Actor{Name: "Research agent"}
+	loadout, err := e.app.Loadout(ctx, e.ws.ID, user.ID, "",
+		[]string{brain.WriteName}, nil, []int64{notes.ID}, tool.OwnerOfAgent(), agent)
+	if err != nil {
+		t.Fatalf("loadout: %v", err)
+	}
+	h := loadout.Handlers[brain.WriteName]
+	if h == nil {
+		t.Fatal("the write tool did not reach the loadout")
+	}
+
+	if res := callBrain(t, h, e.ws.ID, map[string]any{
+		"operation": "save_category", "brain": "Notes", "name": "Findings",
+	}); res.Err != tool.ErrorNone {
+		t.Fatalf("save the category: %v", res.Err)
+	}
+	if res := callBrain(t, h, e.ws.ID, map[string]any{
+		"operation": "save_document", "brain": "Notes", "category": "Findings",
+		"title": "What I learned", "content": "Something true.",
+	}); res.Err != tool.ErrorNone {
+		t.Fatalf("save the document: %v", res.Err)
+	}
+
+	categories, err := e.app.Store.Brains().Categories(ctx, e.ws.ID, notes.ID)
+	if err != nil {
+		t.Fatalf("list categories: %v", err)
+	}
+	if len(categories) != 1 {
+		t.Fatalf("categories = %d", len(categories))
+	}
+	if categories[0].CreatedByName != "Research agent" || categories[0].CreatedBy != 0 {
+		t.Errorf("the category says %d/%q, want 0/%q",
+			categories[0].CreatedBy, categories[0].CreatedByName, "Research agent")
+	}
+
+	documents, err := e.app.Store.Brains().Documents(ctx, e.ws.ID, categories[0].ID)
+	if err != nil {
+		t.Fatalf("list documents: %v", err)
+	}
+	if len(documents) != 1 {
+		t.Fatalf("documents = %d", len(documents))
+	}
+	if documents[0].CreatedByName != "Research agent" {
+		t.Errorf("the document says %q wrote it", documents[0].CreatedByName)
+	}
+	// And the person whose turn it was is NOT on the row.
+	if documents[0].CreatedBy == user.ID {
+		t.Error("the person in the conversation was recorded as the author")
+	}
+}
+
 func TestMemoryToolServesTheAgentsOwnBrain(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 	user := e.user("nobody@acme.test")
 
 	mem := &model.Brain{WorkspaceID: e.ws.ID, Name: "Field Notes"}
-	if err := e.app.Store.Brains().CreateBrain(ctx, mem); err != nil {
+	if err := e.app.Store.Brains().CreateBrain(ctx, mem, model.Nobody()); err != nil {
 		t.Fatalf("create brain: %v", err)
 	}
 	memID := mem.ID
 	if err := e.app.Store.Agents().Create(ctx, &model.Agent{
 		WorkspaceID: e.ws.ID, Key: model.DefaultAgentKey, Name: "Assistant",
 		Tools: []string{"current_time"}, MemoryBrainID: &memID,
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
 
@@ -274,25 +343,25 @@ func TestTheAssembledPromptShowsTheAgentsBrains(t *testing.T) {
 	user := e.user("nobody@acme.test")
 
 	live := &model.Brain{WorkspaceID: e.ws.ID, Name: "Live Manual"}
-	if err := e.app.Store.Brains().CreateBrain(ctx, live); err != nil {
+	if err := e.app.Store.Brains().CreateBrain(ctx, live, model.Nobody()); err != nil {
 		t.Fatalf("create brain: %v", err)
 	}
-	if err := e.app.Store.Brains().CreateCategory(ctx, e.ws.ID, &model.BrainCategory{BrainID: live.ID, Name: "Setup"}); err != nil {
+	if err := e.app.Store.Brains().CreateCategory(ctx, e.ws.ID, &model.BrainCategory{BrainID: live.ID, Name: "Setup"}, model.Nobody()); err != nil {
 		t.Fatalf("create category: %v", err)
 	}
 	gone := &model.Brain{WorkspaceID: e.ws.ID, Name: "Deleted Manual"}
-	if err := e.app.Store.Brains().CreateBrain(ctx, gone); err != nil {
+	if err := e.app.Store.Brains().CreateBrain(ctx, gone, model.Nobody()); err != nil {
 		t.Fatalf("create brain: %v", err)
 	}
 	mem := &model.Brain{WorkspaceID: e.ws.ID, Name: "My Memory"}
-	if err := e.app.Store.Brains().CreateBrain(ctx, mem); err != nil {
+	if err := e.app.Store.Brains().CreateBrain(ctx, mem, model.Nobody()); err != nil {
 		t.Fatalf("create brain: %v", err)
 	}
 	memID := mem.ID
 	if err := e.app.Store.Agents().Create(ctx, &model.Agent{
 		WorkspaceID: e.ws.ID, Key: model.DefaultAgentKey, Name: "Assistant",
 		Tools: []string{"current_time"}, Brains: []int64{live.ID, gone.ID}, MemoryBrainID: &memID,
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
 	// Delete an assigned brain: it must not appear in the prompt.
@@ -328,7 +397,7 @@ func TestMemoryToolAbsentWithoutAMemoryBrain(t *testing.T) {
 	if err := e.app.Store.Agents().Create(ctx, &model.Agent{
 		WorkspaceID: e.ws.ID, Key: model.DefaultAgentKey, Name: "Assistant",
 		Tools: []string{"current_time"},
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
 	_, loadout, err := e.app.Resolve(ctx, app.ProfileRequest{
@@ -346,11 +415,11 @@ func brainDoc(t *testing.T, e *env, brainID int64, category, title, content stri
 	t.Helper()
 	ctx := context.Background()
 	cat := &model.BrainCategory{BrainID: brainID, Name: category}
-	if err := e.app.Store.Brains().CreateCategory(ctx, e.ws.ID, cat); err != nil {
+	if err := e.app.Store.Brains().CreateCategory(ctx, e.ws.ID, cat, model.Nobody()); err != nil {
 		t.Fatalf("create category: %v", err)
 	}
 	doc := &model.BrainDocument{CategoryID: cat.ID, Title: title, Content: content}
-	if err := e.app.Store.Brains().SaveDocument(ctx, e.ws.ID, doc, nil); err != nil {
+	if err := e.app.Store.Brains().SaveDocument(ctx, e.ws.ID, doc, nil, model.Nobody()); err != nil {
 		t.Fatalf("save document: %v", err)
 	}
 	return doc.ID

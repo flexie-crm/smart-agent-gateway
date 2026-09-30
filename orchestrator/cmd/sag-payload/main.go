@@ -83,7 +83,13 @@ func run(workspaceID, userID int64, deviceID string, modelID int64, prompt strin
 	if err != nil {
 		return fmt.Errorf("open the database: %w", err)
 	}
-	defer st.Close()
+	defer func() {
+		// Said, not swallowed: this is a tool somebody runs and reads, and a
+		// store that would not close is worth a line on the way out.
+		if err := st.Close(); err != nil {
+			fmt.Fprintln(os.Stderr, "closing the database:", err)
+		}
+	}()
 
 	a, err := app.New(cfg, log, st)
 	if err != nil {
@@ -193,7 +199,11 @@ func theBytes(ctx context.Context, resolved *provider.Resolved, req provider.Gen
 		}
 		// Enough of an answer that the adapter does not report a failure.
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		if _, err := fmt.Fprint(w, "data: [DONE]\n\n"); err != nil {
+			// The client of this server is the adapter in this same process, so
+			// a write that fails means the thing being measured has gone.
+			fmt.Fprintln(os.Stderr, "writing the end of the stream:", err)
+		}
 	}))
 	defer server.Close()
 

@@ -13,6 +13,8 @@ const (
 	KindApprovalPending  = "approval.pending"
 	KindApprovalResolved = "approval.resolved"
 	KindPresenceChanged  = "presence.changed"
+	KindAgentStepChanged = "agent.step_changed"
+	KindFleetChanged     = "fleet.changed"
 )
 
 // WorkspaceEvent is an event that belongs to a workspace. Every event here is
@@ -55,3 +57,32 @@ type PresenceChanged struct{ WorkspaceID int64 }
 
 func (PresenceChanged) Kind() string       { return KindPresenceChanged }
 func (e PresenceChanged) Workspace() int64 { return e.WorkspaceID }
+
+// AgentStepChanged announces that one of a detached agent's steps was written,
+// or that one of its tool calls finished. Somebody watching that agent is shown
+// the step as it now stands.
+type AgentStepChanged struct {
+	WorkspaceID  int64
+	UserID       int64
+	SessionID    int64
+	DelegationID int64
+	StepID       int64
+	// FleetID is the batch the agent is one of, zero for one on its own: a
+	// member's step also moves what its batch has spent.
+	FleetID int64
+}
+
+func (AgentStepChanged) Kind() string       { return KindAgentStepChanged }
+func (e AgentStepChanged) Workspace() int64 { return e.WorkspaceID }
+
+// FleetChanged announces that a batch of agents moved: one started, finished,
+// stopped to ask, carried on, or the batch was stopped. Somebody watching the
+// batch is shown where each of its agents now stands.
+type FleetChanged struct {
+	WorkspaceID int64
+	UserID      int64
+	FleetID     int64
+}
+
+func (FleetChanged) Kind() string       { return KindFleetChanged }
+func (e FleetChanged) Workspace() int64 { return e.WorkspaceID }

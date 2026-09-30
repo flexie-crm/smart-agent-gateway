@@ -15,7 +15,7 @@ const VENDORS = [
 const KINDS = [
   { key: 'anthropic', name: 'Anthropic', requires_base_url: false },
   { key: 'openai', name: 'OpenAI', requires_base_url: false },
-  { key: 'openai-compatible', name: 'Ollama', requires_base_url: true },
+  { key: 'openai-compatible', name: 'OpenAI compatible', requires_base_url: true },
   { key: 'azure-openai', name: 'Azure OpenAI', requires_base_url: true },
 ]
 
@@ -50,7 +50,7 @@ async function openForm() {
 function vendorSelect(dialog: HTMLElement): HTMLSelectElement {
   const select = within(dialog)
     .getAllByRole('combobox')
-    .find((box) => [...box.querySelectorAll('option')].some((o) => o.textContent === 'Ollama'))
+    .find((box) => [...box.querySelectorAll('option')].some((o) => o.textContent === 'OpenAI compatible'))
   if (!select) throw new Error('vendor select not found')
   return select as HTMLSelectElement
 }
@@ -89,7 +89,7 @@ describe('the vendor form', () => {
     // OpenAI is not configured, so it is offered.
     expect(within(dialog).getByRole('option', { name: 'OpenAI' })).toBeInTheDocument()
     // Local exists too, but a second self-hosted server is a real thing.
-    expect(within(dialog).getByRole('option', { name: 'Ollama' })).toBeInTheDocument()
+    expect(within(dialog).getByRole('option', { name: 'OpenAI compatible' })).toBeInTheDocument()
   })
 
   it('asks for an endpoint only for a vendor defined by where it runs', async () => {

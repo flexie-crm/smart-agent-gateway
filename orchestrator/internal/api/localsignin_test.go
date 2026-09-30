@@ -250,13 +250,6 @@ func TestThePostureTellsThePagesWhatToShow(t *testing.T) {
 	if !p.SingleUser || !p.LocalSignIn || !p.SingleMachine {
 		t.Fatalf("a desktop reported %+v", p)
 	}
-	// Local models are the one capability a desktop does not always have: it can
-	// only offer them if this build carries an engine. Asserted against the same
-	// constant the server reads, so the test states the rule rather than the
-	// answer on whichever platform it happens to run on.
-	if p.LocalModels != config.EngineBundled {
-		t.Fatalf("a desktop reported local_models=%v with EngineBundled=%v", p.LocalModels, config.EngineBundled)
-	}
 
 	server := newTestEnv(t)
 	rec = server.do(http.MethodGet, "/v1/meta", "", nil)
@@ -270,12 +263,6 @@ func TestThePostureTellsThePagesWhatToShow(t *testing.T) {
 	// password. Getting this backwards would hide the login form on a server.
 	if p.SingleUser || p.LocalSignIn || p.SingleMachine {
 		t.Fatalf("a server deployment reported %+v", p)
-	}
-	// And it always has local models to talk about, on every platform, because
-	// machines join a deployment over the network rather than shipping inside
-	// it. A server built on Windows must not hide its own fleet.
-	if !p.LocalModels {
-		t.Fatalf("a server deployment reported local_models=false, but machines join it over the network")
 	}
 }
 

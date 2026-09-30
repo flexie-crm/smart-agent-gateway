@@ -13,6 +13,8 @@
  * page that uses it, never here.
  */
 import { CheckboxField } from '@/components/ui/checkbox'
+import { PairRows } from '@/components/ui/pairs'
+import { CopyLine } from '@/components/ui/copy-line'
 import { Input } from '@/components/ui/input'
 import { Field } from '@/components/ui/modal'
 import { NativeSelect } from '@/components/ui/native-select'
@@ -132,6 +134,16 @@ export function SettingField({
   // A checkbox is its own label: the words go beside the box, not above an
   // empty one. Its value travels as a string like every other declared field,
   // because the form is one shape for all of them.
+  // A value the deployment knows and the reader has to paste somewhere else.
+  // Read-only and collected into nothing: it is not a setting, it is a fact
+  // about this installation shown where somebody needs it.
+  if (field.type === 'callback') {
+    return (
+      <Field label={field.label} hint={field.help}>
+        <CopyLine value={field.default ?? ''} />
+      </Field>
+    )
+  }
   if (field.type === 'checkbox') {
     return (
       <CheckboxField
@@ -154,6 +166,8 @@ export function SettingField({
         </NativeSelect>
       ) : field.type === 'textarea' ? (
         <Textarea value={value} onChange={(e) => onChange(e.target.value)} rows={3} />
+      ) : field.type === 'pairs' ? (
+        <PairRows value={value} onChange={onChange} />
       ) : (
         <Input
           type={field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : 'text'}

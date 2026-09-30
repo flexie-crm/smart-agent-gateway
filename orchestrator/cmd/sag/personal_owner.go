@@ -5,8 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"flexie.io/sag/internal/tool"
-	"flexie.io/sag/internal/tools/machine"
 	"fmt"
 	"net"
 	"os"
@@ -21,6 +19,8 @@ import (
 	"flexie.io/sag/internal/config"
 	"flexie.io/sag/internal/model"
 	"flexie.io/sag/internal/store"
+	"flexie.io/sag/internal/tool"
+	"flexie.io/sag/internal/tools/machine"
 )
 
 // The identity a desktop installation is seeded with. One person, one
@@ -216,7 +216,7 @@ func seedPersonalOwner(ctx context.Context, cfg *config.Config, st store.Store, 
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		ws = &model.Workspace{Slug: personalWorkspaceSlug, Name: personalWorkspaceName}
-		if err := st.Workspaces().Create(ctx, ws); err != nil {
+		if err := st.Workspaces().Create(ctx, ws, model.Nobody()); err != nil {
 			return fmt.Errorf("create the workspace: %w", err)
 		}
 		a, err := app.New(cfg, zerolog.Nop(), st)
@@ -242,7 +242,7 @@ func seedPersonalOwner(ctx context.Context, cfg *config.Config, st store.Store, 
 		return fmt.Errorf("hash the password: %w", err)
 	}
 	user := &model.User{Email: personalOwnerEmail, Name: personalOwnerName, PasswordHash: hash}
-	if err := st.Users().Create(ctx, user); err != nil {
+	if err := st.Users().Create(ctx, user, model.Nobody()); err != nil {
 		return fmt.Errorf("create the owner: %w", err)
 	}
 	if err := st.Workspaces().SetMembers(ctx, user.ID, []int64{ws.ID}); err != nil {
@@ -301,7 +301,7 @@ func seedWorkingMemory(ctx context.Context, st store.Store, workspaceID int64) (
 		Slug:        workingMemorySlug,
 		Description: "What the assistant has learned and should remember between conversations.",
 	}
-	if err := st.Brains().CreateBrain(ctx, brain); err != nil {
+	if err := st.Brains().CreateBrain(ctx, brain, model.Actor{Name: model.DefaultAgentName}); err != nil {
 		return 0, fmt.Errorf("create the working memory: %w", err)
 	}
 	return brain.ID, nil
@@ -344,7 +344,8 @@ func seedGateway(ctx context.Context, st store.Store, workspaceID, brainID int64
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return fmt.Errorf("look for the Gateway: %w", err)
 	}
-	if err := st.Agents().Create(ctx, newGatewayAgent(workspaceID, brainID, builtins)); err != nil {
+	if err := st.Agents().Create(ctx, newGatewayAgent(workspaceID, brainID, builtins),
+		model.Actor{Name: model.DefaultAgentName}); err != nil {
 		return fmt.Errorf("create the Gateway: %w", err)
 	}
 	return nil

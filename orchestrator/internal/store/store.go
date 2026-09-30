@@ -58,6 +58,7 @@ type Store interface {
 	Runs() RunStore
 	Stats() StatsStore
 	Brains() BrainStore
+	Skills() SkillStore
 	Tools() ToolStore
 	Agents() AgentConfigStore
 	Workflows() WorkflowStore
@@ -149,13 +150,17 @@ type JobStore interface {
 type BrainStore interface {
 	Brains(ctx context.Context, workspaceID int64) ([]*model.Brain, error)
 	Brain(ctx context.Context, workspaceID, id int64) (*model.Brain, error)
-	CreateBrain(ctx context.Context, b *model.Brain) error
-	UpdateBrain(ctx context.Context, b *model.Brain) error
+	// `by` is who is writing, and it is recorded on the row: a brain, a
+	// category and a document can each be created by a person OR by an agent
+	// (brain_write is a real tool, KB/32), so the answer to "who wrote this" has
+	// two kinds and the row has to carry both. See model.Actor.
+	CreateBrain(ctx context.Context, b *model.Brain, by model.Actor) error
+	UpdateBrain(ctx context.Context, b *model.Brain, by model.Actor) error
 	DeleteBrain(ctx context.Context, workspaceID, id int64) error
 
 	Categories(ctx context.Context, workspaceID, brainID int64) ([]*model.BrainCategory, error)
-	CreateCategory(ctx context.Context, workspaceID int64, c *model.BrainCategory) error
-	UpdateCategory(ctx context.Context, workspaceID int64, c *model.BrainCategory) error
+	CreateCategory(ctx context.Context, workspaceID int64, c *model.BrainCategory, by model.Actor) error
+	UpdateCategory(ctx context.Context, workspaceID int64, c *model.BrainCategory, by model.Actor) error
 	DeleteCategory(ctx context.Context, workspaceID, id int64) error
 
 	// Documents lists a category's documents WITHOUT their content: a category may
@@ -169,7 +174,9 @@ type BrainStore interface {
 	DocumentByTitle(ctx context.Context, workspaceID, categoryID int64, title string) (*model.BrainDocument, error)
 	// SaveDocument writes a document and its links atomically. An id of zero
 	// creates. The links are made symmetric, and confined to the same brain.
-	SaveDocument(ctx context.Context, workspaceID int64, d *model.BrainDocument, related []int64) error
+	// An edit records who made it and leaves who WROTE it alone: that is the one
+	// fact an edit cannot change.
+	SaveDocument(ctx context.Context, workspaceID int64, d *model.BrainDocument, related []int64, by model.Actor) error
 	DeleteDocument(ctx context.Context, workspaceID, id int64) error
 
 	// Search finds documents by relevance, WITHIN the brains it is given. That
@@ -182,6 +189,129 @@ type BrainStore interface {
 	// same transaction as the agent's tools), so there is one writer of
 	// agent_brains and this is only a read.
 	AgentBrains(ctx context.Context, workspaceID, agentID int64) ([]*model.Brain, error)
+}
+
+// SkillStore holds imported skills: a procedure in the Agent Skills package
+// format, kept whole, and versioned.
+//
+// Two invariants live in here rather than in a document, because both are the
+// kind of thing that rots the moment it is only written down:
+//
+//   - a version is IMMUTABLE. Nothing here updates a version's files or its
+//     sections. Import adds a version; it never edits one.
+//   - one version is active, and `ai_skills.active_version_id` and that
+//     version's `status` are written TOGETHER, in one transaction, by the one
+//     unexported helper both Import and Activate call. Nothing else may set
+//     either, which is what stops the pointer and the status disagreeing.
+type SkillStore interface {
+	// Import writes an arriving package as a new version and makes it the
+	// active one.
+	//
+	// It is idempotent on the bytes: a package whose hash this skill already
+	// holds is that version, so uploading the same file twice returns what is
+	// already there rather than growing a version history out of a double
+	// click. An updated package becomes version n+1 with the version it
+	// superseded as its parent, and the active version is NEVER overwritten.
+	//
+	// A skill that already exists keeps its own status: re-importing does not
+	// re-enable a skill an administrator switched off.
+	//
+	// The bool says whether a version was actually WRITTEN. It is the difference
+	// between "imported as version 3" and "that is already version 2", and the
+	// caller cannot work it out from the skill alone: both answers carry a
+	// perfectly good active version.
+	//
+	// `by` is who is importing, and it is written twice: onto the version, as
+	// who imported THAT package, and onto the skill, as who last touched it. Who
+	// CREATED the skill is written the first time and never again.
+	Import(ctx context.Context, workspaceID int64, pkg *model.SkillPackage, by model.Actor) (*model.Skill, bool, error)
+
+	// Skills lists a workspace's skills with the active version and the counts
+	// a list needs to be worth reading.
+	Skills(ctx context.Context, workspaceID int64) ([]*model.Skill, error)
+	Skill(ctx context.Context, workspaceID, id int64) (*model.Skill, error)
+
+	// Search finds skills by handle, title and description, most relevant
+	// first. A query below the index's token size matches NOTHING rather than
+	// everything, which is what an empty full-text match would return.
+	Search(ctx context.Context, workspaceID int64, query string, limit int) ([]*model.Skill, error)
+
+	// Versions is the history, newest first: what was imported, when, and which
+	// one is live.
+	Versions(ctx context.Context, workspaceID, skillID int64) ([]*model.SkillVersion, error)
+
+	// Files lists a version's files WITHOUT their content. A package may carry a
+	// twenty megabyte template, and a file list is a tree somebody is reading.
+	Files(ctx context.Context, workspaceID, versionID int64) ([]*model.SkillFile, error)
+	// File is one file, with its content: text in Text, bytes in Bytes.
+	File(ctx context.Context, workspaceID, fileID int64) (*model.SkillFile, error)
+
+	// Sections lists what a version's text files were parsed into, WITHOUT the
+	// bodies: heading, path, line range and size. The place to read a passage is
+	// the file it came from, at the lines it names.
+	Sections(ctx context.Context, workspaceID, versionID int64) ([]*model.SkillSection, error)
+
+	// Update is everything a person decides about a skill: its title, its
+	// description, whether it is switched on, and WHICH VERSION IS LIVE.
+	//
+	// One call, because they are one form. A form that saves in several writes
+	// can half save, and here the halves are worse than usual: a rollback that
+	// lands while the rename beside it does not leaves a skill running a version
+	// nobody asked for, under a name nobody chose.
+	//
+	// Naming the version that is already live changes nothing, so a save that
+	// was only a rename is not a rollback. Naming another one IS the rollback:
+	// there is no other way back to a version than forward onto it again.
+	//
+	// It cannot touch the handle (the package's, and what the agent addresses
+	// the skill by), the files of any version, or any version's own words.
+	// Draft writes an edited package as a new version and does NOT make it
+	// live. It is the other half of Import: the same row, the same files, the
+	// same passages, written by the same code, with the activation left out so
+	// that somebody decides.
+	//
+	// `from` is the version the edit was made against, which becomes the new
+	// version's parent. It need not be the live one: a person may open an older
+	// version and edit that.
+	//
+	// Idempotent on the bytes, like Import. A draft whose package hash this
+	// skill already holds IS that version, and the bool says whether anything
+	// was written, which is the difference between "saved as version 4" and
+	// "that is what version 2 already says".
+	Draft(ctx context.Context, workspaceID, skillID, from int64, pkg *model.SkillPackage,
+		summary string, by model.Actor) (*model.SkillVersion, bool, error)
+
+	// Discard turns a draft down. Only a draft: an active version is what the
+	// agent is using, and an archived one is the history a rollback walks, so
+	// neither is something to throw away from here.
+	Discard(ctx context.Context, workspaceID, skillID, versionID int64, by model.Actor) error
+
+	Update(ctx context.Context, workspaceID, id int64, in SkillUpdate, by model.Actor) (*model.Skill, error)
+
+	DeleteSkill(ctx context.Context, workspaceID, id int64) error
+}
+
+// SkillUpdate is what an administrator may change about a skill.
+//
+// Every field is written as given, with no "leave this one alone" case: it is
+// one form, it arrives whole, and a partial update is how a field somebody
+// cleared comes back on the next save.
+type SkillUpdate struct {
+	// Title is the name for a person, and may be empty: a skill that carried no
+	// title in its package is called by its handle, and clearing the title is
+	// how somebody goes back to that.
+	Title       string
+	Description string
+	Status      string
+	// VersionID is which version should be live once this is saved. Zero means
+	// "leave it alone", which is what a caller that has no business choosing
+	// sends; any other value must be a version of THIS skill.
+	//
+	// The title and the description here win over it. Making a version live
+	// normally brings its words with it, but a person who typed a name into the
+	// same form has said what they want the thing called, and a save must not
+	// answer them with the package\'s opinion.
+	VersionID int64
 }
 
 // StatsStore answers what a workspace has done. It counts rows rather than
@@ -221,16 +351,26 @@ type ToolStore interface {
 	List(ctx context.Context, workspaceID int64) ([]*model.Tool, error)
 	GetByID(ctx context.Context, workspaceID, id int64) (*model.Tool, error)
 	// Update writes only the admin-owned columns, and replaces the grants.
-	Update(ctx context.Context, t *model.Tool) error
+	Update(ctx context.Context, t *model.Tool, by model.Actor) error
 
 	// CreateCustom inserts a custom tool (kind='custom'): a self-describing row
 	// (name, friendly name, description, input schema, risk) plus its template
 	// and its config JSON (with secrets already sealed). It is not reconciled by
 	// Sync, which only ever touches the built-in tools it is given.
-	CreateCustom(ctx context.Context, t *model.Tool) error
+	CreateCustom(ctx context.Context, t *model.Tool, by model.Actor) error
 	// UpdateCustom rewrites a custom tool's own columns (label, description,
 	// input schema, risk, config), leaving status and grants to Update.
-	UpdateCustom(ctx context.Context, t *model.Tool) error
+	UpdateCustom(ctx context.Context, t *model.Tool, by model.Actor) error
+	// SetConfig replaces a custom tool's config and nothing else: no
+	// presentation, no schema, and no author stamp.
+	//
+	// It exists for the one part of a config the FORM does not own, which today
+	// is the sign-in a person gave an API tool. That arrives from a service
+	// mid-flight and rotates on its own, so a handler has to write it back, and
+	// writing it through UpdateCustom would mean rebuilding the whole row from
+	// an edit nobody made and stamping a person as having changed a tool they
+	// never opened.
+	SetConfig(ctx context.Context, workspaceID, toolID int64, config json.RawMessage) error
 	// Delete removes a custom tool row. It refuses a non-custom tool, so a
 	// built-in or a projected MCP tool can never be deleted this way.
 	Delete(ctx context.Context, workspaceID, id int64) error
@@ -256,13 +396,13 @@ type ToolStore interface {
 // tool servers a workspace consumes. All secrets are sealed before they get
 // here and are never returned in plaintext by any query.
 type MCPServerStore interface {
-	Create(ctx context.Context, m *model.MCPServer) error
+	Create(ctx context.Context, m *model.MCPServer, by model.Actor) error
 	GetByID(ctx context.Context, workspaceID, id int64) (*model.MCPServer, error)
 	List(ctx context.Context, workspaceID int64) ([]*model.MCPServer, error)
 	// Update writes the admin-owned columns; a nil secret leaves the stored
 	// one alone. The tool prefix is immutable: grants hang off the names
 	// under it.
-	Update(ctx context.Context, m *model.MCPServer) error
+	Update(ctx context.Context, m *model.MCPServer, by model.Actor) error
 	// Delete removes the connection; the cascades take its projected tools.
 	Delete(ctx context.Context, workspaceID, id int64) error
 
@@ -282,41 +422,47 @@ type MCPServerStore interface {
 	// ErrNotFound means unconfigured, which exposes the whole catalog.
 	GetSettings(ctx context.Context, workspaceID int64) (*model.MCPSettings, error)
 	// PutSettings writes the configuration wholesale (upsert).
-	PutSettings(ctx context.Context, s *model.MCPSettings) error
+	PutSettings(ctx context.Context, m *model.MCPSettings, by model.Actor) error
 }
 
 // AgentConfigStore holds configured agents, including the workspace's default
 // package (the agent whose key is model.DefaultAgentKey).
 type AgentConfigStore interface {
-	Create(ctx context.Context, a *model.Agent) error
+	// `by` is who configured it. An agent is set up by a person today, and an
+	// agent that writes its own sub-agents is the shape this is heading for
+	// (KB/27), so the row records who rather than assuming.
+	Create(ctx context.Context, a *model.Agent, by model.Actor) error
 	GetByID(ctx context.Context, workspaceID, id int64) (*model.Agent, error)
 	// GetByKey returns store.ErrNotFound when the workspace has not configured
 	// that agent. The default package is optional: its absence is a normal
 	// state, not an error to log.
 	GetByKey(ctx context.Context, workspaceID int64, key string) (*model.Agent, error)
 	List(ctx context.Context, workspaceID int64) ([]*model.Agent, error)
-	Update(ctx context.Context, a *model.Agent) error
+	Update(ctx context.Context, a *model.Agent, by model.Actor) error
 	Delete(ctx context.Context, workspaceID, id int64) error
 }
 
 // WorkflowStore holds workflows, their immutable versions, and the conditions
 // that decide who gets them.
 type WorkflowStore interface {
-	Create(ctx context.Context, w *model.Workflow) error
+	// `by` is who is making or changing it, recorded on the row. It is the
+	// store's to write rather than the caller's to set on the entity: a request
+	// body cannot be allowed to claim to be somebody.
+	Create(ctx context.Context, w *model.Workflow, by model.Actor) error
 	GetByID(ctx context.Context, workspaceID, id int64) (*model.Workflow, error)
 	List(ctx context.Context, workspaceID int64) ([]*model.Workflow, error)
-	Update(ctx context.Context, w *model.Workflow) error
+	Update(ctx context.Context, w *model.Workflow, by model.Actor) error
 	Delete(ctx context.Context, workspaceID, id int64) error
 
 	// CreateVersion appends a version. The version number is assigned here,
 	// under the workflow's own lock, so two administrators saving at once
 	// cannot produce two version 4s.
-	CreateVersion(ctx context.Context, workspaceID int64, v *model.WorkflowVersion) error
+	CreateVersion(ctx context.Context, workspaceID int64, v *model.WorkflowVersion, by model.Actor) error
 	ListVersions(ctx context.Context, workspaceID, workflowID int64) ([]*model.WorkflowVersion, error)
 	// Publish makes one version the live one and demotes the previous, in a
 	// single transaction: there is never a moment with two published versions,
 	// nor a moment with none.
-	Publish(ctx context.Context, workspaceID, workflowID, versionID int64) error
+	Publish(ctx context.Context, workspaceID, workflowID, versionID int64, by model.Actor) error
 
 	// SetAssignments replaces the workflow's conditions wholesale. Editing
 	// them one row at a time would let a workspace pass through a state the
@@ -383,11 +529,32 @@ type AgentStore interface {
 	// they cannot disagree about what happened.
 	Transcript(ctx context.Context, sessionID int64) ([]*model.AgentStep, error)
 	// TranscriptPage is the same conversation as a PERSON reads it: the newest
-	// rows, and older ones when they ask. before is the seq to read back from
-	// (zero for the newest), rows is the budget counted in messages and tool
-	// calls together. It answers whether there is more behind what it returned.
+	// rows, and older ones when they ask. Its own steps only, never an agent's,
+	// which a person is not shown and which must not use up a page. before is
+	// the seq to read back from (zero for the newest), rows is the budget
+	// counted in messages and tool calls together. It answers whether there is
+	// more behind what it returned.
 	TranscriptPage(ctx context.Context, sessionID int64, before, rows int) ([]*model.AgentStep, bool, error)
+	// DelegationSteps is one agent run's own steps, in order: what it was asked
+	// and everything it did, and nothing of the Gateway's or another agent's.
+	DelegationSteps(ctx context.Context, sessionID, delegationID int64) ([]*model.AgentStep, error)
+	// Step is one step of a conversation by its row id, with its tool calls, or
+	// ErrNotFound. Scoped by the conversation, like every read here.
+	Step(ctx context.Context, sessionID, stepID int64) (*model.AgentStep, error)
 	NextSeq(ctx context.Context, sessionID int64) (int, error)
+
+	// SaveCompaction keeps a summary of a conversation so far. It never replaces
+	// an earlier one: the newest is the one read, and the rest are the record of
+	// what the model was told.
+	SaveCompaction(ctx context.Context, c *model.Compaction) error
+	// LatestCompaction is the newest summary of a conversation, or ErrNotFound
+	// when it has never been compacted.
+	LatestCompaction(ctx context.Context, sessionID int64) (*model.Compaction, error)
+	// SetContextUse records how full a conversation is, replacing what was
+	// there: only the latest measurement means anything.
+	SetContextUse(ctx context.Context, sessionID int64, use model.ContextUse) error
+	// ContextUse is the latest measurement, or the zero value when there is none.
+	ContextUse(ctx context.Context, sessionID int64) (model.ContextUse, error)
 
 	RecordModelCall(ctx context.Context, c *model.ModelCall) error
 
@@ -408,6 +575,16 @@ type AgentStore interface {
 	// several background agents parking at once are shown one card at a time
 	// (KB/27); the check and insert share a transaction so none jumps the queue.
 	CreateParkSequenced(ctx context.Context, p *model.ParkSnapshot) (bool, error)
+	// CountWaitingParks is how many cards a conversation still has waiting, live
+	// and queued together.
+	CountWaitingParks(ctx context.Context, sessionID int64) (int, error)
+
+	// PassOverPark puts a live card that cannot be shown back in the queue and
+	// makes the next one live, reporting whether there was one. It is how a
+	// card whose tool cannot be resolved stops blocking every later card in
+	// its conversation.
+	PassOverPark(ctx context.Context, parkID int64) (bool, error)
+
 	// ReleaseNextQueuedPark promotes a session's oldest queued park to live, so
 	// answering one card surfaces the next. ErrNotFound when the queue is empty.
 	ReleaseNextQueuedPark(ctx context.Context, sessionID int64) (*model.ParkSnapshot, error)
@@ -441,11 +618,6 @@ type AgentStore interface {
 	// waiting on, so a reloaded conversation can show its card again. ErrNotFound
 	// when nothing is pending.
 	PendingPark(ctx context.Context, sessionID int64) (*model.ParkSnapshot, error)
-	// RotateParkToken replaces a snapshot's token hash. A reload cannot recover
-	// the original token (only its hash was ever stored), so it mints a fresh one
-	// and rebinds the card to it, keeping the "a leaked database cannot approve"
-	// invariant intact.
-	RotateParkToken(ctx context.Context, parkID int64, tokenHash string) error
 
 	// CreateFleet records a batch the Gateway asked for in one call. Its members
 	// are ordinary delegations carrying its id.
@@ -536,7 +708,7 @@ type AgentStore interface {
 // VendorStore persists provider accounts. Credentials arrive already sealed
 // by the app layer: no plaintext secret ever reaches SQL.
 type VendorStore interface {
-	Create(ctx context.Context, v *model.AIVendor) error
+	Create(ctx context.Context, v *model.AIVendor, by model.Actor) error
 	GetByID(ctx context.Context, workspaceID, id int64) (*model.AIVendor, error)
 	// ByNodeID finds this workspace's pointer at a machine, if it has one. A
 	// workspace given models from a machine has exactly one (KB/35), whatever
@@ -545,8 +717,8 @@ type VendorStore interface {
 	List(ctx context.Context, workspaceID int64) ([]*model.AIVendor, error)
 	// Update writes credentials only when v.Credentials is non-nil, so
 	// editing a name cannot blank the stored secret.
-	Update(ctx context.Context, v *model.AIVendor) error
-	ClearCredentials(ctx context.Context, workspaceID, id int64) error
+	Update(ctx context.Context, v *model.AIVendor, by model.Actor) error
+	ClearCredentials(ctx context.Context, workspaceID, id int64, by model.Actor) error
 	// Delete returns ErrInUse while models still reference the vendor.
 	Delete(ctx context.Context, workspaceID, id int64) error
 }
@@ -576,8 +748,8 @@ type NodeStore interface {
 	// ByNodeID finds the machine that minted this id, which is how one that
 	// comes back is recognised as the same machine rather than added twice.
 	ByNodeID(ctx context.Context, nodeID string) (*model.InferenceNode, error)
-	Create(ctx context.Context, n *model.InferenceNode) error
-	Update(ctx context.Context, n *model.InferenceNode) error
+	Create(ctx context.Context, n *model.InferenceNode, by model.Actor) error
+	Update(ctx context.Context, n *model.InferenceNode, by model.Actor) error
 	// Delete removes a machine, and with it every vendor row pointing at it and
 	// every model routing through those. That is the truth: the weights were on
 	// that machine.
@@ -674,19 +846,25 @@ type ModelLibraryStore interface {
 }
 
 type AIModelStore interface {
-	Create(ctx context.Context, m *model.AIModel) error
+	Create(ctx context.Context, m *model.AIModel, by model.Actor) error
 	GetByID(ctx context.Context, workspaceID, id int64) (*model.AIModel, error)
 	List(ctx context.Context, workspaceID int64) ([]*model.AIModel, error)
-	Update(ctx context.Context, m *model.AIModel) error
+	Update(ctx context.Context, m *model.AIModel, by model.Actor) error
 	Delete(ctx context.Context, workspaceID, id int64) error
+	// MeasureTokens adds a call's characters sent and the tokens the vendor
+	// reported to the model's running totals, keeping `keep` of what was there.
+	MeasureTokens(ctx context.Context, id int64, chars, tokens int64, keep float64) error
 }
 
 type WorkspaceStore interface {
-	Create(ctx context.Context, w *model.Workspace) error
+	// `by` is who is doing it, recorded on the row (model.Actor). The store
+	// writes it from the authenticated person rather than the caller setting it
+	// on the entity, so a request body can never claim to be somebody.
+	Create(ctx context.Context, w *model.Workspace, by model.Actor) error
 	GetByID(ctx context.Context, id int64) (*model.Workspace, error)
 	GetBySlug(ctx context.Context, slug string) (*model.Workspace, error)
 	List(ctx context.Context) ([]*model.Workspace, error)
-	Update(ctx context.Context, w *model.Workspace) error
+	Update(ctx context.Context, w *model.Workspace, by model.Actor) error
 	// Delete removes the workspace and, through the database's own cascades,
 	// everything scoped to it: memberships, groups, roles, vendors, models,
 	// agents, workflows, brains, and every conversation.
@@ -710,14 +888,14 @@ type WorkspaceStore interface {
 }
 
 type UserStore interface {
-	Create(ctx context.Context, u *model.User) error
+	Create(ctx context.Context, u *model.User, by model.Actor) error
 	// GetByEmail takes no workspace: an email addresses a person in the
 	// tenant, which is the identity they think they have.
 	GetByEmail(ctx context.Context, email string) (*model.User, error)
 	GetByID(ctx context.Context, id int64) (*model.User, error)
 	List(ctx context.Context) ([]*model.User, error)
-	Update(ctx context.Context, u *model.User) error
-	UpdatePassword(ctx context.Context, userID int64, passwordHash string) error
+	Update(ctx context.Context, u *model.User, by model.Actor) error
+	UpdatePassword(ctx context.Context, userID int64, passwordHash string, by model.Actor) error
 	Delete(ctx context.Context, userID int64) error
 	// EffectivePermissions resolves user -> groups -> roles -> permissions
 	// and returns the distinct set. It is the single source of truth for
@@ -745,10 +923,10 @@ type MemoryStore interface {
 }
 
 type GroupStore interface {
-	Create(ctx context.Context, g *model.Group) error
+	Create(ctx context.Context, g *model.Group, by model.Actor) error
 	GetByID(ctx context.Context, workspaceID, id int64) (*model.Group, error)
 	List(ctx context.Context, workspaceID int64) ([]*model.Group, error)
-	Update(ctx context.Context, g *model.Group) error
+	Update(ctx context.Context, g *model.Group, by model.Actor) error
 	Delete(ctx context.Context, workspaceID, id int64) error
 
 	AddMember(ctx context.Context, groupID, userID int64) error
@@ -767,11 +945,11 @@ type GroupStore interface {
 
 type RoleStore interface {
 	// Create persists the role and its permissions atomically.
-	Create(ctx context.Context, r *model.Role) error
+	Create(ctx context.Context, r *model.Role, by model.Actor) error
 	GetByID(ctx context.Context, workspaceID, id int64) (*model.Role, error)
 	List(ctx context.Context, workspaceID int64) ([]*model.Role, error)
 	// Update replaces the role name and its full permission set.
-	Update(ctx context.Context, r *model.Role) error
+	Update(ctx context.Context, r *model.Role, by model.Actor) error
 	Delete(ctx context.Context, workspaceID, id int64) error
 }
 
@@ -797,7 +975,7 @@ type SessionStore interface {
 }
 
 type OAuthStore interface {
-	CreateClient(ctx context.Context, c *model.OAuthClient) error
+	CreateClient(ctx context.Context, c *model.OAuthClient, by model.Actor) error
 	GetClientByClientID(ctx context.Context, clientID string) (*model.OAuthClient, error)
 
 	// The admin surface: a workspace manages its own clients plus the
@@ -805,7 +983,7 @@ type OAuthStore interface {
 	// which is the service token's kill switch.
 	ListClients(ctx context.Context, workspaceID int64) ([]*model.OAuthClient, error)
 	GetClientForWorkspace(ctx context.Context, workspaceID, id int64) (*model.OAuthClient, error)
-	UpdateClient(ctx context.Context, c *model.OAuthClient) error
+	UpdateClient(ctx context.Context, c *model.OAuthClient, by model.Actor) error
 	DeleteClient(ctx context.Context, workspaceID, id int64) error
 
 	InsertAuthCode(ctx context.Context, c *model.OAuthAuthCode) error

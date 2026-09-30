@@ -60,6 +60,10 @@ func newRouter(a *app.App) http.Handler {
 	// The return leg of connecting an outbound MCP integration: a browser
 	// redirect, so it lives outside /v1 and its bearer requirement.
 	mountMCPCallback(r, a)
+	// And the same leg for a custom tool that signs in to a service. Outside
+	// /v1 for the same reason: a browser mid-redirect carries no bearer token,
+	// so the sealed state is the whole authentication.
+	mountToolCallback(r, a)
 	// Our own MCP server: the surface an external agent connects to. Its
 	// auth is the OAuth bearer, not the console's JWT, so it mounts at the
 	// root with its own gate.
@@ -105,6 +109,7 @@ func newRouter(a *app.App) http.Handler {
 			mountLicences(r)
 			mountSetup(r, a)
 			mountBrains(r, a)
+			mountSkills(r, a)
 			mountMCPServers(r, a)
 			mountMCPSettings(r, a)
 			mountOAuthClients(r, a)
@@ -206,6 +211,10 @@ func Serve(ctx context.Context, a *app.App) error {
 	// ctx is cancelled.
 	go a.Bus.Run(ctx)
 	go a.RunLiveDashboard(ctx)
+	// And the listener that pushes an agent's steps to whoever has it open, fed
+	// by this process's agents on the bus and by the workers' over the queue.
+	// Not a goroutine: it marks this process before anything can run.
+	a.WatchAgents(ctx)
 
 	// The background memory worker drains for the life of the server too: it
 	// rewrites what the assistant remembers off the turn's path, so a turn never

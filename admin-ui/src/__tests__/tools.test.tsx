@@ -19,6 +19,7 @@ const TEMPLATES = [
       { key: 'sql', type: 'string', required: true, description: 'The SQL statement to run.' },
       { key: 'params', type: 'array', required: false, description: 'Positional values.' },
     ],
+    default_description: 'Run SQL against this database. The statement goes in sql.',
     default_guide: 'Run one statement per call.',
   },
 ]
@@ -175,10 +176,14 @@ describe('the add-tool flow', () => {
     )
     fireEvent.click(await screen.findByRole('button', { name: /add tool/i }))
     fireEvent.change(await screen.findByRole('combobox'), { target: { value: 'query' } })
+    // The driver too: nothing can be created without one, so a test that
+    // skipped it was exercising a flow the form no longer allows.
+    const chosen = await screen.findAllByRole('combobox')
+    fireEvent.change(chosen[1], { target: { value: 'mysql' } })
 
     // The template's inputs show, with their identity and their prefilled,
     // editable description; the guide is prefilled too.
-    expect(await screen.findByText('Parameters')).toBeInTheDocument()
+    expect(await screen.findByText('AI Parameters')).toBeInTheDocument()
     expect(screen.getByText('sql')).toBeInTheDocument()
     expect(screen.getByDisplayValue('Run one statement per call.')).toBeInTheDocument()
 
@@ -186,26 +191,95 @@ describe('the add-tool flow', () => {
     fireEvent.change(screen.getByDisplayValue('The SQL statement to run.'), {
       target: { value: 'SELECT only, against the orders schema.' },
     })
-    fireEvent.change(screen.getByPlaceholderText('prod_orders'), { target: { value: 'orders' } })
+    fireEvent.change(screen.getByPlaceholderText('Production orders'), { target: { value: 'Orders' } })
     fireEvent.click(screen.getByRole('button', { name: /create tool/i }))
 
     await waitFor(() => expect(calls.create).toBeTruthy())
     expect(calls.create).toMatchObject({
-      alias: 'orders',
+      display_name: 'Orders',
       param_descriptions: { sql: 'SELECT only, against the orders schema.' },
     })
   })
 
-  it('creates the tool with the alias and settings', async () => {
+  // Two descriptions, and they are not the same one.
+  //
+  // `description` is the paragraph a PERSON reads in the callout while deciding
+  // what to make. `default_description` is what the AGENT reads. The form
+  // prefilled the AI's field from the first, so the model's instructions were a
+  // copy of the sales pitch, which is what shipped and had to be reported.
+  it('prefills the AI description from the model-facing default, not the human one', async () => {
+    serve()
+    render(
+      <StrictMode>
+        <Tools />
+      </StrictMode>,
+    )
+    fireEvent.click(await screen.findByRole('button', { name: /add tool/i }))
+    fireEvent.change(await screen.findByRole('combobox'), { target: { value: 'query' } })
+
+    expect(await screen.findByDisplayValue('Run SQL against this database. The statement goes in sql.')).toBeInTheDocument()
+    // And the human paragraph is on the page ONCE, in the callout, never in a
+    // field: asserting only the first half would pass with both prefilled.
+    expect(screen.queryByDisplayValue('Run SQL against a database.')).not.toBeInTheDocument()
+    expect(screen.getByText('Run SQL against a database.')).toBeInTheDocument()
+  })
+
+  // ONE name. What the assistant calls the tool is derived from it on the
+  // server, so the form neither asks for an identifier nor sends one: this used
+  // to be two fields, and keeping them in step was the person's problem.
+  it('creates the tool from a single name, and never sends an identifier', async () => {
     const calls = serve()
     await openFormToDriver()
     await screen.findByPlaceholderText('••••••••')
 
-    fireEvent.change(screen.getByPlaceholderText('prod_orders'), { target: { value: 'local' } })
+    fireEvent.change(screen.getByPlaceholderText('Production orders'), { target: { value: 'Local orders' } })
     fireEvent.click(screen.getByRole('button', { name: /create tool/i }))
 
     await waitFor(() => expect(calls.create).toBeTruthy())
-    expect(calls.create).toMatchObject({ template: 'query', variant: 'mysql', alias: 'local' })
+    expect(calls.create).toMatchObject({ template: 'query', variant: 'mysql', display_name: 'Local orders' })
+    expect(calls.create).not.toHaveProperty('alias')
+  })
+
+  // A tool with no name is not creatable, and the browser is what stops it.
+  //
+  // Asserted with everything else filled in, which is the only way it can fail:
+  // an earlier version of this test submitted a completely empty form, where
+  // create() returns early on its own, so it passed with the field's `required`
+  // deleted and proved nothing at all.
+  it('will not create a tool with no name', async () => {
+    const calls = serve()
+    await openFormToDriver()
+    await screen.findByPlaceholderText('••••••••')
+
+    // The name, and only the name, is left empty.
+    fireEvent.click(screen.getByRole('button', { name: /create tool/i }))
+
+    await new Promise((settle) => setTimeout(settle, 50))
+    expect(calls.create).toBeFalsy()
+
+    // And it goes through the moment there is one, so this is the name
+    // stopping it and not something else about the form.
+    fireEvent.change(screen.getByPlaceholderText('Production orders'), { target: { value: 'Local orders' } })
+    fireEvent.click(screen.getByRole('button', { name: /create tool/i }))
+    await waitFor(() => expect(calls.create).toBeTruthy())
+  })
+
+  // The same for the driver: it decides every field below it, and a tool built
+  // without one is a tool with no connection settings at all.
+  it('will not create a tool with no driver', async () => {
+    const calls = serve()
+    render(
+      <StrictMode>
+        <Tools />
+      </StrictMode>,
+    )
+    fireEvent.click(await screen.findByRole('button', { name: /add tool/i }))
+    fireEvent.change(await screen.findByRole('combobox'), { target: { value: 'query' } })
+    fireEvent.change(await screen.findByPlaceholderText('Production orders'), { target: { value: 'Local orders' } })
+
+    fireEvent.click(screen.getByRole('button', { name: /create tool/i }))
+    await new Promise((settle) => setTimeout(settle, 50))
+    expect(calls.create).toBeFalsy()
   })
 })
 

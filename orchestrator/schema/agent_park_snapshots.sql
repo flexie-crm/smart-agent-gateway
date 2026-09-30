@@ -1,11 +1,13 @@
 CREATE TABLE `agent_park_snapshots` (
   `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
   `token_hash` char(64) NOT NULL,
+  `token_seed` varchar(64) NOT NULL DEFAULT '',
   `workspace_id` bigint(20) unsigned NOT NULL,
   `session_id` bigint(20) unsigned NOT NULL,
   `user_id` bigint(20) unsigned NOT NULL,
   `agent_id` bigint(20) unsigned DEFAULT NULL,
   `model_id` bigint(20) unsigned NOT NULL,
+  `device_id` varchar(64) NOT NULL DEFAULT '',
   `tool_name` varchar(191) NOT NULL,
   `tool_call_id` varchar(64) NOT NULL,
   `tool_args` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL CHECK (json_valid(`tool_args`)),

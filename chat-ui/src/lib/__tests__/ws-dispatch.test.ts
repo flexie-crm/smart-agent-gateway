@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from 'vitest'
 import { dispatchSocketMessage } from '../ws'
 import { CARD_EVENT, DELEGATION_EVENT, TURN_EVENT } from '../delegations'
+import { CONTEXT_EVENT } from '../context-meter'
+import { TOPIC_EVENT } from '../agent-watch'
 import type { SocketMessage } from '../reconnecting-socket'
 
 describe('dispatchSocketMessage', () => {
@@ -19,6 +21,34 @@ describe('dispatchSocketMessage', () => {
     dispatchSocketMessage({ type: 'turn', payload: { chat_uid: 'c1', run: 'r1' } } as SocketMessage)
     expect(handler).toHaveBeenCalledOnce()
     window.removeEventListener(TURN_EVENT, handler)
+  })
+
+  // How full a conversation is arrives the way the server sends it: wrapped in
+  // the hub's notification envelope.
+  it('forwards a context push, from inside its envelope, as a window event', () => {
+    const handler = vi.fn()
+    window.addEventListener(CONTEXT_EVENT, handler)
+    dispatchSocketMessage({
+      type: 'notification',
+      payload: { type: 'context', payload: { chat_uid: 'c1', percent: 64, warn_at: 50, compacting: false } },
+    } as SocketMessage)
+    expect(handler).toHaveBeenCalledOnce()
+    expect((handler.mock.calls[0][0] as CustomEvent).detail).toMatchObject({ chat_uid: 'c1', percent: 64 })
+    window.removeEventListener(CONTEXT_EVENT, handler)
+  })
+
+  // A channel's message is pushed to the sockets that joined it, not to a
+  // person, so it arrives unwrapped with the channel's name beside it.
+  it('forwards a message on a joined channel with the channel it came on', () => {
+    const handler = vi.fn()
+    window.addEventListener(TOPIC_EVENT, handler)
+    dispatchSocketMessage({ type: 'topic', topic: 'agent:5', payload: { kind: 'step', message: { id: '9' } } } as SocketMessage)
+    expect(handler).toHaveBeenCalledOnce()
+    expect((handler.mock.calls[0][0] as CustomEvent).detail).toEqual({
+      topic: 'agent:5',
+      payload: { kind: 'step', message: { id: '9' } },
+    })
+    window.removeEventListener(TOPIC_EVENT, handler)
   })
 
   it('ignores unrelated types and messages with no payload', () => {

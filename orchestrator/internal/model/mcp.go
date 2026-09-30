@@ -44,6 +44,11 @@ type MCPServer struct {
 	LastError    string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+	// Who made it and who last changed it (model.Actor): the ids go to NULL
+	// when the person is deleted and the names are frozen, so the record reads
+	// afterwards.
+	Authored
+	Edited
 }
 
 // HasAPIKey reports whether a key is stored, without revealing it.
@@ -86,6 +91,11 @@ type MCPSettings struct {
 	// callers. Stored now; consumed when the brains agent-tool lands.
 	BrainConfig json.RawMessage `json:"brain_config"`
 	UpdatedAt   time.Time       `json:"updated_at"`
+	// Who made it and who last changed it (model.Actor): the ids go to NULL
+	// when the person is deleted and the names are frozen, so the record reads
+	// afterwards.
+	Authored
+	Edited
 }
 
 // MCPToolEnabled reads one tool's switch from a ToolConfig map.

@@ -1,5 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, apiFetch, bootstrap, currentSession, json, nothing, setSession, SESSION_EXPIRED } from '@/lib/api'
+import {
+  ApiError,
+  apiFetch,
+  bootstrap,
+  currentSession,
+  json,
+  nothing,
+  Offline,
+  setSession,
+  SESSION_EXPIRED,
+  Unreadable,
+} from '@/lib/api'
 import type { Session } from '@/lib/api'
 
 // The single door to the orchestrator must never let the same question be in
@@ -253,5 +264,80 @@ describe('json and nothing', () => {
     expect(refusal.code).toBe('conflict')
     expect(refusal.description).toBe('resource is still in use')
     expect(refusal.fields).toEqual({})
+  })
+})
+
+// Silence, an unreadable answer, and a fault of our own are three different
+// things. The browser reports the first as a bare TypeError, which is what it
+// also throws when this code has a bug, so naming them is what keeps a defect
+// in the console from being reported as a server that is working perfectly.
+describe('what a failed request actually says', () => {
+  beforeEach(() => setSession({ ...SESSION }))
+  afterEach(() => {
+    setSession(null)
+    vi.unstubAllGlobals()
+  })
+
+  it('names a request that got no answer at all', async () => {
+    // What a browser does when the server is not there.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new TypeError('Failed to fetch')
+      }),
+    )
+
+    const failure = await json('/v1/things').then(
+      () => null,
+      (error: unknown) => error,
+    )
+
+    expect(failure).toBeInstanceOf(Offline)
+    // A sentence, because this one is shown to a person as it is.
+    expect((failure as Offline).message).toBe('The gateway did not answer.')
+    // The control: the bare TypeError must NOT survive, because it is
+    // indistinguishable from one of our own.
+    expect(failure).not.toBeInstanceOf(TypeError)
+  })
+
+  it('names an answer that arrived and is not what it claimed to be', async () => {
+    // A 200 carrying a proxy's error page, or a truncated body.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('<html>502 Bad Gateway</html>', { status: 200 })),
+    )
+
+    const failure = await json('/v1/things').then(
+      () => null,
+      (error: unknown) => error,
+    )
+
+    expect(failure).toBeInstanceOf(Unreadable)
+    expect((failure as Unreadable).message).toBe("The gateway's answer could not be read.")
+  })
+
+  it("leaves a refusal a refusal, with the gateway's own words on it", async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              error: 'invalid_request',
+              error_description: 'some fields need a change',
+              fields: { name: 'a group needs a name' },
+            }),
+            { status: 400 },
+          ),
+      ),
+    )
+
+    const failure = await json('/v1/groups', { method: 'POST' }).then(
+      () => null,
+      (error: unknown) => error,
+    )
+
+    expect(failure).toBeInstanceOf(ApiError)
+    expect((failure as ApiError).fields).toEqual({ name: 'a group needs a name' })
   })
 })

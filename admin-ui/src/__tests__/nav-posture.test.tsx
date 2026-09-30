@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Posture } from '@/lib/api'
 
 /**
@@ -62,22 +62,25 @@ describe('what the console offers, per edition', () => {
     expect(labels(await navigationFor(false))).toContain('Inference')
   })
 
-  it('offers it on neither, on an installation that carries no engine', async () => {
-    const nav = await navigationFor(true, { local_models: false })
-    expect(labels(nav)).not.toContain('Inference')
-    // And nothing else went with it: the group is still the engine's, and the
-    // items either side of the one removed are untouched.
+  // It used to be hidden on a build that ships no engine, which took the one
+  // kind of inference that works there away with it: a machine is a server with
+  // a graphics card in it, and a personal installation adds one by exchanging
+  // certificates with it. What ships no engine is the LOCAL node, which is
+  // decided where it is started and has never been a question for this menu.
+  it('offers it on an installation that carries no engine of its own', async () => {
+    const nav = await navigationFor(true)
+    expect(labels(nav)).toContain('Inference')
     expect(labels(nav)).toContain('Models')
     expect(labels(nav)).toContain('Agents')
   })
 
-  // A deployment always has machines to talk about, on every platform, because
-  // they join it over the network rather than shipping inside it. Pinned because
-  // the constant that hides this on Windows is compiled per platform, and a
-  // server built there must not hide its own fleet.
-  it('keeps the fleet on a deployment even where no engine ships', async () => {
-    const { SERVER_POSTURE } = await import('@/lib/api')
-    expect(SERVER_POSTURE.local_models).toBe(true)
+  // The posture says what KIND of installation this is. Whether models can run
+  // on hardware we own is not one of those things any more, and a field that is
+  // always true is a branch waiting to be written by mistake.
+  it('has no capability for it left to branch on', async () => {
+    const { SERVER_POSTURE, PERSONAL_POSTURE } = await import('@/lib/api')
+    expect('local_models' in SERVER_POSTURE).toBe(false)
+    expect('local_models' in PERSONAL_POSTURE).toBe(false)
   })
 
   // The group must survive losing its first item: an Overview heading with only
@@ -88,5 +91,51 @@ describe('what the console offers, per edition', () => {
       expect(labels(nav), `personal=${personal}`).toContain('Dashboard')
       expect(nav[0].items.length, `personal=${personal}`).toBeGreaterThan(0)
     }
+  })
+})
+
+/**
+ * And the one sentence that does still depend on what the build carries.
+ *
+ * Not whether there is an Inference screen, which every installation has: a
+ * machine is a server with a graphics card in it, somewhere else. Whether THIS
+ * computer is also one of them, which it is only where an engine shipped inside
+ * the application. Saying so on a build that carries none names a machine the
+ * list underneath cannot contain, because the server does not send it
+ * (app.Nodes, withoutAMachineThatCannotExistHere).
+ *
+ * The constant is mocked rather than its environment variable stubbed, which is
+ * what the navigation cases above do with the posture and for the same reason:
+ * both are read once when the module is first evaluated, so what has to be in
+ * place is the module, not the variable it was built from.
+ */
+describe('what the Inference screen says it is about', () => {
+  async function subtitle(engine: boolean) {
+    vi.resetModules()
+    vi.doMock('@/lib/api', async () => {
+      const actual = await vi.importActual<typeof import('@/lib/api')>('@/lib/api')
+      return { ...actual, LOCAL_ENGINE: engine }
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ nodes: [] }), { status: 200 })),
+    )
+    // Both from the SAME fresh graph: a provider from the old copy holds a
+    // context the new page cannot read.
+    const { Nodes } = await import('@/pages/Nodes')
+    const { render: fresh, screen: on } = await import('@/test-utils')
+    fresh(<Nodes />)
+    const said = await on.findByText(/Models that run on hardware we own/)
+    return said.textContent ?? ''
+  }
+
+  afterEach(() => vi.doUnmock('@/lib/api'))
+
+  it('names this computer where an engine ships with the application', async () => {
+    expect(await subtitle(true)).toContain('this computer')
+  })
+
+  it('does not, where none does', async () => {
+    expect(await subtitle(false)).not.toContain('this computer')
   })
 })

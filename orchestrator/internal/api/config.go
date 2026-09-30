@@ -53,6 +53,12 @@ func mountConfig(r chi.Router, a *app.App) {
 		r.With(requirePermission(a, model.PermToolsView)).Get("/{id}", h.getTool)
 		r.With(requirePermission(a, model.PermToolsEdit)).Put("/{id}", h.updateTool)
 		r.With(requirePermission(a, model.PermToolsEdit)).Delete("/{id}", h.deleteCustomTool)
+		// Connecting a tool that signs in to a service, and disconnecting it.
+		// The return leg is outside /v1 (mountToolCallback): a browser
+		// mid-redirect carries no bearer token.
+		connect := &toolConnectHandlers{app: a}
+		r.With(requirePermission(a, model.PermToolsEdit)).Post("/{id}/connection", connect.begin)
+		r.With(requirePermission(a, model.PermToolsEdit)).Delete("/{id}/connection", connect.disconnect)
 	})
 
 	// The Gateway SCREEN, in one answer, shaped like the screen: what arrives is
@@ -128,6 +134,9 @@ type toolBody struct {
 	// records, what everything else in the product means by this tool.
 	ShortName string  `json:"short_name"`
 	Grants    []int64 `json:"grants"`
+	// Skills are the written procedures documenting this tool, so the edit form
+	// prefills its picker. Only a custom tool ever has any.
+	Skills []int64 `json:"skills,omitempty"`
 
 	// The projection flags of a remote MCP tool, so the tools screen can
 	// mark what drifted. Zero on every other kind.
@@ -150,6 +159,7 @@ func (h *configHandlers) toolToBody(t *model.Tool, sources map[int64]mcpSource) 
 		Risk:         t.Risk,
 		Status:       t.Status,
 		Grants:       t.Grants,
+		Skills:       t.Skills,
 
 		MCPServerID:         t.MCPServerID,
 		RemoteMissing:       t.RemoteMissing,
@@ -271,6 +281,24 @@ type toolDetailBody struct {
 	Guide             string             `json:"guide,omitempty"`
 	Settings          map[string]any     `json:"settings,omitempty"`
 	ParamDescriptions map[string]string  `json:"param_descriptions,omitempty"`
+	// SkillChoices is every skill this tool COULD be documented by; `skills` on
+	// the tool itself is which it IS. Both are the edit form, so both arrive
+	// with it, exactly as groups and grants do.
+	SkillChoices []skillChoice `json:"skill_choices,omitempty"`
+	// Connection is the tool's sign-in, when it is the kind that has one. It
+	// rides on the form because it is part of what the form is about: a tool
+	// that needs a sign-in and has not had one is not finished, and that has to
+	// be visible on opening rather than discovered by pressing Test.
+	Connection *toolConnectionBody `json:"connection,omitempty"`
+}
+
+// toolConnectionBody is what a form shows about a sign-in, and nothing more.
+// No token, no expiry: what a person needs is whether it is done and who did
+// it, and the rest is the runtime's business.
+type toolConnectionBody struct {
+	Connected   bool       `json:"connected"`
+	ConnectedBy string     `json:"connected_by,omitempty"`
+	ConnectedAt *time.Time `json:"connected_at,omitempty"`
 }
 
 // groupOption is a group as a form offers it to be ticked.
@@ -324,6 +352,18 @@ func (h *configHandlers) getTool(w http.ResponseWriter, r *http.Request) {
 	out.Guide = edit.Guide
 	out.Settings = edit.Settings
 	out.ParamDescriptions = edit.ParamDescriptions
+	if out.SkillChoices, err = h.skillChoices(r.Context(), ws); err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	h.fillCallbacks(out.Sections)
+	// Only for a tool that signs in to a service. Absent for every other kind,
+	// so the form shows nothing rather than an empty "not connected".
+	if state := h.app.ToolConnection(r.Context(), ws, t.ID); state.Needed {
+		out.Connection = &toolConnectionBody{
+			Connected: state.Held, ConnectedBy: state.ByName, ConnectedAt: state.At,
+		}
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -397,7 +437,12 @@ func (h *configHandlers) updateTool(w http.ResponseWriter, r *http.Request) {
 		}
 		t.Config = config
 	}
-	if err := h.app.Store.Tools().Update(ctx, t); err != nil {
+	by, err := h.app.Acting(ctx, claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.Tools().Update(ctx, t, by); err != nil {
 		writeStoreError(w, h.app, err)
 		return
 	}
@@ -413,8 +458,11 @@ type templateBody struct {
 	Variants    []template.Variant `json:"variants"`
 	// The inputs the tool takes (identity fixed, description editable) and the
 	// guide to prefill, so the form shows the full tool, not just its connection.
-	Params       []template.Param `json:"params"`
-	DefaultGuide string           `json:"default_guide"`
+	Params []template.Param `json:"params"`
+	// DefaultDescription is what the AGENT reads; Description above is what a
+	// PERSON reads while choosing. The form prefills each into its own field.
+	DefaultDescription string `json:"default_description"`
+	DefaultGuide       string `json:"default_guide"`
 }
 
 // listTemplates powers the "Add tool" picker: the native templates this build
@@ -425,7 +473,7 @@ func (h *configHandlers) listTemplates(w http.ResponseWriter, r *http.Request) {
 	for _, t := range h.app.Templates.All() {
 		out = append(out, templateBody{
 			Name: t.Name(), Title: t.Title(), Description: t.Description(), Variants: t.Variants(),
-			Params: t.Params(), DefaultGuide: t.DefaultGuide(),
+			Params: t.Params(), DefaultDescription: t.DefaultDescription(), DefaultGuide: t.DefaultGuide(),
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -438,6 +486,10 @@ func (h *configHandlers) listTemplates(w http.ResponseWriter, r *http.Request) {
 type newToolFormBody struct {
 	Sections []template.Section `json:"sections"`
 	Values   map[string]any     `json:"values"`
+	// Skills the tool can be pointed at, so the console offers the picker
+	// without a second request. Standard for every custom tool, so it rides on
+	// the form rather than on any template's sections.
+	Skills []skillChoice `json:"skills"`
 }
 
 // templateFields returns the form for a template's chosen variant, filled with
@@ -454,7 +506,13 @@ func (h *configHandlers) templateFields(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, newToolFormBody{Sections: sections, Values: values})
+	choices, err := h.skillChoices(r.Context(), claimsFrom(r).WorkspaceID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	h.fillCallbacks(sections)
+	writeJSON(w, http.StatusOK, newToolFormBody{Sections: sections, Values: values, Skills: choices})
 }
 
 type createCustomBody struct {
@@ -466,26 +524,51 @@ type createCustomBody struct {
 	Guide             string            `json:"guide"`
 	ParamDescriptions map[string]string `json:"param_descriptions"`
 	Settings          map[string]any    `json:"settings"`
+	// Skills are the written procedures that document this tool. Standard for
+	// every custom tool, whatever template it came from.
+	Skills []int64 `json:"skills"`
 }
 
 // createCustomTool instantiates a template into a new tools row: validate,
 // seal the secrets, store. The new query_<alias> tool is then grantable to an
 // agent like any other.
+// createdToolBody is a new tool plus, when it needs one, where to sign in.
+// Only the create answer carries it: a listing is not the moment.
+type createdToolBody struct {
+	toolBody
+	ConnectURL   string `json:"connect_url,omitempty"`
+	ConnectError string `json:"connect_error,omitempty"`
+}
+
 func (h *configHandlers) createCustomTool(w http.ResponseWriter, r *http.Request) {
 	var body createCustomBody
 	if !decodeJSON(w, r, &body) {
 		return
 	}
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+
 	created, err := h.app.CreateCustomTool(r.Context(), claimsFrom(r).WorkspaceID, body.Template, template.Input{
 		Alias: body.Alias, Variant: body.Variant, Settings: body.Settings,
 		DisplayName: body.DisplayName, Description: body.Description, Guide: body.Guide,
 		ParamDescriptions: body.ParamDescriptions,
-	})
+	}, body.Skills, by)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, h.toolToBody(created, h.toolSources(r)))
+	// A tool that signs in to a service carries its sign-in straight back, so
+	// the person who just filled the form can finish without being sent to find
+	// the tool again.
+	offer := h.app.OfferConnectionFor(r.Context(), claimsFrom(r).WorkspaceID, created.ID, claimsFrom(r).UserID)
+	writeJSON(w, http.StatusCreated, createdToolBody{
+		toolBody:     h.toolToBody(created, h.toolSources(r)),
+		ConnectURL:   offer.URL,
+		ConnectError: offer.Reason,
+	})
 }
 
 type updateCustomBody struct {
@@ -494,6 +577,7 @@ type updateCustomBody struct {
 	Guide             string            `json:"guide"`
 	ParamDescriptions map[string]string `json:"param_descriptions"`
 	Settings          map[string]any    `json:"settings"`
+	Skills            []int64           `json:"skills"`
 }
 
 // updateCustomTool rewrites a custom tool's configuration. The template, alias,
@@ -508,10 +592,16 @@ func (h *configHandlers) updateCustomTool(w http.ResponseWriter, r *http.Request
 	if !decodeJSON(w, r, &body) {
 		return
 	}
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+
 	updated, err := h.app.UpdateCustomTool(r.Context(), claimsFrom(r).WorkspaceID, id, template.Input{
 		Settings: body.Settings, DisplayName: body.DisplayName, Description: body.Description,
 		Guide: body.Guide, ParamDescriptions: body.ParamDescriptions,
-	})
+	}, body.Skills, by)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeStoreError(w, h.app, err)
@@ -559,13 +649,26 @@ func (h *configHandlers) testCustomTool(w http.ResponseWriter, r *http.Request) 
 // to show, and what to ask for when it is unfinished. The error field is the
 // message under its old name, so a client that only knows about testing still
 // reads the reason.
+//
+// The body comes from MARSHALLING the result, not from listing its fields here.
+// A hand-written list is a second declaration of the same type that nothing
+// holds to the first, and it drifted: Visit and Visiting were added to
+// ActionResult with their json tags, the console was written to draw a button
+// from them, and this function quietly dropped both, so the button could not
+// appear however the tool was configured. Marshalling means a field added to
+// the result reaches the console because it exists, not because somebody
+// remembered this function.
 func actionBody(result template.ActionResult) map[string]any {
-	out := map[string]any{"ok": result.OK, "message": result.Message}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return map[string]any{"ok": false, "message": "the result could not be read"}
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return map[string]any{"ok": false, "message": "the result could not be read"}
+	}
 	if !result.OK && result.Message != "" {
 		out["error"] = result.Message
-	}
-	if result.Prompt != nil {
-		out["prompt"] = result.Prompt
 	}
 	return out
 }
@@ -588,7 +691,8 @@ func (h *configHandlers) testCustomToolEdit(w http.ResponseWriter, r *http.Reque
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	result, err := h.app.RunToolActionForEdit(r.Context(), claimsFrom(r).WorkspaceID, id, body.Settings,
+	claims := claimsFrom(r)
+	result, err := h.app.RunToolActionForEdit(r.Context(), claims.WorkspaceID, claims.UserID, id, body.Settings,
 		app.ToolAction{Name: body.Action, Token: body.Token, Values: body.Values})
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -632,6 +736,13 @@ type agentBody struct {
 	// fast and a researcher that should not.
 	Settings model.Settings `json:"settings,omitempty"`
 	Status   string         `json:"status"`
+	// Who configured it and who last changed it, read-only on this surface: the
+	// server records them from the request, so a client cannot claim to be
+	// somebody. Empty on anything configured before this was kept.
+	CreatedBy     int64  `json:"created_by"`
+	CreatedByName string `json:"created_by_name"`
+	UpdatedBy     int64  `json:"updated_by"`
+	UpdatedByName string `json:"updated_by_name"`
 	// DelegationMode pins how the Gateway runs this agent: auto (the Gateway
 	// decides), background, or inline. Empty/absent is auto.
 	DelegationMode string   `json:"delegation_mode"`
@@ -642,6 +753,10 @@ type agentBody struct {
 	ConfirmTools []string `json:"confirm_tools"`
 	// Brains lists the ids of the knowledge bases this agent may read.
 	Brains []int64 `json:"brains"`
+	// Skills lists the ids of the skills this agent may use. Empty means none:
+	// a skill becomes available to an agent because somebody assigned it, not
+	// because it is in the workspace.
+	Skills []int64 `json:"skills"`
 	// FileRules is which model reads which uploaded file, in the order they are
 	// tried: the first rule whose types match wins, and a rule with no types
 	// matches everything. No rules at all means no file can be uploaded, which
@@ -693,6 +808,10 @@ func agentToBody(a *model.Agent) agentBody {
 	if brains == nil {
 		brains = []int64{}
 	}
+	skills := a.Skills
+	if skills == nil {
+		skills = []int64{}
+	}
 	rules := a.FileRules
 	if rules == nil {
 		rules = []model.FileRule{}
@@ -703,7 +822,10 @@ func agentToBody(a *model.Agent) agentBody {
 		DelegationMode: a.DelegationMode,
 		Tools:          tools, ConfirmTools: confirm,
 		Brains: brains, MemoryBrainID: a.MemoryBrainID,
+		Skills:    skills,
 		FileRules: rules, AudioModelID: a.AudioModelID,
+		CreatedBy: a.CreatedBy, CreatedByName: a.CreatedByName,
+		UpdatedBy: a.UpdatedBy, UpdatedByName: a.UpdatedByName,
 		CreatedAt: a.CreatedAt, UpdatedAt: a.UpdatedAt,
 	}
 	if a.ApprovalTTL != nil {
@@ -1004,7 +1126,12 @@ func (h *configHandlers) putGatewayFiles(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	a.FileRules = body.Rules
-	if err := h.app.Store.Agents().Update(r.Context(), a); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.Agents().Update(r.Context(), a, by); err != nil {
 		writeStoreError(w, h.app, err)
 		return
 	}
@@ -1027,7 +1154,12 @@ func (h *configHandlers) putGatewayAudio(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	a.AudioModelID = body.ModelID
-	if err := h.app.Store.Agents().Update(r.Context(), a); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.Agents().Update(r.Context(), a, by); err != nil {
 		writeStoreError(w, h.app, err)
 		return
 	}
@@ -1186,11 +1318,64 @@ type brainChoice struct {
 
 // agentFormBody is the agent dialog, whole: the agent being edited (null when
 // one is being created), and everything it can be given.
+// skillChoice is one skill an agent can be given: what to call it, and whether
+// it is switched on.
+//
+// The name is `Label()`, which is the title or the handle when a package
+// carried no title. ONE name, the rule every other place a skill is printed
+// follows: the handle is an identifier, and sending it so a form could show it
+// beside the title would say the same thing twice in two shapes.
+type skillChoice struct {
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+	// Status, so a disabled skill can be shown as one rather than offered as if
+	// assigning it would do anything.
+	Status string `json:"status"`
+}
+
+// fillCallbacks writes this deployment's OAuth callback address into every
+// field a template declared for it.
+//
+// The template says WHERE the address belongs (which section, with what
+// wording), because only it knows which of its sections is the one where
+// somebody is registering an application at a service. It cannot know the
+// address, because that is this installation's. So the two halves meet here,
+// which is the layer that has both.
+func (h *configHandlers) fillCallbacks(sections []template.Section) {
+	for s := range sections {
+		for f := range sections[s].Fields {
+			if sections[s].Fields[f].Type == tool.FieldCallback {
+				sections[s].Fields[f].Default = h.app.ToolRedirectURI()
+			}
+		}
+	}
+}
+
+// skillChoices is what a picker offers: every skill in the workspace, each with
+// the ONE name a person reads and its status, so one that is switched off is
+// shown as such rather than quietly missing from a list somebody is searching.
+//
+// Shared by the agent form and the tool form, because they are offering the
+// same thing for two different reasons: an agent HOLDS a skill, a tool is
+// DOCUMENTED by one.
+func (h *configHandlers) skillChoices(ctx context.Context, workspaceID int64) ([]skillChoice, error) {
+	skills, err := h.app.Store.Skills().Skills(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	choices := make([]skillChoice, 0, len(skills))
+	for _, sk := range skills {
+		choices = append(choices, skillChoice{ID: sk.ID, Name: sk.Label(), Status: sk.Status})
+	}
+	return choices, nil
+}
+
 type agentFormBody struct {
 	Agent  *agentBody    `json:"agent"`
 	Models []modelChoice `json:"models"`
 	Tools  []toolChoice  `json:"tools"`
 	Brains []brainChoice `json:"brains"`
+	Skills []skillChoice `json:"skills"`
 	// Settings is what this agent may be configured with beyond the fields the
 	// form knows by name: today, how hard to think.
 	//
@@ -1266,6 +1451,12 @@ func (h *configHandlers) agentForm(w http.ResponseWriter, r *http.Request) {
 		out.Brains = append(out.Brains, brainChoice{ID: b.ID, Name: b.Name, Locked: b.Locked})
 	}
 
+	out.Skills, err = h.skillChoices(r.Context(), ws)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -1306,11 +1497,17 @@ func (h *configHandlers) createAgent(w http.ResponseWriter, r *http.Request) {
 		Tools:             body.Tools,
 		ConfirmTools:      body.ConfirmTools,
 		Brains:            body.Brains,
+		Skills:            body.Skills,
 		FileRules:         body.FileRules,
 		AudioModelID:      body.AudioModelID,
 		MemoryBrainID:     body.MemoryBrainID,
 	}
-	if err := h.app.Store.Agents().Create(r.Context(), a); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.Agents().Create(r.Context(), a, by); err != nil {
 		writeSaveError(w, h.app, err, "key", "another agent already uses this key")
 		return
 	}
@@ -1376,11 +1573,17 @@ func (h *configHandlers) updateAgent(w http.ResponseWriter, r *http.Request) {
 		Tools:             body.Tools,
 		ConfirmTools:      body.ConfirmTools,
 		Brains:            body.Brains,
+		Skills:            body.Skills,
 		FileRules:         existing.FileRules,
 		AudioModelID:      existing.AudioModelID,
 		MemoryBrainID:     body.MemoryBrainID,
 	}
-	if err := h.app.Store.Agents().Update(r.Context(), a); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.Agents().Update(r.Context(), a, by); err != nil {
 		writeSaveError(w, h.app, err, "key", "another agent already uses this key")
 		return
 	}
@@ -1472,13 +1675,19 @@ func (h *configHandlers) createWorkflow(w http.ResponseWriter, r *http.Request) 
 
 	// A new workflow is a draft, whatever the request says. Publishing is a
 	// separate permission, and creating must not be a way around it.
+	by, err := h.app.Acting(r.Context(), claims.UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	// Who made it is not a field of the request: the store records it from the
+	// authenticated person, so a body cannot claim to be somebody.
 	wf := &model.Workflow{
 		WorkspaceID: claims.WorkspaceID,
 		Name:        body.Name,
 		Status:      model.WorkflowDraft,
-		CreatedBy:   claims.UserID,
 	}
-	if err := h.app.Store.Workflows().Create(r.Context(), wf); err != nil {
+	if err := h.app.Store.Workflows().Create(r.Context(), wf, by); err != nil {
 		writeStoreError(w, h.app, err)
 		return
 	}
@@ -1513,13 +1722,18 @@ func (h *configHandlers) updateWorkflow(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
 	wf := &model.Workflow{
 		ID:          id,
 		WorkspaceID: claimsFrom(r).WorkspaceID,
 		Name:        body.Name,
 		Status:      body.Status,
 	}
-	if err := h.app.Store.Workflows().Update(r.Context(), wf); err != nil {
+	if err := h.app.Store.Workflows().Update(r.Context(), wf, by); err != nil {
 		writeStoreError(w, h.app, err)
 		return
 	}
@@ -1589,12 +1803,16 @@ func (h *configHandlers) createVersion(w http.ResponseWriter, r *http.Request) {
 	}
 	claims := claimsFrom(r)
 
+	by, err := h.app.Acting(r.Context(), claims.UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
 	v := &model.WorkflowVersion{
 		WorkflowID: id,
 		Definition: body.Definition,
-		CreatedBy:  claims.UserID,
 	}
-	if err := h.app.Store.Workflows().CreateVersion(r.Context(), claims.WorkspaceID, v); err != nil {
+	if err := h.app.Store.Workflows().CreateVersion(r.Context(), claims.WorkspaceID, v, by); err != nil {
 		writeStoreError(w, h.app, err)
 		return
 	}
@@ -1618,7 +1836,12 @@ func (h *configHandlers) publishVersion(w http.ResponseWriter, r *http.Request) 
 		writeInvalidFields(w, fieldErrors{"version_id": "a version to publish is required"})
 		return
 	}
-	if err := h.app.Store.Workflows().Publish(r.Context(), claimsFrom(r).WorkspaceID, id, body.VersionID); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.Workflows().Publish(r.Context(), claimsFrom(r).WorkspaceID, id, body.VersionID, by); err != nil {
 		writeStoreError(w, h.app, err)
 		return
 	}

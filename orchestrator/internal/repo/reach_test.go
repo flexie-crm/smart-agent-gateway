@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -159,7 +160,7 @@ func TestProbeTellsTheThreeCasesApart(t *testing.T) {
 				go func() { _, _ = c.Write(nil); _ = c.Close() }()
 			}
 		}()
-		got := s.probe(loopback, port(t, ln))
+		got := s.probe(context.Background(), loopback, port(t, ln))
 		if !got.Reachable || !got.TLS {
 			t.Fatalf("expected reachable and TLS, got %+v", got)
 		}
@@ -182,7 +183,7 @@ func TestProbeTellsTheThreeCasesApart(t *testing.T) {
 				go func() { _, _ = c.Write([]byte("HTTP/1.1 200 OK\r\n\r\n")); _ = c.Close() }()
 			}
 		}()
-		got := s.probe(loopback, port(t, ln))
+		got := s.probe(context.Background(), loopback, port(t, ln))
 		if !got.Reachable {
 			t.Fatalf("TCP connected, so it is reachable: %+v", got)
 		}
@@ -201,7 +202,7 @@ func TestProbeTellsTheThreeCasesApart(t *testing.T) {
 		}
 		p := port(t, ln)
 		_ = ln.Close() // nothing is listening now
-		got := s.probe(loopback, p)
+		got := s.probe(context.Background(), loopback, p)
 		if got.Reachable || got.TLS {
 			t.Fatalf("expected unreachable, got %+v", got)
 		}

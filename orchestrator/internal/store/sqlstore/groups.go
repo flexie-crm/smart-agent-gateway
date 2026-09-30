@@ -13,9 +13,15 @@ import (
 
 type groupStore struct{ db *sqldb.DB }
 
-func (s *groupStore) Create(ctx context.Context, g *model.Group) error {
+func (s *groupStore) Create(ctx context.Context, g *model.Group, by model.Actor) error {
+	g.Made(by)
+	g.Changed(by)
 	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO user_groups_def (workspace_id, name) VALUES (?, ?)`, g.WorkspaceID, g.Name)
+		`INSERT INTO user_groups_def
+		   (workspace_id, name, created_by, created_by_name, updated_by, updated_by_name)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		g.WorkspaceID, g.Name,
+		nullID(g.CreatedBy), g.CreatedByName, nullID(g.UpdatedBy), g.UpdatedByName)
 	if err != nil {
 		return wrapWriteErr("insert group", err)
 	}
@@ -26,8 +32,10 @@ func (s *groupStore) Create(ctx context.Context, g *model.Group) error {
 func (s *groupStore) GetByID(ctx context.Context, workspaceID, id int64) (*model.Group, error) {
 	g := &model.Group{}
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, workspace_id, name FROM user_groups_def WHERE id = ? AND workspace_id = ?`,
-		id, workspaceID).Scan(&g.ID, &g.WorkspaceID, &g.Name)
+		`SELECT id, workspace_id, name, `+authoredColumns+
+			` FROM user_groups_def WHERE id = ? AND workspace_id = ?`,
+		id, workspaceID).Scan(&g.ID, &g.WorkspaceID, &g.Name,
+		&g.CreatedBy, &g.CreatedByName, &g.UpdatedBy, &g.UpdatedByName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, store.ErrNotFound
 	}
@@ -39,7 +47,8 @@ func (s *groupStore) GetByID(ctx context.Context, workspaceID, id int64) (*model
 
 func (s *groupStore) List(ctx context.Context, workspaceID int64) ([]*model.Group, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, workspace_id, name FROM user_groups_def WHERE workspace_id = ? ORDER BY id`, workspaceID)
+		`SELECT id, workspace_id, name, `+authoredColumns+
+			` FROM user_groups_def WHERE workspace_id = ? ORDER BY id`, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("list groups: %w", err)
 	}
@@ -47,14 +56,16 @@ func (s *groupStore) List(ctx context.Context, workspaceID int64) ([]*model.Grou
 	return scanGroups(rows)
 }
 
-func (s *groupStore) Update(ctx context.Context, g *model.Group) error {
+func (s *groupStore) Update(ctx context.Context, g *model.Group, by model.Actor) error {
 	if err := requireExists(ctx, s.db, "update group",
 		`SELECT 1 FROM user_groups_def WHERE id = ? AND workspace_id = ?`, g.ID, g.WorkspaceID); err != nil {
 		return err
 	}
+	g.Changed(by)
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE user_groups_def SET name = ? WHERE id = ? AND workspace_id = ?`,
-		g.Name, g.ID, g.WorkspaceID)
+		`UPDATE user_groups_def SET name = ?, updated_by = ?, updated_by_name = ?
+		 WHERE id = ? AND workspace_id = ?`,
+		g.Name, nullID(g.UpdatedBy), g.UpdatedByName, g.ID, g.WorkspaceID)
 	if err != nil {
 		return wrapWriteErr("update group", err)
 	}
@@ -183,7 +194,9 @@ func (s *groupStore) SetForUser(ctx context.Context, workspaceID, userID int64, 
 
 func (s *groupStore) ListForUser(ctx context.Context, userID int64) ([]*model.Group, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT g.id, g.workspace_id, g.name
+		`SELECT g.id, g.workspace_id, g.name,
+		        COALESCE(g.created_by, 0), g.created_by_name,
+		        COALESCE(g.updated_by, 0), g.updated_by_name
 		 FROM user_groups_def g
 		 JOIN user_group_members ugm ON ugm.group_id = g.id
 		 WHERE ugm.user_id = ? ORDER BY g.id`, userID)
@@ -248,7 +261,8 @@ func scanGroups(rows *sql.Rows) ([]*model.Group, error) {
 	groups := []*model.Group{}
 	for rows.Next() {
 		g := &model.Group{}
-		if err := rows.Scan(&g.ID, &g.WorkspaceID, &g.Name); err != nil {
+		if err := rows.Scan(&g.ID, &g.WorkspaceID, &g.Name,
+			&g.CreatedBy, &g.CreatedByName, &g.UpdatedBy, &g.UpdatedByName); err != nil {
 			return nil, fmt.Errorf("scan group: %w", err)
 		}
 		groups = append(groups, g)

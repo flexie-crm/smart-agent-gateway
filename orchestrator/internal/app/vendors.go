@@ -127,7 +127,10 @@ func (a *App) RewrapVendorCredentials(ctx context.Context, workspaceID int64) (i
 			return rewrapped, fmt.Errorf("reseal vendor %d: %w", vendor.ID, err)
 		}
 		vendor.Credentials = sealed
-		if err := a.Store.Vendors().Update(ctx, vendor); err != nil {
+		// A rewrap is not an edit anybody made: the actor is whoever is
+		// already on the row, so re-sealing every credential does not blank
+		// the author of every vendor.
+		if err := a.Store.Vendors().Update(ctx, vendor, vendor.Unchanged()); err != nil {
 			return rewrapped, fmt.Errorf("store vendor %d: %w", vendor.ID, err)
 		}
 		rewrapped++

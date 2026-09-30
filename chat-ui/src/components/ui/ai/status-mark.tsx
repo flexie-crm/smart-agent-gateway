@@ -25,10 +25,18 @@ import { Loader2, Clock, Check, X, Minus } from 'lucide-react'
  *
  * A spinner stays an outline, because it is motion rather than a state, and it
  * keeps the same box so nothing shifts when the thing finishes.
+ *
+ * The disc and the glyph are ONE svg, in one coordinate space. They were a
+ * round span with the glyph's own svg centred inside it, and where the mark
+ * lands on a fractional pixel (the modal is placed 8vh down, so most window
+ * heights put it on one) WebKit snaps the two elements to different device
+ * pixels: the glyph sat a device pixel off the disc's centre in the desktop
+ * application while a browser drew it true. Measured on the painted pixels:
+ * the cross, a symmetric shape, 1px off at a window 857 high and 0 at 900.
+ * Drawn together they are placed together, wherever that is.
  */
 export function StatusMark({ status, size = 4 }: { status: string; size?: 3.5 | 4 | 5 }) {
   const box = size === 5 ? 'size-5' : size === 3.5 ? 'size-3.5' : 'size-4'
-  const glyph = size === 5 ? 'size-3' : size === 3.5 ? 'size-2' : 'size-2.5'
 
   if (status === 'running' || status === '') {
     return <Loader2 className={`${box} shrink-0 animate-spin text-muted-foreground`} />
@@ -36,30 +44,37 @@ export function StatusMark({ status, size = 4 }: { status: string; size?: 3.5 | 
 
   const tone =
     status === 'done'
-      ? 'bg-emerald-600'
+      ? 'fill-emerald-600'
       : status === 'failed'
-        ? 'bg-destructive'
+        ? 'fill-destructive'
         : status === 'waiting_approval'
-          ? 'bg-amber-500'
-          : 'bg-muted-foreground/60'
+          ? 'fill-amber-500'
+          : 'fill-muted-foreground/60'
+
+  // In CSS pixels, so the geometry is exactly what it was: the badge, and the
+  // glyph's square centred inside it.
+  const [disc, glyph] = size === 5 ? [20, 12] : size === 3.5 ? [14, 8] : [16, 10]
+  const inset = (disc - glyph) / 2
 
   return (
-    <span className={`${box} ${tone} flex shrink-0 items-center justify-center rounded-full`}>
-      <Mark status={status} className={`${glyph} text-white`} />
-    </span>
+    <svg viewBox={`0 0 ${disc} ${disc}`} className={`${box} shrink-0`} aria-hidden="true">
+      <circle cx={disc / 2} cy={disc / 2} r={disc / 2} className={tone} />
+      <Mark status={status} x={inset} y={inset} size={glyph} />
+    </svg>
   )
 }
 
 /** The glyph inside a badge. Heavier stroke, because it is small and knocked out. */
-function Mark({ status, className }: { status: string; className: string }) {
+function Mark({ status, x, y, size }: { status: string; x: number; y: number; size: number }) {
+  const at = { x, y, size, className: 'text-white' }
   switch (status) {
     case 'done':
-      return <Check className={className} strokeWidth={3.5} />
+      return <Check {...at} strokeWidth={3.5} />
     case 'failed':
-      return <X className={className} strokeWidth={3.5} />
+      return <X {...at} strokeWidth={3.5} />
     case 'waiting_approval':
-      return <Clock className={className} strokeWidth={3} />
+      return <Clock {...at} strokeWidth={3} />
     default:
-      return <Minus className={className} strokeWidth={3.5} />
+      return <Minus {...at} strokeWidth={3.5} />
   }
 }

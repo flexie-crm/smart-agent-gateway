@@ -128,13 +128,10 @@ func (r *Runner) runValidator(
 	if !ok {
 		return schema, nil
 	}
-	v := validate(ctx, tool.Call{
-		WorkspaceID: turn.WorkspaceID,
-		UserID:      turn.UserID,
-		SessionID:   turn.SessionID,
-		Name:        call.ToolName,
-		Args:        call.Args,
-	})
+	// The same call the handler will get, device included: a validator judging a
+	// different value than the one that runs is approval-equals-success broken
+	// by an omission.
+	v := validate(ctx, callFor(turn, call))
 	if !v.OK {
 		return schema, &v.Result
 	}
@@ -173,6 +170,30 @@ func resultErrorText(result tool.Result) string {
 	return string(result.Err)
 }
 
+// callFor is the tool.Call a handler gets, built in ONE place.
+//
+// It exists because it did not. The Gateway's own calls and a delegated
+// agent's were assembled separately, and the agent's left out the device, so a
+// machine tool refused for an agent ("this conversation is not in one") while
+// the Gateway's own file tools worked in the same conversation seconds apart.
+// Nothing about that was a decision: two constructions of one value drift, and
+// the one nobody is looking at is the one that loses a field. One does not.
+func callFor(turn Turn, call *model.ToolCall) tool.Call {
+	return tool.Call{
+		WorkspaceID: turn.WorkspaceID,
+		UserID:      turn.UserID,
+		SessionID:   turn.SessionID,
+		// Which of the person's computers this turn came from. An agent acts on
+		// their behalf, so what they can reach it can reach.
+		DeviceID: turn.DeviceID,
+		// The Owner is NOT set here, and that is deliberate: a turn does not
+		// know it. An agent's identity is minted where its loadout is built,
+		// and the tools that need it are bound with it there.
+		Name: call.ToolName,
+		Args: call.Args,
+	}
+}
+
 // invokeHandler runs a tool handler, keeping the stream alive while it works. A
 // tool marked async runs on its own goroutine under its own deadline (see
 // asynctool.go); a sync tool runs inline. Both are the same to the caller: a
@@ -186,14 +207,7 @@ func (r *Runner) invokeHandler(
 	out *chat.Stream,
 ) (tool.Result, error) {
 	run := func(runCtx context.Context) (tool.Result, error) {
-		return handler(runCtx, tool.Call{
-			WorkspaceID: turn.WorkspaceID,
-			UserID:      turn.UserID,
-			SessionID:   turn.SessionID,
-			DeviceID:    turn.DeviceID,
-			Name:        call.ToolName,
-			Args:        call.Args,
-		})
+		return handler(runCtx, callFor(turn, call))
 	}
 	return runWithHeartbeat(ctx, out, func() (tool.Result, error) {
 		if schema.Async {
@@ -224,9 +238,20 @@ func (r *Runner) resolveCall(
 	call.SessionID = turn.SessionID
 	call.WorkspaceID = turn.WorkspaceID
 
-	if err := r.store.Agent().ResolveToolCall(ctx, call); err != nil {
+	// Detached from the turn, with a deadline of its own, because the turn
+	// ending is exactly when this write matters most: stopping a turn while a
+	// command runs used to fail this write ("begin transaction: context
+	// canceled"), leave the row saying running, and have the next turn told
+	// the command was never carried out. The same shape as the settle write in
+	// run/manager.go and saveInterrupted in transcript.go.
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+
+	if err := r.store.Agent().ResolveToolCall(writeCtx, call); err != nil {
 		r.log.Error().Err(err).Str("tool", call.ToolName).Msg("record tool call")
+		return
 	}
+	turn.stepChanged(call.StepID)
 }
 
 func (r *Runner) emitToolDone(
@@ -390,22 +415,33 @@ func (r *Runner) park(
 	deleg *parkedDelegation,
 	out *chat.Stream,
 ) error {
-	token, tokenHash, err := newToken()
+	// The seed is stored and the token is derived from it, so that every later
+	// delivery of this card (a socket push, a reload) derives the SAME token
+	// and cannot invalidate the one this stream is about to hand over.
+	seed, err := NewTokenSeed()
 	if err != nil {
 		return err
 	}
+	token := TokenFromSeed(r.cardSecret, seed)
+	tokenHash := HashToken(token)
 
 	expiresAt := time.Now().UTC().Add(turn.approvalTTL())
 	park := &model.ParkSnapshot{
 		TokenHash:   tokenHash,
+		TokenSeed:   seed,
 		WorkspaceID: turn.WorkspaceID,
 		SessionID:   turn.SessionID,
 		UserID:      turn.UserID,
 		ModelID:     resolved.Model.ID,
-		ToolName:    call.ToolName,
-		ToolCallID:  call.ToolCallID,
-		ToolArgs:    call.Args,
-		ActionHash:  hash,
+		// The computer this call was prepared for. It is part of the prepared
+		// call, because for a tool that runs on somebody's machine WHERE it
+		// runs is part of what is being approved, and because the card itself
+		// is redrawn from this row and cannot be drawn without it.
+		DeviceID:   turn.DeviceID,
+		ToolName:   call.ToolName,
+		ToolCallID: call.ToolCallID,
+		ToolArgs:   call.Args,
+		ActionHash: hash,
 		// For a projected MCP tool: what the tool WAS when this card was
 		// shown. The resume compares before running.
 		DefinitionHash: schema.DefinitionHash,

@@ -111,7 +111,12 @@ func (h *oauthClientHandlers) create(w http.ResponseWriter, r *http.Request) {
 		client.ClientSecretHash = hash
 		body.ClientSecret = secret
 	}
-	if err := h.app.Store.OAuth().CreateClient(r.Context(), client); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.OAuth().CreateClient(r.Context(), client, by); err != nil {
 		writeStoreError(w, h.app, err)
 		return
 	}
@@ -183,7 +188,12 @@ func (h *oauthClientHandlers) update(w http.ResponseWriter, r *http.Request) {
 	client.RedirectURIs = req.RedirectURIs
 	client.GrantTypes = grantTypesFor(req.ClientType)
 	client.Status = req.Status
-	if err := h.app.Store.OAuth().UpdateClient(r.Context(), client); err != nil {
+	by, err := h.app.Acting(r.Context(), claimsFrom(r).UserID)
+	if err != nil {
+		writeStoreError(w, h.app, err)
+		return
+	}
+	if err := h.app.Store.OAuth().UpdateClient(r.Context(), client, by); err != nil {
 		writeStoreError(w, h.app, err)
 		return
 	}

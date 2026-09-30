@@ -127,7 +127,7 @@ func (e *testEnv) aMachine(name, baseURL, key string) *model.InferenceNode {
 		BaseURL: baseURL + "/v1",
 		Key:     sealed,
 	}
-	if err := e.app.Store.Nodes().Create(context.Background(), node); err != nil {
+	if err := e.app.Store.Nodes().Create(context.Background(), node, model.Nobody()); err != nil {
 		e.t.Fatalf("create machine: %v", err)
 	}
 	return node
@@ -264,7 +264,7 @@ func TestOneMachinesScreenSaysWhichWorkspacesMayUseEachModel(t *testing.T) {
 	}
 
 	// Give it to the workspace, and the same screen should say so.
-	shared, err := env.app.AttachNodeModel(context.Background(), machine.ID, env.ws.ID, "u-1")
+	shared, err := env.app.AttachNodeModel(context.Background(), machine.ID, env.ws.ID, "u-1", model.Nobody())
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}
@@ -291,13 +291,13 @@ func TestGivingOneModelToTwoWorkspacesDownloadsNothingTwice(t *testing.T) {
 	machine := env.aMachine("gpu-1", node.url, "node-key")
 
 	other := &model.Workspace{Slug: "beta", Name: "Beta"}
-	if err := env.app.Store.Workspaces().Create(context.Background(), other); err != nil {
+	if err := env.app.Store.Workspaces().Create(context.Background(), other, model.Nobody()); err != nil {
 		t.Fatalf("create workspace: %v", err)
 	}
 
 	before := node.calls.Load()
 	for _, ws := range []int64{env.ws.ID, other.ID} {
-		if _, err := env.app.AttachNodeModel(context.Background(), machine.ID, ws, "u-1"); err != nil {
+		if _, err := env.app.AttachNodeModel(context.Background(), machine.ID, ws, "u-1", model.Nobody()); err != nil {
 			t.Fatalf("attach: %v", err)
 		}
 	}
@@ -382,7 +382,7 @@ func TestDeletingAModelTakesTheRowThatRoutedToItAsWell(t *testing.T) {
 		"DELETE /node/models/u-1": `{"uid":"u-1","name":"Qwen3-0.6B","freed_bytes":1519182365}`,
 	})
 	machine := env.aMachine("gpu-1", node.url, "node-key")
-	row, err := env.app.AttachNodeModel(context.Background(), machine.ID, env.ws.ID, "u-1")
+	row, err := env.app.AttachNodeModel(context.Background(), machine.ID, env.ws.ID, "u-1", model.Nobody())
 	if err != nil {
 		t.Fatalf("attach: %v", err)
 	}

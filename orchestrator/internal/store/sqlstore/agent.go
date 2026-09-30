@@ -143,15 +143,16 @@ func (s *agentStore) SaveStep(ctx context.Context, step *model.AgentStep) error 
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO agent_steps
 			  (session_id, seq, kind, vendor, model, agent_key, parent_tool_call_id,
-			   is_partial, attachments, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			   delegation_id, is_partial, attachments, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON DUPLICATE KEY UPDATE
 			   kind = VALUES(kind), vendor = VALUES(vendor), model = VALUES(model),
 			   agent_key = VALUES(agent_key), parent_tool_call_id = VALUES(parent_tool_call_id),
+			   delegation_id = VALUES(delegation_id),
 			   is_partial = VALUES(is_partial), attachments = VALUES(attachments),
 			   updated_at = VALUES(updated_at)`,
 			step.SessionID, step.Seq, step.Kind, nullString(step.Vendor), nullString(step.Model),
-			nullString(step.AgentKey), nullString(step.ParentToolCallID),
+			nullString(step.AgentKey), nullString(step.ParentToolCallID), nullID(step.DelegationID),
 			step.Partial, attachmentsJSON(step.Attachments), step.CreatedAt, now); err != nil {
 			return wrapWriteErr("save step", err)
 		}
@@ -294,31 +295,37 @@ func (s *agentStore) ResolveToolCall(ctx context.Context, c *model.ToolCall) err
 		// row is server behaviour, not a contract: this one answers with the
 		// row's id, which is why the id was right before this existed, and it
 		// is not something to build on.
-		id, err := existingToolCallID(ctx, tx, c.SessionID, c.ToolCallID)
+		id, stepID, err := existingToolCall(ctx, tx, c.SessionID, c.ToolCallID)
 		if err != nil {
 			return err
 		}
 		if c.ID == 0 {
 			c.ID = id
 		}
+		// And the step it belongs to, for a caller that rebuilt the call from
+		// a card rather than from its step: whoever watches that step is told
+		// which one moved.
+		if c.StepID == 0 {
+			c.StepID = stepID
+		}
 		return upsertToolCall(ctx, tx, c)
 	})
 }
 
-// existingToolCallID is the row for this call in this conversation, and the
-// check that there is one.
-func existingToolCallID(ctx context.Context, tx *sqldb.Tx, sessionID int64, toolCallID string) (int64, error) {
-	var id int64
+// existingToolCall is the row for this call in this conversation and the step
+// it belongs to, and the check that there is one.
+func existingToolCall(ctx context.Context, tx *sqldb.Tx, sessionID int64, toolCallID string) (int64, int64, error) {
+	var id, stepID int64
 	err := tx.QueryRowContext(ctx,
-		`SELECT id FROM agent_tool_calls WHERE session_id = ? AND tool_call_id = ?`,
-		sessionID, toolCallID).Scan(&id)
+		`SELECT id, step_id FROM agent_tool_calls WHERE session_id = ? AND tool_call_id = ?`,
+		sessionID, toolCallID).Scan(&id, &stepID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, fmt.Errorf("resolve tool call: %w", store.ErrNotFound)
+		return 0, 0, fmt.Errorf("resolve tool call: %w", store.ErrNotFound)
 	}
 	if err != nil {
-		return 0, fmt.Errorf("resolve tool call: %w", err)
+		return 0, 0, fmt.Errorf("resolve tool call: %w", err)
 	}
-	return id, nil
+	return id, stepID, nil
 }
 
 // ToolCall reads one call, for somebody opening it in the chat.
@@ -364,6 +371,14 @@ func (s *agentStore) ToolCall(ctx context.Context, workspaceID, id int64) (*mode
 // a memory cost, and about half the time it takes to type a character into the
 // composer with the thing on screen.
 //
+// It is the conversation's OWN steps only, never an agent's. An agent writes its
+// inner work into the conversation that started it, and a person is shown a
+// delegation as the Gateway showed it, a chip and its result, not the agent's
+// steps replayed inline. Those steps used to be counted into the page and then
+// hidden, so a conversation whose newest steps were all an agent's (a Gateway
+// reply, then a five-agent fleet and two background agents: 142 steps) filled
+// its whole newest page with rows nobody is shown and opened on nothing.
+//
 // before is the seq to read backwards from, or zero for the newest. It returns
 // the steps in the order they happened, and whether there is more behind them.
 func (s *agentStore) TranscriptPage(ctx context.Context, sessionID int64, before, rows int) ([]*model.AgentStep, bool, error) {
@@ -379,7 +394,7 @@ func (s *agentStore) TranscriptPage(ctx context.Context, sessionID int64, before
 		        (SELECT COUNT(*) FROM agent_messages m WHERE m.step_id = s.id) AS said,
 		        (SELECT COUNT(*) FROM agent_tool_calls c WHERE c.step_id = s.id) AS called
 		 FROM agent_steps s
-		 WHERE s.session_id = ? AND s.seq < ?
+		 WHERE s.session_id = ? AND s.seq < ? AND s.agent_key IS NULL
 		 ORDER BY s.seq DESC
 		 LIMIT ?`
 	// One step beyond the budget, so "is there more" is answered by what was
@@ -415,7 +430,18 @@ func (s *agentStore) TranscriptPage(ctx context.Context, sessionID int64, before
 		return []*model.AgentStep{}, false, nil
 	}
 
-	steps, err := s.transcript(ctx, sessionID, from, before)
+	// The same steps that were counted: the conversation's own, between the two
+	// places. Reading the agents' steps between them too would be reading what
+	// the page is not going to show, which in a conversation that ran a fleet is
+	// most of it.
+	steps, err := s.readSteps(ctx,
+		stepRead+` WHERE s.session_id = ? AND s.seq >= ? AND s.seq < ? AND s.agent_key IS NULL ORDER BY s.seq`,
+		[]any{sessionID, from, before},
+		callRead+` WHERE session_id = ? AND step_id IN (
+		     SELECT id FROM agent_steps WHERE session_id = ? AND seq >= ? AND seq < ? AND agent_key IS NULL
+		 )
+		 ORDER BY step_id, execution_order, id`,
+		[]any{sessionID, sessionID, from, before})
 	return steps, more, err
 }
 
@@ -426,18 +452,69 @@ func (s *agentStore) Transcript(ctx context.Context, sessionID int64) ([]*model.
 	return s.transcript(ctx, sessionID, 0, math.MaxInt32)
 }
 
+// stepRead is how a step is read: its row, its words and its thinking. Each
+// query below adds only WHICH steps, so every reader of the transcript gets a
+// step in the same shape.
+const stepRead = `SELECT s.id, s.session_id, s.seq, s.kind, s.vendor, s.model,
+        s.agent_key, s.parent_tool_call_id, s.delegation_id, s.is_partial, s.attachments,
+        s.created_at, m.content, r.content
+ FROM agent_steps s
+ LEFT JOIN agent_messages m ON m.step_id = s.id
+ LEFT JOIN agent_reasoning r ON r.step_id = s.id`
+
+// callRead is how a step's tool calls are read, for the same reason.
+const callRead = `SELECT id, step_id, session_id, workspace_id, tool_call_id, tool_name,
+        friendly_name, args, result, status, error_text, duration_ms,
+        execution_order, requested_approval, created_at, completed_at
+ FROM agent_tool_calls`
+
 // transcript reads the steps of one conversation between two seq numbers, with
 // their tool calls. from is inclusive, before is exclusive.
 func (s *agentStore) transcript(ctx context.Context, sessionID int64, from, before int) ([]*model.AgentStep, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT s.id, s.session_id, s.seq, s.kind, s.vendor, s.model,
-		        s.agent_key, s.parent_tool_call_id, s.is_partial, s.attachments,
-		        s.created_at, m.content, r.content
-		 FROM agent_steps s
-		 LEFT JOIN agent_messages m ON m.step_id = s.id
-		 LEFT JOIN agent_reasoning r ON r.step_id = s.id
-		 WHERE s.session_id = ? AND s.seq >= ? AND s.seq < ?
-		 ORDER BY s.seq`, sessionID, from, before)
+	return s.readSteps(ctx,
+		stepRead+` WHERE s.session_id = ? AND s.seq >= ? AND s.seq < ? ORDER BY s.seq`,
+		[]any{sessionID, from, before},
+		callRead+` WHERE session_id = ? AND step_id IN (
+		     SELECT id FROM agent_steps WHERE session_id = ? AND seq >= ? AND seq < ?
+		 )
+		 ORDER BY step_id, execution_order, id`,
+		[]any{sessionID, sessionID, from, before})
+}
+
+// DelegationSteps is one agent run's own steps, in order, with their tool
+// calls: what that agent was asked and everything it did, and nothing of the
+// Gateway's or of another agent's.
+func (s *agentStore) DelegationSteps(ctx context.Context, sessionID, delegationID int64) ([]*model.AgentStep, error) {
+	return s.readSteps(ctx,
+		stepRead+` WHERE s.session_id = ? AND s.delegation_id = ? ORDER BY s.seq`,
+		[]any{sessionID, delegationID},
+		callRead+` WHERE session_id = ? AND step_id IN (
+		     SELECT id FROM agent_steps WHERE session_id = ? AND delegation_id = ?
+		 )
+		 ORDER BY step_id, execution_order, id`,
+		[]any{sessionID, sessionID, delegationID})
+}
+
+// Step is one step of a conversation, by its row id, with its tool calls.
+func (s *agentStore) Step(ctx context.Context, sessionID, stepID int64) (*model.AgentStep, error) {
+	steps, err := s.readSteps(ctx,
+		stepRead+` WHERE s.session_id = ? AND s.id = ?`,
+		[]any{sessionID, stepID},
+		callRead+` WHERE session_id = ? AND step_id = ? ORDER BY execution_order, id`,
+		[]any{sessionID, stepID})
+	if err != nil {
+		return nil, err
+	}
+	if len(steps) == 0 {
+		return nil, store.ErrNotFound
+	}
+	return steps[0], nil
+}
+
+// readSteps runs a step query and its tool-call query and puts the calls on
+// their steps. The two statements must select the same steps.
+func (s *agentStore) readSteps(ctx context.Context, stepsQuery sqldb.Statement, stepArgs []any, callsQuery sqldb.Statement, callArgs []any) ([]*model.AgentStep, error) {
+	rows, err := s.db.QueryContext(ctx, stepsQuery, stepArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("load transcript: %w", err)
 	}
@@ -448,13 +525,15 @@ func (s *agentStore) transcript(ctx context.Context, sessionID int64, from, befo
 	for rows.Next() {
 		step := &model.AgentStep{}
 		var vendor, modelName, agentKey, parentCall, text, reasoning, attachments sql.NullString
+		var delegation sql.NullInt64
 		if err := rows.Scan(&step.ID, &step.SessionID, &step.Seq, &step.Kind, &vendor,
-			&modelName, &agentKey, &parentCall, &step.Partial, &attachments, &step.CreatedAt,
+			&modelName, &agentKey, &parentCall, &delegation, &step.Partial, &attachments, &step.CreatedAt,
 			&text, &reasoning); err != nil {
 			return nil, fmt.Errorf("scan step: %w", err)
 		}
 		step.Vendor, step.Model = vendor.String, modelName.String
 		step.AgentKey, step.ParentToolCallID = agentKey.String, parentCall.String
+		step.DelegationID = delegation.Int64
 		step.Text, step.Reasoning = text.String, reasoning.String
 		step.Attachments = attachmentsOf(attachments)
 		steps = append(steps, step)
@@ -467,15 +546,7 @@ func (s *agentStore) transcript(ctx context.Context, sessionID int64, from, befo
 		return steps, nil
 	}
 
-	calls, err := s.db.QueryContext(ctx,
-		`SELECT id, step_id, session_id, workspace_id, tool_call_id, tool_name,
-		        friendly_name, args, result, status, error_text, duration_ms,
-		        execution_order, requested_approval, created_at, completed_at
-		 FROM agent_tool_calls
-		 WHERE session_id = ? AND step_id IN (
-		     SELECT id FROM agent_steps WHERE session_id = ? AND seq >= ? AND seq < ?
-		 )
-		 ORDER BY step_id, execution_order, id`, sessionID, sessionID, from, before)
+	calls, err := s.db.QueryContext(ctx, callsQuery, callArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("load tool calls: %w", err)
 	}
@@ -534,16 +605,83 @@ func (s *agentStore) NextSeq(ctx context.Context, sessionID int64) (int, error) 
 	return int(seq), nil
 }
 
+// --- compactions ----------------------------------------------------------------
+
+func (s *agentStore) SaveCompaction(ctx context.Context, c *model.Compaction) error {
+	c.CreatedAt = time.Now().UTC()
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO agent_compactions
+		 (session_id, through_seq, summary, vendor, model, created_by, created_by_name, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		c.SessionID, c.ThroughSeq, c.Summary, nullString(c.Vendor), nullString(c.Model),
+		nullID(c.CreatedBy), c.CreatedByName, c.CreatedAt)
+	if err != nil {
+		return wrapWriteErr("save compaction", err)
+	}
+	c.ID, err = res.LastInsertId()
+	return err
+}
+
+// LatestCompaction orders by id rather than by time, because two written in the
+// same millisecond are still one after the other, and the id says which.
+func (s *agentStore) LatestCompaction(ctx context.Context, sessionID int64) (*model.Compaction, error) {
+	c := &model.Compaction{}
+	var vendor, modelKey sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, session_id, through_seq, summary, vendor, model,
+		        COALESCE(created_by, 0), created_by_name, created_at
+		 FROM agent_compactions WHERE session_id = ?
+		 ORDER BY id DESC LIMIT 1`, sessionID).
+		Scan(&c.ID, &c.SessionID, &c.ThroughSeq, &c.Summary, &vendor, &modelKey,
+			&c.CreatedBy, &c.CreatedByName, &c.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, store.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("latest compaction: %w", err)
+	}
+	c.Vendor, c.Model = vendor.String, modelKey.String
+	return c, nil
+}
+
+// --- how full a conversation is -------------------------------------------------
+
+func (s *agentStore) SetContextUse(ctx context.Context, sessionID int64, use model.ContextUse) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE agent_sessions SET context_model_id = ?, context_chars = ?, context_base_chars = ?
+		 WHERE id = ?`,
+		nullID(use.ModelID), use.Chars, use.BaseChars, sessionID)
+	if err != nil {
+		return wrapWriteErr("set context use", err)
+	}
+	return nil
+}
+
+func (s *agentStore) ContextUse(ctx context.Context, sessionID int64) (model.ContextUse, error) {
+	var use model.ContextUse
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(context_model_id, 0), context_chars, context_base_chars
+		 FROM agent_sessions WHERE id = ?`, sessionID).
+		Scan(&use.ModelID, &use.Chars, &use.BaseChars)
+	if errors.Is(err, sql.ErrNoRows) {
+		return model.ContextUse{}, store.ErrNotFound
+	}
+	if err != nil {
+		return model.ContextUse{}, fmt.Errorf("context use: %w", err)
+	}
+	return use, nil
+}
+
 // --- model calls ----------------------------------------------------------------
 
 func (s *agentStore) RecordModelCall(ctx context.Context, c *model.ModelCall) error {
 	c.CreatedAt = time.Now().UTC()
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO model_calls
-		 (workspace_id, session_id, model_id, input_tokens, output_tokens, duration_ms,
+		 (workspace_id, session_id, model_id, input_tokens, output_tokens, input_chars, duration_ms,
 		  status, error_text, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		c.WorkspaceID, c.SessionID, c.ModelID, c.InputTokens, c.OutputTokens,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		c.WorkspaceID, c.SessionID, c.ModelID, c.InputTokens, c.OutputTokens, c.InputChars,
 		c.DurationMS, c.Status, nullString(c.ErrorText), c.CreatedAt)
 	if err != nil {
 		return wrapWriteErr("record model call", err)
@@ -561,11 +699,11 @@ func (s *agentStore) CreatePark(ctx context.Context, p *model.ParkSnapshot) erro
 	}
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO agent_park_snapshots
-		 (token_hash, workspace_id, session_id, user_id, agent_id, model_id, tool_name,
+		 (token_hash, token_seed, workspace_id, session_id, user_id, agent_id, model_id, device_id, tool_name,
 		  tool_call_id, tool_args, action_hash, definition_hash,
 		  agent_key, parent_tool_call_id, delegation_id, handoff_mode, status, expires_at, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.TokenHash, p.WorkspaceID, p.SessionID, p.UserID, p.AgentID, p.ModelID, p.ToolName,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.TokenHash, p.TokenSeed, p.WorkspaceID, p.SessionID, p.UserID, p.AgentID, p.ModelID, p.DeviceID, p.ToolName,
 		p.ToolCallID, p.ToolArgs, p.ActionHash, nullString(p.DefinitionHash),
 		nullString(p.AgentKey), nullString(p.ParentToolCallID), p.DelegationID, nullString(p.HandoffMode),
 		p.Status, p.ExpiresAt, p.CreatedAt)
@@ -600,11 +738,11 @@ func (s *agentStore) CreateParkSequenced(ctx context.Context, p *model.ParkSnaps
 		}
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO agent_park_snapshots
-			 (token_hash, workspace_id, session_id, user_id, agent_id, model_id, tool_name,
+			 (token_hash, token_seed, workspace_id, session_id, user_id, agent_id, model_id, device_id, tool_name,
 			  tool_call_id, tool_args, action_hash, definition_hash,
 			  agent_key, parent_tool_call_id, delegation_id, handoff_mode, status, expires_at, created_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			p.TokenHash, p.WorkspaceID, p.SessionID, p.UserID, p.AgentID, p.ModelID, p.ToolName,
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			p.TokenHash, p.TokenSeed, p.WorkspaceID, p.SessionID, p.UserID, p.AgentID, p.ModelID, p.DeviceID, p.ToolName,
 			p.ToolCallID, p.ToolArgs, p.ActionHash, nullString(p.DefinitionHash),
 			nullString(p.AgentKey), nullString(p.ParentToolCallID), p.DelegationID, nullString(p.HandoffMode),
 			p.Status, p.ExpiresAt, p.CreatedAt)
@@ -617,6 +755,80 @@ func (s *agentStore) CreateParkSequenced(ctx context.Context, p *model.ParkSnaps
 	return live, err
 }
 
+// CountWaitingParks is how many cards this conversation still has waiting, live
+// and queued together. It bounds the walk that looks for one that can be drawn,
+// so that walk cannot spin however many are undrawable.
+func (s *agentStore) CountWaitingParks(ctx context.Context, sessionID int64) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM agent_park_snapshots
+		 WHERE session_id = ? AND status IN (?, ?) AND expires_at > ?`,
+		sessionID, model.ParkPending, model.ParkQueued, time.Now().UTC()).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count waiting cards: %w", err)
+	}
+	return n, nil
+}
+
+// PassOverPark puts a live card that cannot be SHOWN back in the queue and
+// makes the next one live, reporting whether there was a next one.
+//
+// A card is drawn by resolving its tool afresh, and that can fail: the tool was
+// revoked while the card waited, or it runs on a computer that is not linked
+// right now. The drawing code simply gave up, and because a conversation shows
+// one card at a time and this one still held that place, every later card in
+// that conversation queued behind something nobody could see. Silently, and for
+// as long as the park lived. Five conversations were found in that state.
+//
+// Passed over rather than expired, because "cannot be shown" is often
+// temporary: a laptop reconnects and the same card is drawable again. Nothing
+// is destroyed, it only loses its place.
+//
+// The two writes are one transaction, so a conversation never has two live
+// cards, which is what a claim depends on (ClaimPark takes only a pending one).
+func (s *agentStore) PassOverPark(ctx context.Context, parkID int64) (bool, error) {
+	promoted := false
+	err := s.db.Tx(ctx, func(ctx context.Context, tx *sqldb.Tx) error {
+		var sessionID int64
+		if err := tx.QueryRowContext(ctx,
+			`SELECT session_id FROM agent_park_snapshots
+			 WHERE id = ? AND status = ? FOR UPDATE`, parkID, model.ParkPending).Scan(&sessionID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				// Answered or expired while we were looking at it. Nothing to
+				// pass over, and nothing to promote in its place.
+				return nil
+			}
+			return fmt.Errorf("read park to pass over: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE agent_park_snapshots SET status = ? WHERE id = ?`,
+			model.ParkQueued, parkID); err != nil {
+			return fmt.Errorf("queue the card that cannot be shown: %w", err)
+		}
+		// The oldest OTHER card still waiting. Excluding this one is what stops
+		// it being promoted straight back and drawn again for ever.
+		var next int64
+		err := tx.QueryRowContext(ctx,
+			`SELECT id FROM agent_park_snapshots
+			 WHERE session_id = ? AND status = ? AND id <> ? AND expires_at > ?
+			 ORDER BY id ASC LIMIT 1 FOR UPDATE`,
+			sessionID, model.ParkQueued, parkID, time.Now().UTC()).Scan(&next)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("find the next card: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE agent_park_snapshots SET status = ? WHERE id = ?`,
+			model.ParkPending, next); err != nil {
+			return fmt.Errorf("make the next card live: %w", err)
+		}
+		promoted = true
+		return nil
+	})
+	return promoted, err
+}
+
 // ReleaseNextQueuedPark promotes the oldest queued park of a session to live
 // (pending) and returns it, so answering one card surfaces the next. ErrNotFound
 // when the queue is empty. Locks the row it promotes so two resolves cannot
@@ -627,7 +839,7 @@ func (s *agentStore) ReleaseNextQueuedPark(ctx context.Context, sessionID int64)
 		var definitionHash, agentKey, parentCall, handoffMode sql.NullString
 		var delegationID sql.NullInt64
 		err := tx.QueryRowContext(ctx,
-			`SELECT id, token_hash, workspace_id, session_id, user_id, agent_id, model_id,
+			`SELECT id, token_hash, token_seed, workspace_id, session_id, user_id, agent_id, model_id, device_id,
 			        tool_name, tool_call_id, tool_args, action_hash, definition_hash,
 			        agent_key, parent_tool_call_id, delegation_id, handoff_mode, status,
 			        expires_at, created_at, resolved_at
@@ -635,7 +847,7 @@ func (s *agentStore) ReleaseNextQueuedPark(ctx context.Context, sessionID int64)
 			 WHERE session_id = ? AND status = ? AND expires_at > ?
 			 ORDER BY id ASC LIMIT 1 FOR UPDATE`,
 			sessionID, model.ParkQueued, time.Now().UTC()).
-			Scan(&p.ID, &p.TokenHash, &p.WorkspaceID, &p.SessionID, &p.UserID, &p.AgentID, &p.ModelID,
+			Scan(&p.ID, &p.TokenHash, &p.TokenSeed, &p.WorkspaceID, &p.SessionID, &p.UserID, &p.AgentID, &p.ModelID, &p.DeviceID,
 				&p.ToolName, &p.ToolCallID, &p.ToolArgs, &p.ActionHash, &definitionHash,
 				&agentKey, &parentCall, &delegationID, &handoffMode, &p.Status,
 				&p.ExpiresAt, &p.CreatedAt, &p.ResolvedAt)
@@ -673,7 +885,7 @@ func (s *agentStore) ReleaseNextQueuedPark(ctx context.Context, sessionID int64)
 // park (an agent's and the Gateway's are created by different paths).
 func (s *agentStore) OpenParks(ctx context.Context, sessionID int64) ([]*model.ParkSnapshot, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, token_hash, workspace_id, session_id, user_id, agent_id, model_id,
+		`SELECT id, token_hash, token_seed, workspace_id, session_id, user_id, agent_id, model_id, device_id,
 		        tool_name, tool_call_id, tool_args, action_hash, definition_hash,
 		        agent_key, parent_tool_call_id, delegation_id, handoff_mode, status,
 		        expires_at, created_at, resolved_at
@@ -690,7 +902,7 @@ func (s *agentStore) OpenParks(ctx context.Context, sessionID int64) ([]*model.P
 		p := &model.ParkSnapshot{}
 		var definitionHash, agentKey, parentCall, handoffMode sql.NullString
 		var delegationID sql.NullInt64
-		if err := rows.Scan(&p.ID, &p.TokenHash, &p.WorkspaceID, &p.SessionID, &p.UserID, &p.AgentID, &p.ModelID,
+		if err := rows.Scan(&p.ID, &p.TokenHash, &p.TokenSeed, &p.WorkspaceID, &p.SessionID, &p.UserID, &p.AgentID, &p.ModelID, &p.DeviceID,
 			&p.ToolName, &p.ToolCallID, &p.ToolArgs, &p.ActionHash, &definitionHash,
 			&agentKey, &parentCall, &delegationID, &handoffMode, &p.Status,
 			&p.ExpiresAt, &p.CreatedAt, &p.ResolvedAt); err != nil {
@@ -708,7 +920,7 @@ func (s *agentStore) OpenParks(ctx context.Context, sessionID int64) ([]*model.P
 
 func (s *agentStore) QueuedParks(ctx context.Context, sessionID int64) ([]*model.ParkSnapshot, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, token_hash, workspace_id, session_id, user_id, agent_id, model_id,
+		`SELECT id, token_hash, token_seed, workspace_id, session_id, user_id, agent_id, model_id, device_id,
 		        tool_name, tool_call_id, tool_args, action_hash, definition_hash,
 		        agent_key, parent_tool_call_id, delegation_id, handoff_mode, status,
 		        expires_at, created_at, resolved_at
@@ -725,7 +937,7 @@ func (s *agentStore) QueuedParks(ctx context.Context, sessionID int64) ([]*model
 		p := &model.ParkSnapshot{}
 		var definitionHash, agentKey, parentCall, handoffMode sql.NullString
 		var delegationID sql.NullInt64
-		if err := rows.Scan(&p.ID, &p.TokenHash, &p.WorkspaceID, &p.SessionID, &p.UserID, &p.AgentID, &p.ModelID,
+		if err := rows.Scan(&p.ID, &p.TokenHash, &p.TokenSeed, &p.WorkspaceID, &p.SessionID, &p.UserID, &p.AgentID, &p.ModelID, &p.DeviceID,
 			&p.ToolName, &p.ToolCallID, &p.ToolArgs, &p.ActionHash, &definitionHash,
 			&agentKey, &parentCall, &delegationID, &handoffMode, &p.Status,
 			&p.ExpiresAt, &p.CreatedAt, &p.ResolvedAt); err != nil {
@@ -773,12 +985,12 @@ func (s *agentStore) ClaimPark(ctx context.Context, tokenHash, decision string) 
 		var definitionHash, agentKey, parentCall, handoffMode sql.NullString
 		var delegationID sql.NullInt64
 		err := tx.QueryRowContext(ctx,
-			`SELECT id, token_hash, workspace_id, session_id, user_id, agent_id, model_id,
+			`SELECT id, token_hash, token_seed, workspace_id, session_id, user_id, agent_id, model_id, device_id,
 			        tool_name, tool_call_id, tool_args, action_hash, definition_hash,
 			        agent_key, parent_tool_call_id, delegation_id, handoff_mode, status,
 			        expires_at, created_at, resolved_at
 			 FROM agent_park_snapshots WHERE token_hash = ? FOR UPDATE`, tokenHash).
-			Scan(&p.ID, &p.TokenHash, &p.WorkspaceID, &p.SessionID, &p.UserID, &p.AgentID, &p.ModelID,
+			Scan(&p.ID, &p.TokenHash, &p.TokenSeed, &p.WorkspaceID, &p.SessionID, &p.UserID, &p.AgentID, &p.ModelID, &p.DeviceID,
 				&p.ToolName, &p.ToolCallID, &p.ToolArgs, &p.ActionHash, &definitionHash,
 				&agentKey, &parentCall, &delegationID, &handoffMode, &p.Status,
 				&p.ExpiresAt, &p.CreatedAt, &p.ResolvedAt)
@@ -866,7 +1078,7 @@ func (s *agentStore) ResolveQueuedParks(ctx context.Context, sessionID int64, de
 	var out []*model.ParkSnapshot
 	err := s.db.Tx(ctx, func(ctx context.Context, tx *sqldb.Tx) error {
 		rows, err := tx.QueryContext(ctx,
-			`SELECT id, token_hash, workspace_id, session_id, user_id, agent_id, model_id,
+			`SELECT id, token_hash, token_seed, workspace_id, session_id, user_id, agent_id, model_id, device_id,
 			        tool_name, tool_call_id, tool_args, action_hash, definition_hash,
 			        agent_key, parent_tool_call_id, delegation_id, handoff_mode, status,
 			        expires_at, created_at, resolved_at
@@ -881,7 +1093,7 @@ func (s *agentStore) ResolveQueuedParks(ctx context.Context, sessionID int64, de
 			p := &model.ParkSnapshot{}
 			var definitionHash, agentKey, parentCall, handoffMode sql.NullString
 			var delegationID sql.NullInt64
-			if err := rows.Scan(&p.ID, &p.TokenHash, &p.WorkspaceID, &p.SessionID, &p.UserID, &p.AgentID, &p.ModelID,
+			if err := rows.Scan(&p.ID, &p.TokenHash, &p.TokenSeed, &p.WorkspaceID, &p.SessionID, &p.UserID, &p.AgentID, &p.ModelID, &p.DeviceID,
 				&p.ToolName, &p.ToolCallID, &p.ToolArgs, &p.ActionHash, &definitionHash,
 				&agentKey, &parentCall, &delegationID, &handoffMode, &p.Status,
 				&p.ExpiresAt, &p.CreatedAt, &p.ResolvedAt); err != nil {
@@ -919,7 +1131,7 @@ func (s *agentStore) PendingPark(ctx context.Context, sessionID int64) (*model.P
 	var definitionHash, agentKey, parentCall, handoffMode sql.NullString
 	var delegationID sql.NullInt64
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, token_hash, workspace_id, session_id, user_id, agent_id, model_id,
+		`SELECT id, token_hash, token_seed, workspace_id, session_id, user_id, agent_id, model_id, device_id,
 		        tool_name, tool_call_id, tool_args, action_hash, definition_hash,
 		        agent_key, parent_tool_call_id, delegation_id, handoff_mode, status,
 		        expires_at, created_at, resolved_at
@@ -927,7 +1139,7 @@ func (s *agentStore) PendingPark(ctx context.Context, sessionID int64) (*model.P
 		 WHERE session_id = ? AND status = ? AND expires_at > ?
 		 ORDER BY id DESC LIMIT 1`,
 		sessionID, model.ParkPending, time.Now().UTC()).
-		Scan(&p.ID, &p.TokenHash, &p.WorkspaceID, &p.SessionID, &p.UserID, &p.AgentID, &p.ModelID,
+		Scan(&p.ID, &p.TokenHash, &p.TokenSeed, &p.WorkspaceID, &p.SessionID, &p.UserID, &p.AgentID, &p.ModelID, &p.DeviceID,
 			&p.ToolName, &p.ToolCallID, &p.ToolArgs, &p.ActionHash, &definitionHash,
 			&agentKey, &parentCall, &delegationID, &handoffMode, &p.Status,
 			&p.ExpiresAt, &p.CreatedAt, &p.ResolvedAt)
@@ -945,24 +1157,8 @@ func (s *agentStore) PendingPark(ctx context.Context, sessionID int64) (*model.P
 	return p, nil
 }
 
-// RotateParkToken rebinds a pending snapshot to a fresh token hash. It touches
-// only a still-pending row, so a rotation cannot revive a card the person has
-// already answered.
-func (s *agentStore) RotateParkToken(ctx context.Context, parkID int64, tokenHash string) error {
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE agent_park_snapshots SET token_hash = ? WHERE id = ? AND status = ?`,
-		tokenHash, parkID, model.ParkPending)
-	if err != nil {
-		return wrapWriteErr("rotate park token", err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return store.ErrNotFound
-	}
-	return nil
-}
-
-const delegationCols = `id, session_id, workspace_id, parent_tool_call_id, agent_key, mode, fleet_id,
-	task, status, attempts, progress, result, error_text, created_at, completed_at`
+const delegationCols = `id, session_id, workspace_id, parent_tool_call_id, agent_key, mode, device_id,
+	fleet_id, task, status, attempts, progress, result, error_text, created_at, completed_at`
 
 func (s *agentStore) CreateDelegation(ctx context.Context, d *model.AgentDelegation) error {
 	d.CreatedAt = time.Now().UTC()
@@ -974,10 +1170,10 @@ func (s *agentStore) CreateDelegation(ctx context.Context, d *model.AgentDelegat
 	}
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO agent_delegations
-		 (session_id, workspace_id, parent_tool_call_id, agent_key, mode, fleet_id, task,
+		 (session_id, workspace_id, parent_tool_call_id, agent_key, mode, device_id, fleet_id, task,
 		  status, attempts, progress, result, error_text, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		d.SessionID, d.WorkspaceID, d.ParentToolCallID, d.AgentKey, d.Mode, d.FleetID,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		d.SessionID, d.WorkspaceID, d.ParentToolCallID, d.AgentKey, d.Mode, d.DeviceID, d.FleetID,
 		nullString(d.Task), d.Status, d.Attempts,
 		nullJSON(d.Progress), nullJSON(d.Result), nullString(d.ErrorText), d.CreatedAt)
 	if err != nil {
@@ -1117,7 +1313,7 @@ func scanDelegation(sc interface{ Scan(...any) error }) (*model.AgentDelegation,
 	var errText, task sql.NullString
 	var fleetID sql.NullInt64
 	if err := sc.Scan(&d.ID, &d.SessionID, &d.WorkspaceID, &d.ParentToolCallID, &d.AgentKey,
-		&d.Mode, &fleetID, &task, &d.Status, &d.Attempts, &progress, &result, &errText,
+		&d.Mode, &d.DeviceID, &fleetID, &task, &d.Status, &d.Attempts, &progress, &result, &errText,
 		&d.CreatedAt, &d.CompletedAt); err != nil {
 		return nil, err
 	}
@@ -1363,10 +1559,10 @@ func (s *agentStore) CreateFleetMembers(ctx context.Context, fleetID int64, memb
 	}
 
 	const insert sqldb.Statement = `INSERT INTO agent_delegations
-	  (session_id, workspace_id, parent_tool_call_id, agent_key, mode, fleet_id,
+	  (session_id, workspace_id, parent_tool_call_id, agent_key, mode, device_id, fleet_id,
 	   task, status, attempts, created_at)
 	 VALUES `
-	const cols = 10
+	const cols = 11
 
 	return s.db.Tx(ctx, func(ctx context.Context, tx *sqldb.Tx) error {
 		for start := 0; start < len(members); start += sqldb.RowChunk {
@@ -1378,7 +1574,7 @@ func (s *agentStore) CreateFleetMembers(ctx context.Context, fleetID int64, memb
 			args := make([]any, 0, len(chunk)*cols)
 			for _, m := range chunk {
 				args = append(args, m.SessionID, m.WorkspaceID, m.ParentToolCallID,
-					m.AgentKey, m.Mode, fleetID, nullString(m.Task), m.Status, m.Attempts, now)
+					m.AgentKey, m.Mode, m.DeviceID, fleetID, nullString(m.Task), m.Status, m.Attempts, now)
 			}
 			if _, err := tx.ExecContext(ctx, insert.Rows(len(chunk), cols), args...); err != nil {
 				return wrapWriteErr("create fleet members", err)

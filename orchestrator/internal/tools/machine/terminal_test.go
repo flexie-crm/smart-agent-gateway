@@ -18,7 +18,7 @@ import (
 func TestTheRulesAreAppliedBeforeAnythingIsSent(t *testing.T) {
 	sent := &recordingMachine{}
 	policy := cmdpolicy.Policy{Mode: cmdpolicy.PolicyDenylist, Denied: "rm\nshutdown"}
-	handle := terminalHandler(sent, policy)
+	handle := terminalHandler(sent, policy, tool.OwnerNone)
 
 	// A refused command never leaves this side. That is the point of checking
 	// here: a computer that is asked to run something and refuses has still been
@@ -76,7 +76,7 @@ func TestTheRulesAreAppliedBeforeAnythingIsSent(t *testing.T) {
 // on, rather than failing as though the tool were broken.
 func TestWithoutAComputerItSaysSo(t *testing.T) {
 	handle := terminalHandler(&recordingMachine{},
-		cmdpolicy.Policy{Mode: cmdpolicy.PolicyDenylist})
+		cmdpolicy.Policy{Mode: cmdpolicy.PolicyDenylist}, tool.OwnerNone)
 	result, err := handle(context.Background(), tool.Call{WorkspaceID: 1, UserID: 2, Args: json.RawMessage(`{"command":"git status"}`)})
 	if err != nil {
 		t.Fatalf("handle: %v", err)
@@ -124,7 +124,7 @@ func (m *recordingMachine) Runs(_, _ int64, _ string) map[string]int {
 // administrator.
 func TestTheZeroPolicyRunsNothingAndSaysWhy(t *testing.T) {
 	sent := &recordingMachine{}
-	handle := terminalHandler(sent, cmdpolicy.Policy{})
+	handle := terminalHandler(sent, cmdpolicy.Policy{}, tool.OwnerNone)
 
 	result, err := handle(context.Background(), call(`{"command":"git status"}`))
 	if err != nil {

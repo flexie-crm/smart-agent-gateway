@@ -54,14 +54,14 @@ func (e *testEnv) agentOnURL(key, name, baseURL string, tools ...string) {
 		WorkspaceID: e.ws.ID, VendorKey: model.VendorOpenAICompatible,
 		Name: name + " vendor", BaseURL: baseURL,
 	}
-	if err := e.app.Store.Vendors().Create(ctx, vendor); err != nil {
+	if err := e.app.Store.Vendors().Create(ctx, vendor, model.Nobody()); err != nil {
 		e.t.Fatalf("create agent vendor: %v", err)
 	}
 	m := &model.AIModel{
 		WorkspaceID: e.ws.ID, VendorID: vendor.ID, ModelKey: "spec-" + key,
 		Type: model.ModelTypeChat, ContextWindow: 100_000,
 	}
-	if err := e.app.Store.AIModels().Create(ctx, m); err != nil {
+	if err := e.app.Store.AIModels().Create(ctx, m, model.Nobody()); err != nil {
 		e.t.Fatalf("create agent model: %v", err)
 	}
 	mid := m.ID
@@ -69,7 +69,7 @@ func (e *testEnv) agentOnURL(key, name, baseURL string, tools ...string) {
 		WorkspaceID: e.ws.ID, Key: key, Name: name,
 		Instructions: "Do the work.", Status: model.StatusActive,
 		ModelID: &mid, Tools: tools,
-	}); err != nil {
+	}, model.Nobody()); err != nil {
 		e.t.Fatalf("create agent: %v", err)
 	}
 }

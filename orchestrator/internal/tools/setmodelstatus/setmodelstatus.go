@@ -74,7 +74,10 @@ func New(st store.Store, auth toolkit.Authorizer) tool.Tool {
 				return tool.Result{}, err
 			}
 			target.Status = a.Status
-			if err := st.AIModels().Update(ctx, target); err != nil {
+			if err := st.AIModels().Update(ctx, target,
+				// The agent did this, and there is no person behind the call: the
+				// name is what should be printed for it.
+				model.Actor{Name: model.DefaultAgentName}); err != nil {
 				return tool.Result{}, err
 			}
 			return toolkit.Success(map[string]any{

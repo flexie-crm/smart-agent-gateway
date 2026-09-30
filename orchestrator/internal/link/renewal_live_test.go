@@ -61,7 +61,7 @@ func TestACallSurvivesItsCredentialRunningOut(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	client, heard := startRustClientRenewing(t, server.URL, "first", "second")
-	t.Cleanup(client.stop)
+	t.Cleanup(client.Stop)
 	waitUntil(t, func() bool { return r.Online(5, 11, "the-laptop") })
 
 	if runs := r.Runs(5, 11, "the-laptop"); runs["terminal"] == 0 {

@@ -138,7 +138,10 @@ func (s *Service) RegisterClient(ctx context.Context, req DCRRequest) (*DCRRespo
 			"unsupported token_endpoint_auth_method")
 	}
 
-	if err := s.store.CreateClient(ctx, client); err != nil {
+	if err := s.store.CreateClient(ctx, client,
+		// Dynamic registration: software registering itself, with no person
+		// behind it. Recording nobody is the honest answer.
+		model.Nobody()); err != nil {
 		return nil, fmt.Errorf("create client: %w", err)
 	}
 	return &DCRResponse{

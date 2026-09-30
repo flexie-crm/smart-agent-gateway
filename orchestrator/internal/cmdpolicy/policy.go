@@ -482,22 +482,15 @@ func sameProgram(entry, word string) bool {
 // can ever be, so it matches nothing rather than matching loosely.
 const Unknown = "\x00unknown"
 
-// literalWords reads a command's words, and is the strict form: every word must
-// be known. Used where the command NAME is being read.
-func literalWords(args []*syntax.Word) ([]string, bool) {
-	words := make([]string, 0, len(args))
-	for _, arg := range args {
-		word, ok := literalWord(arg)
-		if !ok {
-			return nil, false
-		}
-		words = append(words, word)
-	}
-	return words, true
-}
-
-// readWords is the same, except that a word the shell will decide is reported as
+// readWords reads a command's words, reporting a word the shell will decide as
 // Unknown rather than refusing the whole command.
+//
+// There is no strict companion that refuses instead. There was, and both
+// callers stopped using it: refusing here could only say "no", while refusing
+// at the call site (policy.allows, and the denylist walk) can say WHICH word it
+// could not read and why, which is the difference between a person fixing their
+// command and a person guessing. Both of them check the name for Unknown as
+// their first act, so nothing was loosened by it going.
 //
 // The strict form refuses `ls *.log` and `grep "$pattern" file`, which are the
 // ordinary shape of using a shell, and it refused them for a reason that only

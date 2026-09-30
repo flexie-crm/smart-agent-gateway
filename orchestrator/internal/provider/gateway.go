@@ -2,8 +2,10 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 
 	"flexie.io/sag/internal/model"
@@ -31,7 +33,7 @@ const reserveTokens = 8000
 // normal failure rather than a stored capability flag guessing on its behalf.
 func (r *Resolved) Prepare(req GenerateRequest) GenerateRequest {
 	req.Model = r.Model.ModelKey
-	req.Messages = TrimToBudget(req.Messages, BudgetFor(r.Model, reserveTokens))
+	req.Messages = TrimToBudget(req.Messages, messageBudget(r.Model, req.Tools))
 	// Resolved here, once, so no adapter has to know where a value came from.
 	// The narrower decision wins, which is the layered order the rest of the
 	// product already uses (KB/15): whatever the caller set (the agent), then
@@ -245,13 +247,98 @@ func (g *Gateway) buildProvider(vendor *model.AIVendor, apiKey string) (Provider
 	return NewOpenAICompatible(dialect, apiKey, vendor.BaseURL, hc)
 }
 
+// messageBudget is the room the conversation has once the tools it is offered
+// are counted. They are sent with every call, beside the messages, and the
+// window has to hold both: leaving them out let a request the trim had judged
+// to fit arrive larger than the window.
+func messageBudget(m *model.AIModel, tools []ToolDef) int {
+	budget := BudgetFor(m, reserveTokens)
+	if budget <= 0 {
+		// No window configured: nothing is trimmed, as before.
+		return 0
+	}
+	budget -= toolChars(tools)
+	if budget < 1 {
+		// The tools alone fill the window. What is kept is then only what has
+		// to be sent at all: the system messages and the newest step.
+		return 1
+	}
+	return budget
+}
+
+// toolChars is what the tools take, counted the way messages are.
+func toolChars(tools []ToolDef) int {
+	if len(tools) == 0 {
+		return 0
+	}
+	raw, err := json.Marshal(tools)
+	if err != nil {
+		return 0
+	}
+	return len(raw)
+}
+
+// RequestChars is how much of the window a request takes, in the characters
+// the trim counts: its messages and its tools. It is the one measure of how
+// full a conversation is, so what the chat shows and what the trim does agree.
+func RequestChars(messages []Message, tools []ToolDef) int {
+	return size(messages) + toolChars(tools)
+}
+
+// Fullness is chars as a percentage of the room a model's window gives, the
+// room the trim works in, rounded UP: 100 or less is a request sent whole, and
+// anything over 100 is one the trim is dropping the oldest messages from, with
+// no value that could mean either. It is not capped, because over 100 is a real
+// state, and false when the model has no window to measure against.
+func Fullness(m *model.AIModel, chars int) (int, bool) {
+	if m == nil {
+		return 0, false
+	}
+	room := BudgetFor(m, reserveTokens)
+	if room <= 0 {
+		return 0, false
+	}
+	return int(math.Ceil(float64(chars) * 100 / float64(room))), true
+}
+
 // BudgetFor derives the character budget for a model's context window,
-// reserving room for the reply.
+// reserving room for the reply, at the rate the model's own counts have shown.
 func BudgetFor(m *model.AIModel, reserveTokens int) int {
 	if m.ContextWindow <= 0 {
 		// An unconfigured window means the operator did not tell us; not
 		// trimming is safer than trimming to a number we invented.
 		return 0
 	}
-	return BudgetChars(m.ContextWindow, reserveTokens)
+	return BudgetChars(m.ContextWindow, reserveTokens, CharsPerToken(m))
+}
+
+// CharsPerToken is how many of our characters one of this model's tokens is.
+//
+// Measured, not assumed: every vendor says how many tokens a request was, in
+// the answer to it, and the characters sent are counted here, so the two are
+// kept as running totals on the model (MeasureCall) and this is one divided
+// by the other. Until the model has reported once, the safe guess.
+func CharsPerToken(m *model.AIModel) float64 {
+	if m != nil && m.MeasuredTokens > 0 && m.MeasuredChars > 0 {
+		return m.MeasuredChars / m.MeasuredTokens
+	}
+	return GuessCharsPerToken
+}
+
+// MeasureKeep is how much of a model's running totals each new call keeps, so
+// the last ten or so calls decide its rate, the large ones most.
+const MeasureKeep = 0.9
+
+// Measurable says whether one call's characters and reported tokens are fit to
+// learn from. A vendor that reports no tokens (some servers leave the count
+// out) teaches nothing. Neither does one whose count cannot be the whole
+// request: past six characters a token is further than any model measured
+// (3.5 to 4.4), and a rate that high would let a conversation grow past the
+// window, which is the one mistake the rate must not make.
+func Measurable(chars, tokens int64) bool {
+	if chars <= 0 || tokens <= 0 {
+		return false
+	}
+	rate := float64(chars) / float64(tokens)
+	return rate >= 1 && rate <= 6
 }

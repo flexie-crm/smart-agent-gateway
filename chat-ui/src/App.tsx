@@ -1,5 +1,4 @@
 import './App.css'
-import './css/markdown.css'
 
 import {
   Conversation,
@@ -8,8 +7,6 @@ import {
   ConversationFollowsWhatYouSend,
 } from '@/components/ui/ai/conversation';
 import { Loader2, PaperclipIcon, Mic, ArrowUp, RotateCcwIcon, Maximize2Icon, Minimize2Icon, Minus, X, PanelLeft, Plus, ShieldCheck, Shield } from 'lucide-react';
-import { Message, MessageContent } from '@/components/ui/ai/message';
-import { Response } from '@/components/ui/ai/response';
 import {
   PromptInput,
   PromptInputButton,
@@ -18,71 +15,26 @@ import {
   PromptInputToolbar,
   PromptInputTools,
 } from '@/components/ui/ai/prompt-input';
-import {
-  Reasoning,
-  ReasoningContent,
-  ReasoningTrigger,
-} from '@/components/ui/ai/reasoning';
-import { ToolRow } from '@/components/ui/ai/tool-timeline';
 import { Button } from '@/components/ui/button';
-import { ConfirmBlock } from '@/components/ui/ai/confirm-block';
 import { ChatErrorBoundary } from '@/components/ui/ai/chat-error-boundary';
-import { useCallback, useState, useEffect, useMemo, useRef, memo } from 'react';
+import { useCallback, useState, useEffect, useMemo, useRef } from 'react';
 import { useChatStream } from '@lib/use-chat-stream';
 import { useChatList } from '@lib/use-chat-list';
 import { canAttach, pickerFilter, whyUnavailable } from '@lib/use-chat-accepts';
 import { useRecorder, canRecord, clock, METER_BARS } from '@lib/use-recorder';
-import { apiUpload, apiFetch } from '@lib/api';
+import { apiUpload } from '@lib/api';
 import { resolveChatStore, chatsEndpointFor, isMultiChatEnabled } from '@lib/chat-mode';
 import { ChatSidebar } from '@/components/ChatSidebar';
 import { DelegationRail } from '@/components/DelegationRail';
-import { isConfirmMessage, isAssistantMessage } from '@lib/chat-types';
-import { assistantTimelineItems, rendersNothing } from '@lib/message-parts';
-import type { ChatMessage, AgentActivity, FileAttachment, MessagePart } from '@lib/chat-types';
+import { AgentView } from '@/components/AgentView';
+import { MessageItem, IDLE, type ChatTheme } from '@/components/MessageItem';
+import { getFileTypeInfo, isImageFile } from '@/components/attachments';
+import { ContextLine } from '@/components/ContextLine';
+import { isAssistantMessage } from '@lib/chat-types';
+import { rendersNothing } from '@lib/message-parts';
+import type { FileAttachment, MessagePart } from '@lib/chat-types';
 import type { ClientToolRegistry } from '@lib/client-tool-dispatcher';
 import { t, resolveDynamic } from '@lib/utils';
-import { activityLabel } from '@lib/activity-label';
-
-/**
- * The thumbnail of an attached image.
- *
- * It cannot be a plain <img src>: the file is behind the session, and a browser
- * does not put an Authorization header on an image request. So the bytes are
- * fetched the way every other call is and turned into an object URL.
- *
- * Which also makes it survive a reload, and that is the point rather than a
- * side effect. A preview made from the local File lives as long as the tab and
- * dies on refresh, so a reloaded conversation showed a question with a broken
- * picture above it. This one asks the server, which still has the file.
- */
-function AttachmentImage({ id, alt }: { id: string; alt: string }) {
-  const [url, setUrl] = useState<string | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    let made: string | null = null;
-    void (async () => {
-      try {
-        const res = await apiFetch(`/v1/chat/uploads/${id}`);
-        if (!res.ok) return;
-        const blob = await res.blob();
-        if (!alive) return;
-        made = URL.createObjectURL(blob);
-        setUrl(made);
-      } catch {
-        // No thumbnail. The card still shows the name and the type, which is
-        // most of what it was for.
-      }
-    })();
-    return () => {
-      alive = false;
-      if (made) URL.revokeObjectURL(made);
-    };
-  }, [id]);
-
-  if (!url) return <div className="size-full animate-pulse bg-muted" />;
-  return <img src={url} alt={alt} className="size-full object-cover" />;
-}
 
 /**
  * How loud it has been, as bars.
@@ -122,26 +74,6 @@ function Waveform({ levels }: { levels: number[] }) {
   );
 }
 
-// ─── File type metadata for visual display ─────────────────────────────────
-// Keyed on the file's own type, which the server already established from the
-// name and matched a rule against. Guessing again from a MIME type the browser
-// claimed would be a second, less reliable answer to a settled question.
-const IMAGE_TYPES = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'heic', 'svg']);
-
-function isImageFile(file: FileAttachment): boolean {
-  return IMAGE_TYPES.has(file.file_type);
-}
-
-function getFileTypeInfo(file: FileAttachment) {
-  const ext = file.file_type;
-  if (ext === 'pdf') return { label: 'PDF', color: '#dc2626', bg: '#fef2f2' };
-  if (ext === 'csv') return { label: 'CSV', color: '#16a34a', bg: '#f0fdf4' };
-  if (ext === 'xlsx' || ext === 'xls') return { label: 'XLS', color: '#16a34a', bg: '#f0fdf4' };
-  if (ext === 'docx' || ext === 'doc') return { label: 'DOC', color: '#2563eb', bg: '#eff6ff' };
-  if (isImageFile(file)) return { label: ext.toUpperCase() || 'IMG', color: '#7c3aed', bg: '#f5f3ff' };
-  return { label: ext.toUpperCase() || 'FILE', color: '#64748b', bg: '#f8fafc' };
-}
-
 /**
  * Flatten an assistant message into ONE ordered list of timeline items —
  * reasoning blocks, text blocks, and individual tool rows — so live and
@@ -157,17 +89,6 @@ function getFileTypeInfo(file: FileAttachment) {
  *   the same rhythm as everything else instead of bunching.
  */
 
-/**
- * Per-role visual overrides. Any React CSSProperties key is accepted and
- * passed verbatim to inline `style`. Common ones are `fontSize`, `color`,
- * `background`; but you can also pass `padding`, `border`, `borderRadius`,
- * `boxShadow`, `margin`, etc.
- *
- * Convenience: if you set `background` (or `backgroundColor`) without an
- * explicit `padding`, the assistant and reasoning roles auto-receive a
- * sensible inset + rounding so text doesn't sit flush against the bubble edge.
- * Set `padding` explicitly to opt out.
- */
 /** Below this the list column does not fit beside a conversation. */
 const SMALL_SCREEN = '(max-width: 767px)';
 
@@ -180,13 +101,6 @@ function isSmallScreen(): boolean {
   } catch {
     return false;
   }
-}
-
-type RoleTheme = React.CSSProperties;
-interface ChatTheme {
-  user?: RoleTheme;
-  assistant?: RoleTheme;
-  reasoning?: RoleTheme;
 }
 
 interface FlexieChatProps {
@@ -293,228 +207,6 @@ declare global {
   }
 }
 
-// ─── Memoized message item ──────────────────────────────────────────────────
-// Extracted so completed messages (stable object references from the stream
-// processor) skip rendering entirely on every streaming chunk / RAF tick.
-
-interface MessageItemProps {
-  message: ChatMessage;
-  /** What the agent is doing. The streaming row shows it, so that what the
-   *  agent is doing and what it has said are one element the virtual list
-   *  measures together. It used to be a footer BELOW the list: the moment
-   *  reasoning began, that footer unmounted while a reasoning block mounted
-   *  inside the row, and the column changed height twice in two places for
-   *  what a reader sees as one continuous state. */
-  activity: AgentActivity;
-  showReasoning: boolean;
-  showTools: boolean;
-  theme?: ChatTheme;
-  sendMessage: (text: string) => void;
-  respondToConfirmation: (token: string, action: 'approved' | 'rejected' | 'approved_all') => void;
-  lang?: Record<string, string>;
-}
-
-/** Passes every key on `t` through to inline `style`. When a background is
- * set without an explicit `padding`, applies sensible inset + rounding —
- * Tailwind only pads the user role by default, so a custom background on
- * assistant/reasoning would otherwise leave text flush against the edge. */
-function roleStyle(t: RoleTheme | undefined, paddingWhenBg?: string): React.CSSProperties | undefined {
-  if (!t || Object.keys(t).length === 0) return undefined;
-  const out: React.CSSProperties = { ...t };
-  const hasBg = t.background !== undefined || t.backgroundColor !== undefined;
-  if (paddingWhenBg && hasBg && out.padding === undefined) {
-    out.padding = paddingWhenBg;
-    if (out.borderRadius === undefined) out.borderRadius = '0.5rem';
-  }
-  return out;
-}
-
-/** One object, so a completed row's props never change identity. */
-const IDLE: AgentActivity = { kind: 'idle' };
-
-/**
- * What the agent is doing, at the end of the row it is doing it in.
- *
- * Reasoning is deliberately absent when it is being SHOWN: the reasoning block
- * above says "Reasoning…" with its own spinner, and two spinners saying the
- * same thing is worse than one. When reasoning is withheld there is no block,
- * so this speaks for it.
- *
- * Text arriving needs no line at all. The text is the indicator.
- */
-const ActivityLine = memo(({ activity, lang }: {
-  activity: AgentActivity;
-  lang?: Record<string, string>;
-}) => {
-  // The decision is activityLabel's (lib/activity-label.ts), where it can be
-  // tested without building an application and watching a turn. This draws it.
-  const label = activityLabel(activity, lang);
-  if (label === null) return null;
-  return (
-    <div className="flex items-center gap-2 text-muted-foreground text-sm">
-      <Loader2 className="size-4 animate-spin" />
-      <span>{label}</span>
-    </div>
-  );
-});
-ActivityLine.displayName = 'ActivityLine';
-
-const MessageItem = memo(
-  ({ message, activity, showReasoning, showTools, theme, sendMessage, respondToConfirmation, lang }: MessageItemProps) => {
-    const isReasoningStreaming = activity.kind === 'reasoning';
-    // user role already has Tailwind px-4 py-3 + rounded-lg, so no bg-padding default needed.
-    const userStyle = roleStyle(theme?.user);
-    const assistantStyle = roleStyle(theme?.assistant, '0.75rem 1rem');
-    const reasoningStyle = roleStyle(theme?.reasoning, '0.4rem 0.75rem');
-    if (isConfirmMessage(message)) {
-      // No wrapper. The row it sits in already spaces it like every other
-      // message; the two divs that used to be here added a second gap under it,
-      // so an answered approval was the one line in the transcript with double
-      // the space beneath.
-      return (
-        <ConfirmBlock
-          confirmation={message.confirmation}
-          onRespond={respondToConfirmation}
-          lang={lang}
-        />
-      );
-    }
-
-    const items = isAssistantMessage(message) ? assistantTimelineItems(message) : [];
-
-    // An assistant turn with nothing in it renders NOTHING, streaming or not:
-    // an empty child still costs the conversation's `space-y-3` on both sides
-    // (see rendersNothing, which owns the rule and is tested).
-    if (isAssistantMessage(message) && rendersNothing(message)) return null;
-
-    return (
-      // A message renders as ONE flat vertical timeline. Every item (reasoning
-      // block, text block, individual tool row) is a direct child of a single
-      // flex-col gap-3 container, so one gap (12px) is the sole source of spacing
-      // between them. No nested tool group with its own gap, so N tool calls never
-      // bunch tighter than the surrounding reasoning or text. User turns add
-      // py-[18px] on top so the user/AI boundary reads as about 30px.
-      <div className={message.role === 'user' ? 'flex flex-col gap-3 py-[18px]' : 'flex flex-col gap-3'}>
-        {/* Error alert — shown when the AI vendor returns an error */}
-        {isAssistantMessage(message) && message.error && (
-          <div className="flex items-start gap-2.5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-800/40 dark:bg-red-950/30 dark:text-red-300">
-            <svg className="mt-0.5 size-4 shrink-0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
-              <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-8-5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0v-4.5A.75.75 0 0110 5zm0 10a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
-            </svg>
-            <span>{message.error}</span>
-          </div>
-        )}
-        {/* File attachment cards — above the user message bubble (like ChatGPT) */}
-        {message.role === 'user' && message.attachments && message.attachments.length > 0 && (
-          <div className="flex flex-wrap gap-2 justify-end">
-            {message.attachments.map((file) => {
-              if (isImageFile(file)) {
-                return (
-                  <div key={file.id} className="w-16 h-16 rounded-xl overflow-hidden border border-border/40 shadow-sm">
-                    {/* From the server, not from the local preview. The
-                        preview is a blob URL that dies with the tab, so a
-                        reloaded conversation showed a broken picture above the
-                        question it belonged to. */}
-                    <AttachmentImage id={file.id} alt={file.file_name} />
-                  </div>
-                );
-              }
-              const info = getFileTypeInfo(file);
-              return (
-                <div key={file.id} className="flex items-center gap-2 rounded-xl border border-border/40 bg-background/80 px-2.5 py-2 shadow-sm max-w-[200px]">
-                  <div className="shrink-0 w-8 h-8 rounded-lg flex items-center justify-center" style={{ backgroundColor: info.bg }}>
-                    <span className="text-[0.6rem] font-bold leading-none" style={{ color: info.color }}>{info.label}</span>
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-xs font-medium text-foreground truncate leading-tight">{file.file_name}</div>
-                    <div className="text-[0.6rem] text-muted-foreground leading-tight">{info.label}</div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-        {/* User bubble (assistant text renders inside the flat timeline below). */}
-        {message.role === 'user' && (
-          <Message from="user" waiting={message.waiting}>
-            <MessageContent style={userStyle}>
-              <Response useMarkdown={false} sendMessage={sendMessage} lang={lang} isStreaming={false}>
-                {message.attachments && message.attachments.length > 0
-                  ? message.content.replace(/\n\n\[Attached files:[^\]]*\]$/, '')
-                  : message.content}
-              </Response>
-            </MessageContent>
-          </Message>
-        )}
-        {/* Assistant flat timeline: reasoning / text / tool items in order, each a
-            direct sibling under the container's single gap. Live and reloaded
-            messages produce the SAME list via assistantTimelineItems(), so a turn
-            looks identical whether it just streamed or came back from history.
-            showReasoning/showTools gate their items; text always renders. */}
-        {isAssistantMessage(message) && items.map((part, i) => {
-          if (part.kind === 'reasoning') {
-            return showReasoning ? (
-              <Reasoning
-                key={i}
-                isStreaming={!!message.isStreaming && isReasoningStreaming && i === items.length - 1}
-                hasReasoning={true}
-                defaultOpen={false}
-                reasoningSource={part.model}
-              >
-                <ReasoningTrigger style={reasoningStyle} />
-                <ReasoningContent style={reasoningStyle}>{part.text}</ReasoningContent>
-              </Reasoning>
-            ) : null;
-          }
-          if (part.kind === 'tool') {
-            return showTools ? <ToolRow key={i} tool={part.tool} lang={lang} /> : null;
-          }
-          if (part.kind === 'agent') {
-            // An agent's answer the Gateway delegated for: shown apart, so it
-            // reads as the agent's work and not as the Gateway's own reply.
-            return part.text ? (
-              <div key={i} className="ml-10 border-l-2 border-border pl-3">
-                <div className="mb-1 text-xs font-medium text-muted-foreground">
-                  {part.agent ? `${part.agent}` : 'Agent'}
-                </div>
-                <div className="text-sm text-muted-foreground">
-                  <Response useMarkdown sendMessage={sendMessage} lang={lang} isStreaming={!!message.isStreaming}>
-                    {part.text}
-                  </Response>
-                </div>
-              </div>
-            ) : null;
-          }
-          return part.text ? (
-            <Message key={i} from="assistant">
-              <MessageContent style={assistantStyle}>
-                <Response useMarkdown sendMessage={sendMessage} lang={lang} isStreaming={!!message.isStreaming}>
-                  {part.text}
-                </Response>
-              </MessageContent>
-            </Message>
-          ) : null;
-        })}
-        {/* Last, because it is what happens NEXT. Inside the row rather than
-            below the list, so the virtual list measures it with everything
-            else and a change of state is one height change instead of two. */}
-        {isAssistantMessage(message) && message.isStreaming && (
-          <ActivityLine activity={activity} lang={lang} />
-        )}
-      </div>
-    );
-  },
-  (prev, next) =>
-    prev.message === next.message &&
-    prev.activity === next.activity &&
-    prev.showReasoning === next.showReasoning &&
-    prev.showTools === next.showTools &&
-    prev.theme === next.theme &&
-    prev.sendMessage === next.sendMessage &&
-    prev.respondToConfirmation === next.respondToConfirmation &&
-    prev.lang === next.lang
-);
-MessageItem.displayName = 'MessageItem';
 
 /** Where the chat talks to the gateway when nothing else says. */
 const DEFAULT_STREAM_ENDPOINT = '/v1/chat/stream'
@@ -561,6 +253,8 @@ const FlexieAiAgent: React.FC<FlexieChatProps> = ({ streamEndpoint, fetchEndpoin
   const chatList = useChatList(chatsEndpointFor(config.chatStore, config.chatsEndpoint));
   const multiChatEnabled = isMultiChatEnabled(config.chatStore, chatList.enabled);
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
+  // Which chip is open to read, by its id; null when none is.
+  const [openedAgent, setOpenedAgent] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [ensuredOnce, setEnsuredOnce] = useState(false);
   const ensuringRef = useRef(false);
@@ -602,7 +296,7 @@ const FlexieAiAgent: React.FC<FlexieChatProps> = ({ streamEndpoint, fetchEndpoin
   // `accepts` comes from the conversation's own answer: what may be attached and
   // whether anything may be spoken are read off the Gateway's configuration, and
   // the history request already carries them.
-  const { messages, isStreaming, sendMessage, stop, reset, activity, respondToConfirmation, approvalMode, setApprovalMode, delegations, cancelDelegation, accepts, hasOlder, loadingOlder, loadOlder } = useChatStream(
+  const { messages, isStreaming, sendMessage, stop, reset, activity, respondToConfirmation, approvalMode, setApprovalMode, delegations, cancelDelegation, accepts, hasOlder, loadingOlder, loadOlder, meter, compact } = useChatStream(
     config.streamEndpoint,
     config.fetchEndpoint,
     config.attachEndpoint,
@@ -676,7 +370,22 @@ const FlexieAiAgent: React.FC<FlexieChatProps> = ({ streamEndpoint, fetchEndpoin
     return () => window.removeEventListener('message', handleMessage);
   }, []);
 
-  const [inputValue, setInputValue] = useState('')
+  // What is typed lives in a ref, not in state. As state, every keystroke
+  // re-rendered this whole component, and some of its work grows with the
+  // conversation: measured in WebKit, the engine the desktop app uses, a
+  // keystroke in a long conversation took 23ms, and 11ms once typing re-rendered
+  // nothing here (the message rows were already skipping; memoising the list
+  // changed nothing). A ref and not the DOM, because recording unmounts the box
+  // and what was typed must survive it. Only whether there is anything to send is
+  // state, for the send button, and that changes twice a message.
+  const draft = useRef('')
+  const composerBox = useRef<HTMLTextAreaElement>(null)
+  const [hasText, setHasText] = useState(false)
+  const setDraft = useCallback((text: string) => {
+    draft.current = text
+    if (composerBox.current) composerBox.current.value = text
+    setHasText(text.trim() !== '')
+  }, [])
   // What the composer may offer, read from the Gateway's own configuration
   // rather than from a prop: a button that might turn out to do nothing is
   // worse than no button.
@@ -893,16 +602,16 @@ const FlexieAiAgent: React.FC<FlexieChatProps> = ({ streamEndpoint, fetchEndpoin
         setUploadError(t('nothing_heard', config.lang, 'Nothing was heard in that recording'));
         return;
       }
-      const typed = inputValue.trim();
+      const typed = draft.current.trim();
       const message = typed ? `${typed} ${said}` : said;
-      setInputValue('');
+      setDraft('');
       sendMessage(message);
     } catch {
       setUploadError(t('transcribe_failed', config.lang, 'That recording could not be turned into words'));
     } finally {
       setTranscribing(false);
     }
-  }, [recorder, config.lang, inputValue, sendMessage]);
+  }, [recorder, config.lang, setDraft, sendMessage]);
 
   const cancelTalking = useCallback(() => {
     recorder.cancel();
@@ -915,23 +624,24 @@ const FlexieAiAgent: React.FC<FlexieChatProps> = ({ streamEndpoint, fetchEndpoin
     // answers one thing at a time, but what is typed mid-answer now goes into
     // the running turn rather than being dropped, and the person usually typed
     // it BECAUSE of what they can see happening.
-    if (!inputValue.trim() || isUploading || chatNotReady) return
+    const typed = draft.current
+    if (!typed.trim() || isUploading || chatNotReady) return
 
     const attachments = pendingFiles.length > 0 ? [...pendingFiles] : undefined;
-    sendMessage(inputValue, attachments)
-    setInputValue('')
+    sendMessage(typed, attachments)
+    setDraft('')
     // The previews are blob URLs this document holds. Sending ends their life
     // as surely as removing one does, and only removal used to revoke them, so
     // every file actually sent leaked one.
     pendingFiles.forEach((f) => { if (f.previewUrl) URL.revokeObjectURL(f.previewUrl) })
     setPendingFiles([])
     setUploadError(null)
-  }, [inputValue, isUploading, sendMessage, pendingFiles, chatNotReady])
+  }, [setDraft, isUploading, sendMessage, pendingFiles, chatNotReady])
 
   const handleReset = useCallback(() => {
     reset()
-    setInputValue('')
-  }, [reset])
+    setDraft('')
+  }, [reset, setDraft])
 
   // One-time bootstrap: pick the last-opened chat, else the most-recent one. If
   // the user has NO chats we stay in a draft "New chat" (currentChatId = null)
@@ -1227,6 +937,21 @@ const FlexieAiAgent: React.FC<FlexieChatProps> = ({ streamEndpoint, fetchEndpoin
           </div>
         )}
         <PromptInput onSubmit={handleSubmit}>
+          {/* How full the conversation is, and the way to make room. Inside the
+              composer, above what is being typed, so it never scrolls away and
+              sits where the next message is decided. Only for a conversation
+              that exists: a draft has nothing in it yet. */}
+          {currentChatId && (
+            <ContextLine
+              meter={meter}
+              busy={isStreaming}
+              lang={config.lang}
+              onCompact={() => {
+                const base = chatsEndpointFor(config.chatStore, config.chatsEndpoint)
+                if (base) void compact(base)
+              }}
+            />
+          )}
           {composerMode === 'talk' ? (
             /* Recording. The textarea is UNMOUNTED rather than disabled: Enter
                inside it calls form.requestSubmit(), so one that is merely
@@ -1265,10 +990,19 @@ const FlexieAiAgent: React.FC<FlexieChatProps> = ({ streamEndpoint, fetchEndpoin
             </div>
           ) : (
             <PromptInputTextarea
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
+              ref={composerBox}
+              defaultValue={draft.current}
+              onChange={(e) => {
+                draft.current = e.target.value
+                setHasText(e.target.value.trim() !== '')
+              }}
+              // Frozen while the conversation is compacted: what is typed now
+              // would be sent into a conversation that is being rewritten.
+              disabled={meter.compacting}
               placeholder={
-                transcribing
+                meter.compacting
+                  ? t('compacting_placeholder', config.lang, 'Compacting this conversation…')
+                  : transcribing
                   ? t('transcribing', config.lang, 'Sending what you said...')
                   : t('chat_placeholder', config.lang, 'How can I help you today?')
               }
@@ -1364,7 +1098,7 @@ const FlexieAiAgent: React.FC<FlexieChatProps> = ({ streamEndpoint, fetchEndpoin
               </Button>
             )}
             <PromptInputSubmit
-              disabled={!inputValue.trim() || isStreaming || isUploading || chatNotReady}
+              disabled={!hasText || isStreaming || isUploading || chatNotReady || meter.compacting}
               status={isStreaming ? 'streaming' : 'ready'}
             />
           </PromptInputToolbar>
@@ -1380,7 +1114,20 @@ const FlexieAiAgent: React.FC<FlexieChatProps> = ({ streamEndpoint, fetchEndpoin
       {/* The background-tasks column: right side of the chat room, a flex sibling
           of the conversation so it takes its own room level with the messages.
           Renders only while agents run. */}
-      <DelegationRail delegations={delegations} onCancel={cancelDelegation} />
+      <DelegationRail delegations={delegations} onCancel={cancelDelegation} onOpen={(d) => setOpenedAgent(d.id)} />
+      {/* An agent, or a batch, opened from its chip to read. Its chip is looked
+          up by id on every render, so the socket's pushes keep it current and a
+          conversation switched away closes it. */}
+      <AgentView
+        chip={delegations.find((d) => d.id === openedAgent) ?? null}
+        chatId={currentChatId}
+        historyEndpoint={config.fetchEndpoint}
+        showReasoning={config.showReasoning}
+        showTools={config.showTools}
+        theme={config.theme}
+        lang={config.lang}
+        onClose={() => setOpenedAgent(null)}
+      />
       </div>
 
       {/* Small screens: the list is an overlay drawer, opened from the header.

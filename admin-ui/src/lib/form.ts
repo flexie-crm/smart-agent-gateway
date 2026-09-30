@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ApiError } from './api'
+import { ApiError, Offline, Unreadable } from './api'
 
 /**
  * The two levels a form can fail at.
@@ -40,8 +40,10 @@ export function useFormErrors(): FormErrors {
     },
     fail(failure: unknown) {
       if (!(failure instanceof ApiError)) {
-        // The request never got an answer. There is no field to blame.
-        setForm('The gateway did not answer.')
+        // Not a refusal, so there is no field to blame. Which of the other
+        // three it is decides what is said, and describeError is the one place
+        // that decides it.
+        setForm(describeError(failure))
         setFields({})
         return
       }
@@ -71,10 +73,39 @@ export function sentence(text: string): string {
 }
 
 /**
- * describeError turns a caught failure into one line a person can read: the
- * gateway's own reason when it gave one, and a plain fallback when the request
- * never reached it. It is what an error toast says.
+ * describeError turns a caught failure into one line a person can read.
+ *
+ * FOUR things can go wrong and they are genuinely different, so they are told
+ * apart here rather than collapsed into one sentence:
+ *
+ *   - the gateway REFUSED, and said why, in words we wrote (ApiError). Its own
+ *     reason is what the person reads;
+ *   - the gateway BROKE, which is a refusal with a 5xx on it. Handled on the
+ *     form level by fail(), because there is no field to blame;
+ *   - the gateway SAID NOTHING (Offline): down, restarting, or the network went
+ *     away. It says nothing about the request either, so trying again is the
+ *     honest advice;
+ *   - the ANSWER could not be read (Unreadable): something arrived and was not
+ *     what it claimed to be;
+ *   - and anything else is OURS.
+ *
+ * That last one is why this function is not a ternary any more. A fault in the
+ * console used to be reported as the gateway not answering, which is a claim
+ * about a server that is working perfectly, and it hid our own defects: nobody
+ * reports "the console threw", they report "the gateway is down".
  */
 export function describeError(failure: unknown): string {
-  return failure instanceof ApiError ? sentence(failure.description) : 'The gateway did not answer.'
+  if (failure instanceof ApiError) return sentence(failure.description)
+  if (failure instanceof Offline || failure instanceof Unreadable) return failure.message
+
+  // Ours. The real error goes to the browser's console, because it is the only
+  // copy of what happened and swallowing it is how a bug becomes unfindable.
+  //
+  // Reloading is the advice because it is the actual fix for the common cause:
+  // a page left open across an upgrade, where the gateway has moved on to a
+  // newer answer shape and this script is still the old one, reading a field
+  // that is no longer there.
+  console.error('the console failed while handling an answer', failure)
+  return 'Something went wrong in the console. Reload the page and try again.'
 }
+

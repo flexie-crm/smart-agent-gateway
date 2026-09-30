@@ -1,13 +1,16 @@
 import { apiOrigin, currentSession, refreshSession, SESSION_EXPIRED } from './api'
 import { ReconnectingSocket, type SocketMessage } from './reconnecting-socket'
 import { CARD_EVENT, DELEGATION_EVENT, SOCKET_READY_EVENT, TURN_EVENT } from './delegations'
+import { CONTEXT_EVENT } from './context-meter'
+import { TOPIC_EVENT } from './agent-watch'
 
 /**
  * dispatchSocketMessage turns a server push into a window event the chat reacts
  * to (mirroring the SESSION_EXPIRED pattern), so the module singleton here stays
  * free of React while the hook that owns chat state listens. A `delegation`
  * message moves a chip; a `turn` message means a server-initiated turn (a
- * background completion) is streaming, so the chat attaches and hears it.
+ * background completion) is streaming, so the chat attaches and hears it; a
+ * `context` message says how full a conversation is (context-meter.ts).
  *
  * The hub wraps every push in a notification envelope ({type:"notification",
  * payload:<the real message>}), so the message that carries its own type is one
@@ -24,6 +27,14 @@ export function dispatchSocketMessage(message: SocketMessage): void {
     window.dispatchEvent(new CustomEvent(TURN_EVENT, { detail: inner.payload }))
   } else if (inner.type === 'card' && inner.payload) {
     window.dispatchEvent(new CustomEvent(CARD_EVENT, { detail: inner.payload }))
+  } else if (inner.type === 'context' && inner.payload) {
+    // How full a conversation is, after every step and around a compaction.
+    window.dispatchEvent(new CustomEvent(CONTEXT_EVENT, { detail: inner.payload }))
+  } else if (message.type === 'topic' && typeof message.topic === 'string') {
+    // Something on a channel this tab joined: an agent somebody has open
+    // (agent-watch.ts). Not wrapped, because a topic is pushed to whoever
+    // joined it rather than to a person.
+    window.dispatchEvent(new CustomEvent(TOPIC_EVENT, { detail: { topic: message.topic, payload: message.payload } }))
   }
 }
 
@@ -71,4 +82,17 @@ export function connect(): void {
 /** disconnect closes the socket and stops reconnecting (on sign-out). */
 export function disconnect(): void {
   socket.stop()
+}
+
+/**
+ * watch joins a channel for as long as something is open on it, and leave
+ * gives it up. The server sends a channel's messages only to sockets that
+ * joined it, so an agent nobody has open costs nothing on the wire.
+ */
+export function watch(topic: string): void {
+  socket.subscribe(topic)
+}
+
+export function leave(topic: string): void {
+  socket.unsubscribe(topic)
 }

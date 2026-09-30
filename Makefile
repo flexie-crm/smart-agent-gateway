@@ -126,11 +126,78 @@ endif
 # survives as the end of a direction, whether a refusal parses, whether a
 # dial-back finds its ticket.
 #
+# The browser the assistant drives, supervised for real.
+#
+# The unit tests cover the supervisor's own reasoning and start nothing. This
+# starts the real headless browser, waits for it to answer, asks twice, stops
+# it, and counts what is left of it. Two of the three bugs found building it
+# were invisible to everything else: a readiness probe that waited for a socket
+# close the browser never performs, and a `wait` with no bound that turned a
+# browser which would not die into an application that would not quit.
+#
+# SAG_BROWSER_PATH says which browser to test against. The product finds its own
+# (it downloads one), but a gate must not depend on having done that, and a test
+# that fetches a hundred megabytes before it can start is a test people stop
+# running. So it is given here, and the gate REFUSES to run without one rather
+# than skipping: a gate that passes because it skipped is how three tests in this
+# repository asserted a name that had been renamed and stayed green for weeks.
+.PHONY: browser-e2e
+browser-e2e: ## The browser end to end: a real headless browser, started, answered and stopped
+	@if [ -z "$$SAG_BROWSER_PATH" ]; then \
+		echo "SAG_BROWSER_PATH is not set, so the browser gate did not run."; \
+		echo "Point it at a chrome-headless-shell binary and run again."; \
+		exit 1; \
+	fi
+	cd desktop && cargo test -p sag-desktop browser:: -- --nocapture
+	cd desktop && cargo test -p sag-desktop --test browser_live -- --test-threads=1 --nocapture
+	@# Fetching it. The failure paths run always (a repository that never
+	@# answers, one that serves the wrong bytes, a version nobody published);
+	@# the hundred megabyte download that proves the whole path is behind
+	@# SAG_BROWSER_DOWNLOAD, because a gate that reaches the internet on every
+	@# run is a gate people stop running.
+	cd desktop && cargo test -p sag-desktop --test browser_download -- --test-threads=1 --nocapture
+	@# And Playwright's script, in our browser, answering about a real page.
+	@# The unit tests assert the bundle is what we build against; this one
+	@# constructs it, which is a different claim and the one that matters.
+	cd desktop && cargo test -p sag-desktop --test browser_inject -- --test-threads=1 --nocapture
+	@# And the tools themselves, every action and every refusal, driven through
+	@# the dispatcher the link calls. The refusals matter as much as the
+	@# successes: a browser tool that quietly clicks the wrong thing is worse
+	@# than one that says no.
+	cd desktop && cargo test -p sag-desktop --test browser_tools -- --test-threads=1 --nocapture
+	@# The eleven actions beyond the first nine. Its own file because they need
+	@# a real web server (a file:// page fetches nothing), a real file on disk
+	@# to upload, and a page that takes its time.
+	cd desktop && cargo test -p sag-desktop --test browser_more -- --test-threads=1 --nocapture
+
 # Outside `make ci` for the reason `make node-ci` is: it needs a Rust toolchain.
 .PHONY: link-e2e
 link-e2e: ## The machine link end to end: the real Rust client against the real server
 	cd desktop && cargo build -p sag-desktop --example link_client
 	cd orchestrator && SAG_LINK_E2E=1 go test ./internal/link/ -count=1 -v -timeout 600s
+	@# The browser tools, from the GATEWAY's side. Everything else that tests
+	@# them runs inside the Rust client and proves nothing about the journey:
+	@# the `null` for an optional list that shipped broken was invisible to both
+	@# halves and visible only in traffic between them. Needs a browser.
+	@if [ -z "$$SAG_BROWSER_PATH" ]; then \
+		echo "SAG_BROWSER_PATH is not set, so the browser half of the link gate did not run."; \
+		echo "It is the only thing that proves a browser tool call survives the wire."; \
+		exit 1; \
+	fi
+	@# The same real client, driven by the layer above it: real agents resolved
+	@# the way the product resolves them, colliding on one skill nobody has yet.
+	@# It needs a database as well, so it says so rather than skipping quietly.
+	@if [ -z "$$SAG_TEST_DSN" ]; then \
+		echo "SAG_TEST_DSN is not set, so the fleet collision gate did not run."; \
+		echo "It is the one that proves a fleet installs a skill once. Set it and run again."; \
+		exit 1; \
+	fi
+	cd orchestrator && SAG_LINK_E2E=1 go test ./internal/app/ -count=1 -v -timeout 600s \
+		-run 'TestAFleetOfAgentsPutsOneSkillOnTheComputerOnce|TestPublishingAnEditRunsTheEditedScript'
+	@# And both ways of running out of patience, against the same real client:
+	@# the package landed and the leader is slow, and the package did not land.
+	cd orchestrator && SAG_LINK_E2E=1 go test ./internal/tools/skills/ -count=1 -v -timeout 600s \
+		-run 'AgainstTheRealApplication'
 
 # ---------------------------------------------------------------- the products
 #
@@ -259,7 +326,7 @@ fmt-check: ## Fail when sources are not formatted
 # "Code generated ... DO NOT EDIT." line by itself.
 .PHONY: vet
 vet: ## Run go vet
-	@cd $(ORCHESTRATOR) && out=$$(go vet ./... 2>&1 | grep -v '^lib/' || true); \
+	@cd $(ORCHESTRATOR) && out=$$(go vet ./... 2>&1 | grep -v '^lib[/\]' || true); \
 	if [ -n "$$out" ]; then echo "$$out"; exit 1; fi
 
 .PHONY: lint
@@ -268,7 +335,8 @@ lint: $(LINT_BIN) ## Run the linters
 	# reason. Installing it pins what the binary is BUILT with; running it pins
 	# which standard library it READS. Without this the linter takes whatever Go
 	# is on the machine, so a Homebrew upgrade to a Go newer than go.mod's turns
-	# every run into a panic from inside the type checker:
+	# every run into a panic from inside the type checker. The one this was
+	# written for, when the machine had 1.27 and go.mod still said 1.26:
 	#
 	#   panic: file requires newer Go version go1.27 (application built with go1.26)
 	#
@@ -296,13 +364,27 @@ test-db-up: ## Start the databases the suite runs against (ports 3307, 5433 and 
 test-db-down: ## Stop the test database and throw its data away
 	cd $(ORCHESTRATOR) && docker compose -f docker-compose.test-db.yml down -v
 
+# ONE PACKAGE AT A TIME, and it is not the brake it looks like.
+#
+# Several suites here are not unit tests: they migrate a real database and
+# then use it. Run side by side they contend for one server, and the cost is
+# not only time: internal/tools/query failed with "Unknown database" while
+# creating its own tables, and passed alone in 50 seconds where the parallel
+# run took 530. Those suites share a hardcoded database name between their
+# tests, which is fine one after another and is not written for anything else.
+#
+# What -p 1 actually costs is small, because contention was doubling every
+# package: measured on the same machine, schemasync went 538s to 248s and api
+# 570s to 207s, and the whole suite serially is 15.3 minutes against a
+# parallel run whose slowest single package alone was 9. Six minutes of wall
+# clock for a suite that does not invent failures.
 .PHONY: test
 test: ## Run the full test suite
-	cd $(ORCHESTRATOR) && go test ./... -count=1 -timeout 30m
+	cd $(ORCHESTRATOR) && go test -p 1 ./... -count=1 -timeout 45m
 
 .PHONY: test-race
 test-race: ## Run the suite under the race detector
-	cd $(ORCHESTRATOR) && go test ./... -count=1 -race -timeout 45m
+	cd $(ORCHESTRATOR) && go test -p 1 ./... -count=1 -race -timeout 60m
 
 .PHONY: test-live
 test-live: ## Call the real vendor APIs (needs SAG_LIVE_*_KEY; costs money, not run by CI)

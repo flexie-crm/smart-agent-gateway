@@ -1,6 +1,10 @@
 package licences
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -130,4 +134,120 @@ func TestTheListIsStable(t *testing.T) {
 	if len(first) != len(second) {
 		t.Fatalf("the list grew between reads: %d then %d", len(first), len(second))
 	}
+}
+
+// The browser is listed, with the notice its own build ships.
+//
+// BSD-3-Clause asks for one thing in return for shipping a binary: reproduce
+// the notice in the materials that go with it. The desktop editions carry a
+// headless Chromium and run it as a separate program, so that obligation is
+// ours, and this screen is the only place it can be discharged.
+//
+// The assertions are about the SHAPE of the notice rather than its length,
+// because a file that was truncated on the way into the repository would still
+// be megabytes long. Chromium's own grant has to be there, and so do the
+// bundled third-party notices that follow it: the file is Chromium plus a few
+// hundred libraries, and copying only the first section would be a notice that
+// omits almost everything it is a notice for.
+func TestTheBrowserIsListedWithTheNoticeItShips(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range all {
+		if !strings.Contains(c.Name, "Headless Shell") {
+			continue
+		}
+		if c.Licence != "BSD-3-Clause" {
+			t.Errorf("the browser is listed as %q", c.Licence)
+		}
+		if !strings.Contains(c.Text, "The Chromium Project") {
+			t.Error("Chromium's own notice is not there")
+		}
+		if !strings.Contains(c.Text, "Redistribution and use in source and binary forms") {
+			t.Error("the grant we are relying on to ship it is not in the text")
+		}
+		// The bundled notices. Two that are far apart in the file, so a copy
+		// that stopped early fails rather than passing on its first section.
+		if !strings.Contains(c.Text, "@bufbuild/protobuf") {
+			t.Error("the bundled third-party notices are missing or truncated")
+		}
+		if c.Version != browserVersion {
+			t.Errorf("listed as version %q, and the notice is for %q", c.Version, browserVersion)
+		}
+		return
+	}
+	t.Fatal("the browser is not listed, and the desktop editions carry it")
+}
+
+// The version written beside the notice is the version that is pinned.
+//
+// The pin lives in desktop/browser.json and cannot be embedded here: it is
+// outside this module, and go:embed does not reach out of one. So the constant
+// is a copy, and this is what makes a copy safe. Without it, bumping the pin
+// and forgetting this file would publish the notices of a build nobody runs,
+// which is the kind of wrong that looks right on the screen.
+//
+// The same arrangement, and the same reason, as the machine tools' agreement
+// with desktop/link-tools.json.
+func TestTheBrowserVersionMatchesThePin(t *testing.T) {
+	_, here, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot find this test's own path")
+	}
+	root := filepath.Join(filepath.Dir(here), "..", "..", "..")
+	raw, err := os.ReadFile(filepath.Join(root, "desktop", "browser.json"))
+	if err != nil {
+		t.Fatalf("the browser pin is missing: %v", err)
+	}
+	var pin struct {
+		Chrome string `json:"chrome"`
+	}
+	if err := json.Unmarshal(raw, &pin); err != nil {
+		t.Fatalf("the browser pin is not readable: %v", err)
+	}
+	if pin.Chrome == "" {
+		t.Fatal("the pin names no browser version")
+	}
+	if pin.Chrome != browserVersion {
+		t.Errorf("desktop/browser.json pins %q and this package says %q: the notice on the "+
+			"open source screen would be for a build nobody is running",
+			pin.Chrome, browserVersion)
+	}
+}
+
+// Playwright is listed, with the attribution its own NOTICE carries.
+//
+// Apache 2.0 section 4(d) is the reason this is not just a licence file: a
+// redistribution has to reproduce the attribution in the work's NOTICE, and
+// Playwright's says two things, not one. It is Microsoft's, AND it contains
+// code derived from Puppeteer. Shipping only the licence text would credit the
+// first and silently drop the second.
+//
+// It is compiled into the desktop applications rather than downloaded, which is
+// what makes this our obligation: it goes out inside something we distribute.
+func TestPlaywrightIsListedWithTheAttributionItsNoticeCarries(t *testing.T) {
+	all, err := All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range all {
+		if c.Name != "Playwright" {
+			continue
+		}
+		if c.Licence != "Apache-2.0" {
+			t.Errorf("Playwright is listed as %q", c.Licence)
+		}
+		if !strings.Contains(c.Text, "Copyright (c) Microsoft Corporation") {
+			t.Error("the notice's own attribution is not there")
+		}
+		if !strings.Contains(c.Text, "Puppeteer") {
+			t.Error("the second upstream its notice credits is missing, which is what 4(d) asks for")
+		}
+		if !strings.Contains(c.Text, "Apache License") {
+			t.Error("the licence text is not there in full")
+		}
+		return
+	}
+	t.Fatal("Playwright is not listed, and the desktop applications carry its script")
 }

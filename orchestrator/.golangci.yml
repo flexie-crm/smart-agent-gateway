@@ -1,5 +1,17 @@
 version: "2"
 
+# Show EVERY finding, always.
+#
+# The defaults hide the 4th and later occurrence of the same message
+# (max-same-issues: 3) and cap a linter at 50. That is fine for a wall of new
+# warnings and actively misleading for a codebase kept at zero: a run once
+# printed two problems while twenty-three existed, and the two hidden path reads
+# and one hidden request were only found by asking for them without the cap. A
+# report that quietly leaves things out is a report somebody acts on.
+issues:
+  max-same-issues: 0
+  max-issues-per-linter: 0
+
 linters:
   default: standard
   enable:
@@ -34,6 +46,19 @@ linters:
       - path: internal/testdb/
         linters:
           - gosec
+      # The public website (internal/repo) serves one page and a few files. Two
+      # gosec rules describe what it IS rather than a fault in it, so they are
+      # answered here instead of with a comment in a file about a landing page:
+      #   G203, raw HTML: the page inlines two SVGs that are //go:embed assets
+      #         from this repository. Nothing from a request reaches them.
+      #   G705, request data in the response: /v1/ip exists to tell a caller the
+      #         address we saw them come from, which is a request value going
+      #         back out by definition. clientIP refuses anything net.ParseIP
+      #         will not read, and it is served as text/plain with nosniff.
+      - path: internal/repo/
+        linters:
+          - gosec
+        text: "G203|G705"
       # sqlclosecheck assumes a prepared statement is used once and closed.
       # This package is the statement CACHE: it holds them for the life of the
       # process (that is the point) and closes them in Close(). The linter's

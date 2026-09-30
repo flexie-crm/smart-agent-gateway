@@ -9,6 +9,7 @@ import { NativeSelect } from '@/components/ui/native-select'
 import { describeError, useFormErrors } from '@/lib/form'
 import { useNotify } from '@/lib/notify'
 import { api, useResource } from '@/lib/resources'
+import { CopyLine } from '@/components/ui/copy-line'
 import type { MCPServer } from '@/lib/resources'
 import { listen } from '@/lib/ws'
 import type { SocketMessage } from '@/lib/reconnecting-socket'
@@ -46,7 +47,12 @@ export function connectionOutcome(message: SocketMessage): ConnectionOutcome | n
  * authenticates, and whether the last sync agreed with the remote.
  */
 export function MCPServers() {
-  const { data: servers, reload } = useResource(() => api.mcpServers.list())
+  const { data: screen, reload } = useResource(() => api.mcpServers.list())
+  const servers = screen?.servers ?? null
+  // Where a service sends somebody back after they sign in. One address for
+  // the whole deployment, so it belongs to the screen and is handed to the
+  // dialog rather than fetched again.
+  const callbackURL = screen?.callback_url ?? ""
   const [editing, setEditing] = useState<{ server?: MCPServer } | null>(null)
   const [consent, setConsent] = useState<{ server: MCPServer; url: string } | null>(null)
   const [busyRow, setBusyRow] = useState(0)
@@ -255,6 +261,7 @@ export function MCPServers() {
       {editing && (
         <MCPServerForm
           server={editing.server}
+          callbackURL={callbackURL}
           onClose={() => setEditing(null)}
           onSaved={async () => {
             setEditing(null)
@@ -268,10 +275,12 @@ export function MCPServers() {
 
 function MCPServerForm({
   server,
+  callbackURL,
   onClose,
   onSaved,
 }: {
   server?: MCPServer
+  callbackURL: string
   onClose: () => void
   onSaved: () => Promise<void>
 }) {
@@ -389,6 +398,18 @@ function MCPServerForm({
 
       {authType === 'oauth' && (
         <>
+          {/* The one field at the far end that cannot be guessed, and the only
+              reason somebody had to read our source to register an
+              application. OAuth matches a redirect URI character for
+              character, so it is shown to be copied rather than typed. */}
+          {callbackURL && (
+            <Field
+              label="Redirect URI"
+              hint="Where the service sends the person back after they sign in. Paste this into the application you create at the service, exactly as it is: it is matched character for character, so a missing scheme or an extra slash is refused at the consent screen and nowhere earlier. A service that registers applications by itself needs none of this."
+            >
+              <CopyLine value={callbackURL} />
+            </Field>
+          )}
           <Field
             label="Client ID"
             hint="Leave empty if the service registers applications itself, which most do. If it does not, create the application on its side and paste the id here."

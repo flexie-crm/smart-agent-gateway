@@ -48,7 +48,38 @@ func Versions() map[string]int {
 	// is asked to run, so it belongs in the one table rather than carrying a
 	// second number of its own somewhere else.
 	speaks[CurrentTimeName] = versionOf(CurrentTimeName)
+	// And the two a skill is run with. They are link calls the GATEWAY makes,
+	// never abilities a model is offered: the model asks to run a script, and
+	// whether the package had to be sent down first is not its business. They
+	// are in this table for the reason the clock is: one place where a number
+	// lives, so two of them cannot drift into disagreeing.
+	speaks[SkillInstallName] = versionOf(SkillInstallName)
+	speaks[SkillRunName] = versionOf(SkillRunName)
 	return speaks
+}
+
+// The two calls that put a skill on the person's computer and run one of its
+// scripts. Declared here beside every other thing an application is asked to
+// do; what they MEAN is in internal/tools/skills.
+const (
+	SkillInstallName = "skill_install"
+	SkillRunName     = "skill_run"
+)
+
+// Speaks reports whether this person's computer can run a link call of this
+// name, at the version this gateway speaks.
+//
+// Offers answers the same question for the tools a model is offered; this
+// answers it for a call the gateway makes on its own. Same rule either way: an
+// application a release behind is simply not asked, so nothing fails in the
+// middle of a conversation.
+func Speaks(machines Machines, workspaceID, userID int64, deviceID, name string) bool {
+	if machines == nil || deviceID == "" {
+		return false
+	}
+	runs := machines.Runs(workspaceID, userID, deviceID)
+	version, known := runs[name]
+	return known && version == versionOf(name)
 }
 
 // VersionOf is which shape of a tool's arguments this gateway speaks, for the
@@ -74,6 +105,11 @@ func versionOf(name string) int {
 		// Named here rather than imported, because the clock's package imports
 		// this one: it asks the computer through Machines.
 		return 1
+	case SkillInstallName, SkillRunName:
+		// Named here for the same reason, and the same number for both: they
+		// are one feature and an application that speaks half of it can do
+		// nothing useful with the half it has.
+		return 1
 	case TerminalName:
 		return terminalVersion
 	case ReadFileName:
@@ -86,6 +122,8 @@ func versionOf(name string) int {
 		return findFilesVersion
 	case SearchFileName:
 		return searchFileVersion
+	case BrowserName:
+		return browserVersion
 	default:
 		return 0
 	}

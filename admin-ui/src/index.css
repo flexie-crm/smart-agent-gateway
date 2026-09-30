@@ -94,6 +94,18 @@
   --sidebar-accent-foreground: oklch(0.25 0.008 255);
   --sidebar-border: oklch(0.912 0.004 255);
   --sidebar-ring: oklch(0.708 0 0);
+  /* The eight colours a code file is read in, copied from the chat (its
+   * index.css) so the two surfaces agree. The theme in lib/code-theme.ts is a
+   * map from token kind to these variables and nothing else, which is what lets
+   * one render follow the console's theme instead of being painted twice. */
+  --code-comment: oklch(0.62 0.02 250);
+  --code-keyword: oklch(0.5 0.19 300);
+  --code-string: oklch(0.52 0.15 145);
+  --code-number: oklch(0.55 0.16 45);
+  --code-function: oklch(0.52 0.17 255);
+  --code-name: oklch(0.55 0.17 20);
+  --code-operator: oklch(0.45 0.05 250);
+
 }
 
 /* Night.
@@ -163,6 +175,16 @@
   --sidebar-ring: oklch(0.6 0.05 255);
 
 
+  /* The same eight, lifted for a dark background and pulled back in chroma: a
+   * saturated colour on a dark ground shouts. */
+  --code-comment: oklch(0.6 0.02 250);
+  --code-keyword: oklch(0.75 0.12 300);
+  --code-string: oklch(0.76 0.11 145);
+  --code-number: oklch(0.78 0.1 60);
+  --code-function: oklch(0.75 0.1 250);
+  --code-name: oklch(0.74 0.11 25);
+  --code-operator: oklch(0.7 0.025 250);
+
 }
 
 @layer base {
@@ -199,6 +221,11 @@
   color: var(--foreground);
 }
 .prose-sag > * + * { margin-top: 0.75rem; }
+/* The first thing in a document owns no space above it: the wrapper's padding
+   already put it there. A heading carries 1.5rem of its own, so a document that
+   OPENS with one (every SKILL.md does) was drawn 1.5rem below where its
+   container said it starts, which reads as a pane with the wrong padding. */
+.prose-sag > :first-child { margin-top: 0; }
 .prose-sag h1, .prose-sag h2, .prose-sag h3, .prose-sag h4 {
   font-weight: 600;
   line-height: 1.3;

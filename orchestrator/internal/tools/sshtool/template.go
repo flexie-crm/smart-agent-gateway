@@ -53,9 +53,12 @@ func (t *sshTemplate) Close() {
 }
 
 func (sshTemplate) Name() string  { return TemplateName }
-func (sshTemplate) Title() string { return "Remote Server" }
+func (sshTemplate) Title() string { return "Connect to SSH Server" }
 func (sshTemplate) Description() string {
-	return "Work on a remote server you connect to, within the commands you permit."
+	return "Connect the assistant to one server so it can run commands there and read what they " +
+		"print. The sign-in details are stored encrypted on the tool and are never shown to the " +
+		"assistant. Every command is checked against the lists you set before it runs, so it can " +
+		"run only what you have allowed."
 }
 
 // Variants is the one kind of SSH there is. Several servers means several tools,
@@ -234,6 +237,12 @@ func (sshTemplate) Params() []template.Param {
 
 // DefaultGuide is the guide the form prefills, which an administrator refines
 // for their server.
+func (sshTemplate) DefaultDescription() string {
+	return "Run commands on this server and read back what they printed. Say what to do in " +
+		"command, and set operation to choose the kind of work. Read this tool's guide for the " +
+		"operations and the commands it allows."
+}
+
 func (sshTemplate) DefaultGuide() string {
 	return "Send a command. Read what comes back. If it says running, decide one of three things.\n\n" +
 		"Most commands finish, and that is the whole call: you get the output and the exit code.\n\n" +
@@ -294,7 +303,7 @@ func (t sshTemplate) Build(in template.Input) (template.Instance, error) {
 			Name:         TemplateName + "_" + alias,
 			FriendlyName: display,
 			Description:  description,
-			InputSchema:  t.inputSchema(in.ParamDescriptions),
+			InputSchema:  template.InputSchema(t.Params(), in.ParamDescriptions),
 			Kind:         tool.KindCustom,
 			// A tool that runs commands on a machine is held at the top of the
 			// scale: what a command does is the command's business, not ours.
@@ -309,26 +318,6 @@ func (t sshTemplate) Build(in template.Input) (template.Instance, error) {
 // administrator's description for each where one was given. The identities (key,
 // type, required) are always the template's, and operation is constrained to the
 // operations this build supports, so the model cannot invent one.
-func (t sshTemplate) inputSchema(descriptions map[string]string) json.RawMessage {
-	properties := map[string]any{}
-	var required []string
-	for _, p := range t.Params() {
-		desc := p.Description
-		if override, ok := descriptions[p.Key]; ok && strings.TrimSpace(override) != "" {
-			desc = override
-		}
-		properties[p.Key] = map[string]any{"type": p.Type, "description": desc}
-		if p.Required {
-			required = append(required, p.Key)
-		}
-	}
-	schema := map[string]any{"type": "object", "properties": properties}
-	if len(required) > 0 {
-		schema["required"] = required
-	}
-	raw, _ := json.Marshal(schema)
-	return raw
-}
 
 // Config builds the stored config from the flat form settings: dotted keys
 // (auth.method, limits.idle_minutes) expand into objects, the variant is
@@ -367,7 +356,7 @@ func (t *sshTemplate) Bind(config json.RawMessage, owner tool.Owner) (tool.Handl
 	if err != nil {
 		return nil, err
 	}
-	if truthy(cfg.ThroughChat) && t.machines == nil {
+	if cfg.ThroughChat && t.machines == nil {
 		return nil, fmt.Errorf("this installation cannot reach a server through the chat application")
 	}
 	h := &handler{cfg: cfg, pool: t.pool, owner: owner, sessions: t.sessions, machines: t.machines}
@@ -387,7 +376,7 @@ func (sshTemplate) Test(ctx context.Context, config json.RawMessage) error {
 	// administrator filling in this form. The settings are still checked (they
 	// parsed), and the connection is answered on the first call, in words that
 	// name the reason.
-	if truthy(cfg.ThroughChat) {
+	if cfg.ThroughChat {
 		return nil
 	}
 	client, err := dial(ctx, cfg, refuseVerification, 0)

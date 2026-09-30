@@ -119,6 +119,14 @@ const MemoryToolName = "remember"
 // Agent is a configured assistant: what it is told, what it may use, and how
 // it thinks. Every field is optional except the key and the name, because an
 // agent is an override of the defaults, not a replacement for them.
+// DefaultAgentName is what the main agent is called when a workspace has no
+// agent row of its own to name it.
+//
+// It exists so a record of who did something can never be blank: an agent
+// writing into a knowledge base is the author of that write, and a workspace
+// that has not configured its Gateway still has one running.
+const DefaultAgentName = "Gateway"
+
 type Agent struct {
 	ID           int64  `json:"id"`
 	WorkspaceID  int64  `json:"workspace_id"`
@@ -127,6 +135,11 @@ type Agent struct {
 	Instructions string `json:"instructions,omitempty"`
 	ModelID      *int64 `json:"model_id,omitempty"`
 	Reasoning    bool   `json:"reasoning"`
+	// Who configured it, and who last changed it. Both, because an agent IS
+	// edited (see model.Actor).
+	Authored
+	Edited
+
 	// Settings are chosen values for what this agent's vendor declares, most
 	// notably how hard to think.
 	//
@@ -172,6 +185,17 @@ type Agent struct {
 	// long-term memory, which is the normal state. It must be an unlocked brain,
 	// enforced where it is set.
 	MemoryBrainID *int64 `json:"memory_brain_id,omitempty"`
+
+	// Skills lists the procedures this agent may use (the ids of the assigned
+	// skills). A nil slice means no opinion and leaves what is stored alone; an
+	// empty slice clears the lot.
+	//
+	// Empty means NONE, the rule the brains follow: the skill tools are scoped
+	// to exactly this set, so a skill nobody assigned is one no agent can reach.
+	// Which is the honest default for a package of instructions and scripts
+	// somebody imported: it becomes available when an administrator says so, not
+	// because it is in the workspace.
+	Skills []int64 `json:"skills"`
 
 	// ApprovalTTL is how long this agent's confirmations stay answerable. Nil
 	// means it has no opinion and inherits the deployment's.
@@ -253,6 +277,16 @@ type Tool struct {
 	// in the workspace, so a fresh workspace works; adding the first grant is
 	// what turns the list exclusive.
 	Grants []int64 `json:"grants"`
+	// Skills are the written procedures that document THIS tool: an API's
+	// paths, what its error codes mean, the order its endpoints go in. They are
+	// not in any prompt, unlike an agent's skills. They are named in the tool's
+	// own guide, and an agent that holds the tool can read them, because
+	// whoever granted the tool granted the instructions for it.
+	//
+	// Ids, not the skills themselves, for the reason the agent's are ids: a
+	// form prefills a picker with them, and what a turn needs (the handle, the
+	// name) is read through the skill store when the guide is built.
+	Skills []int64 `json:"skills"`
 
 	// The projection of a remote MCP tool (kind 'mcp'): which connection
 	// offers it, what the remote calls it, a hash of its definition so drift
@@ -263,6 +297,11 @@ type Tool struct {
 	DefinitionHash      string     `json:"definition_hash,omitempty"`
 	RemoteMissing       bool       `json:"remote_missing,omitempty"`
 	DefinitionChangedAt *time.Time `json:"definition_changed_at,omitempty"`
+	// Who made it and who last changed it (model.Actor): the ids go to NULL
+	// when the person is deleted and the names are frozen, so the record reads
+	// afterwards.
+	Authored
+	Edited
 }
 
 // Workflow statuses. Only a published workflow can shape a turn: a draft is
@@ -274,13 +313,17 @@ const (
 )
 
 type Workflow struct {
-	ID          int64     `json:"id"`
-	WorkspaceID int64     `json:"workspace_id"`
-	Name        string    `json:"name"`
-	Status      string    `json:"status"`
-	CreatedBy   int64     `json:"created_by"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          int64  `json:"id"`
+	WorkspaceID int64  `json:"workspace_id"`
+	Name        string `json:"name"`
+	Status      string `json:"status"`
+	// Who made it and who last changed it. `created_by` was here before this
+	// existed, as a bare id with no foreign key and no name: deleting the person
+	// left a row pointing at nothing. It is the same column, repaired.
+	Authored
+	Edited
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // WorkflowVersion is an immutable definition. Editing a published workflow
@@ -293,8 +336,10 @@ type WorkflowVersion struct {
 	Version     int             `json:"version"`
 	Definition  json.RawMessage `json:"definition"`
 	IsPublished bool            `json:"is_published"`
-	CreatedBy   int64           `json:"created_by"`
-	CreatedAt   time.Time       `json:"created_at"`
+	// Who wrote this version. No Edited: a version is immutable, which is the
+	// whole reason editing a workflow makes a new one.
+	Authored
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Match types: the dimensions a workflow can be conditioned on.
@@ -396,7 +441,11 @@ type Profile struct {
 	// AgentID and WorkflowVersionID record what shaped this turn. They are
 	// written onto the session, so an answer can always be traced back to the
 	// configuration that produced it.
-	AgentID           *int64
+	AgentID *int64
+	// AgentName is what to call the agent this turn resolved to. It is here
+	// because a turn's writes are attributed to whoever made them, and for an
+	// agent that is a name rather than a user id (see model.Actor).
+	AgentName         string
 	WorkflowVersionID *int64
 
 	// Brains are the ids of the knowledge bases this turn's agent may reach, and
@@ -406,6 +455,11 @@ type Profile struct {
 	// no turn can touch.
 	Brains        []int64
 	MemoryBrainID *int64
+
+	// Skills are the ids of the skills this turn's agent may use. Resolved from
+	// the agent and used the same way Brains are: the skill tools are bound over
+	// exactly these ids, so a skill nobody assigned is one no turn can reach.
+	Skills []int64
 }
 
 // Attachment is a file somebody uploaded, before or alongside the message that

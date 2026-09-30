@@ -137,10 +137,16 @@ const WAITING_STAYS: std::time::Duration = std::time::Duration::from_millis(1500
 /// window twice, differing only in what they load. Written once, and never
 /// without `visible(false)`, which is the whole of how the white frame is
 /// avoided (sag_desktop::screens).
+///
+/// `over` is the window this one is replacing, and it is what keeps "the same
+/// window twice" true for the person looking at it: the second is put exactly
+/// where the first is before either is shown. Without it the system places them
+/// independently, and the end of startup is the application jumping sideways.
 fn a_window(
     app: &tauri::AppHandle,
     label: &str,
     url: WebviewUrl,
+    over: Option<&WebviewWindow>,
 ) -> tauri::Result<tauri::WebviewWindow> {
     let window = WebviewWindowBuilder::new(app, label, url)
         .title("SAG Personal")
@@ -175,6 +181,12 @@ fn a_window(
         .build()?;
     // On the screen at full size and drawing itself, with none of it visible:
     // the one arrangement in which a window paints before anybody sees it.
+    // Placed before it is shown, which on this platform is the same instant:
+    // draws_unseen shows a window on Windows, so a position set afterwards would
+    // be a visible jump rather than a placement.
+    if let Some(previous) = over {
+        screens::opens_over(&window, previous);
+    }
     screens::draws_unseen(&window);
     Ok(window)
 }
@@ -228,7 +240,19 @@ fn main() {
             // that remember things: which installation this is, and which
             // folder the assistant may work in.
             if let Ok(dir) = gateway::state_dir() {
-                sag_desktop::workspace::use_state_dir(dir);
+                sag_desktop::workspace::use_state_dir(dir.clone());
+                // And the browser the assistant drives, FETCHED here and
+                // started later. Nobody is told: a hundred and eighty megabyte
+                // download is not something to put in front of somebody
+                // opening a chat window, and it has to happen in the
+                // background or the first tool call would wait minutes for it.
+                //
+                // Starting it is the first browser tool call's job. Measured:
+                // a running browser costs 83 MB and three processes, and a
+                // cold start is 421 ms. Most sessions never open a web page,
+                // so starting it here would spend the memory on everybody to
+                // save four hundred milliseconds for the few who need it.
+                sag_desktop::browser::bring_up(dir);
             }
             // And where the SETTINGS file is, which is somewhere else: the store
             // plugin writes under the identifier, everything else here is under
@@ -271,6 +295,9 @@ fn main() {
                     )
                     .into(),
                 ),
+                // The first one. There is nothing yet to open over, so the
+                // system places it, and everything after it follows this one.
+                None,
             )?;
 
             let resources = app
@@ -306,9 +333,15 @@ fn main() {
                             // loads unseen and the two swap, which is also what
                             // holds the waiting screen on the screen long enough
                             // to have been read.
-                            if let Err(err) =
-                                a_window(&opening, screens::CHAT, WebviewUrl::External(parsed))
-                            {
+                            // Over the waiting screen, exactly: same place,
+                            // same size, so the swap is a page changing rather
+                            // than a window moving.
+                            if let Err(err) = a_window(
+                                &opening,
+                                screens::CHAT,
+                                WebviewUrl::External(parsed),
+                                Some(&window),
+                            ) {
                                 show_failure(
                                     &window,
                                     &format!("This window could not be opened: {err}"),
@@ -331,7 +364,22 @@ fn main() {
         // One application, so there is nothing to count: when this window goes,
         // the gateway goes with it.
         if let RunEvent::Exit = event {
+            // The browser first, because it is the one with no reason to
+            // outlive us: the gateway drains work, a browser is holding a
+            // profile directory and a handful of child processes, and leaving
+            // them means the next start finds the directory locked.
+            tauri::async_runtime::block_on(sag_desktop::browser::supervise::stop());
             gateway::stop_running();
+            // And only then a version that was downloaded and held, which is
+            // how Windows updates at all (sag_desktop::update). The order is
+            // the whole of it: the installer overwrites sag.exe, and Windows
+            // will not write a running image, so a gateway still up is an
+            // update that fails on the one file that matters.
+            //
+            // stop_running() does not return until the gateway is gone: it asks
+            // through the state directory and waits, and insists after thirty
+            // seconds. On macOS nothing is ever held and this does nothing.
+            sag_desktop::update::install_pending();
         }
     });
 }
@@ -427,7 +475,10 @@ mod permission_contract {
                 (!name.is_empty() && !name.starts_with("//")).then(|| name.to_string())
             })
             .collect();
-        assert!(!registered.is_empty(), "no commands were read from the handler list");
+        assert!(
+            !registered.is_empty(),
+            "no commands were read from the handler list"
+        );
 
         let permissions = super::PERMISSION_FILES.concat();
         let unpermitted: Vec<&String> = registered
